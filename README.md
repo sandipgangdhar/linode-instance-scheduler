@@ -1114,10 +1114,6 @@ detail page for the same schedule/savings view plus membership management. It's 
 over the REST API in §8.8 — every action it takes is one of that API's own endpoints, nothing the
 dashboard can do that the CLI/API couldn't already do directly.
 
-**Not yet live-verified**: like the OAuth flow itself (§8.8), the dashboard's login round-trip
-hasn't been exercised against a real, registered Linode OAuth Client — verify this works with a
-real login before relying on it for day-to-day use.
-
 ---
 
 ## 9. Costs
