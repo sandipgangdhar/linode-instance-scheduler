@@ -1,0 +1,6 @@
+linode_api4>=5.0,<6.0
+python-dotenv>=1.0,<2.0
+requests>=2.30,<3.0
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+paramiko>=5.0,<6.0
