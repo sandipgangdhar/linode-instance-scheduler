@@ -593,6 +593,7 @@ def api_list_linode_instances(request: Request, user: str = Depends(require_sess
             "onboarded_as": onboarded_by_linode_id.get(inst.id),
         }
         for inst in instances
+        if inst.lke_cluster_id is None
     ]
 
 

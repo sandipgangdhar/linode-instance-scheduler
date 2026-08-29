@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, ApiError, errorWarnings } from '../api/client'
 import {
@@ -11,6 +11,13 @@ import {
   typedConfirmationMatches,
   WarningBanner,
 } from '../components/ui'
+import {
+  buildDdCommand,
+  guessSourceAndDestination,
+  parseLsblkDevices,
+  verifyDdOutput,
+  type LsblkDevice,
+} from '../lib/ddVerify'
 import { useSshCredentials } from '../hooks/useSshCredentials'
 import { useStatusBar } from '../status/StatusBarContext'
 import { PageHeader } from './DashboardLayout'
@@ -27,7 +34,7 @@ type Step =
   | 'setup_incomplete'
   | 'live'
   | 'reconciled'
-const DD_HINT = 'dd if=/dev/sda of=/dev/sdb bs=4M status=progress && sync'
+type ManualPhase = 'lsblk' | 'confirm_devices' | 'run_dd'
 export function MigratePage() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
@@ -37,6 +44,7 @@ export function MigratePage() {
   const instanceId = instanceIdParam ? Number(instanceIdParam) : null
   const force = searchParams.get('force') === '1'
   const migrationKey = `migrate:${name}:${instanceId ?? ''}`
+  const trackedEntry = statusBar.findByKey(migrationKey)
   const returnToThisMigration = () =>
     navigate(
       `/migrate?name=${encodeURIComponent(name)}&instanceId=${instanceId ?? ''}` + (force ? '&force=1' : ''),
@@ -52,8 +60,17 @@ export function MigratePage() {
   const [resolvedInstanceId, setResolvedInstanceId] = useState<number | null>(instanceId)
   const [destVolumeSizeGb, setDestVolumeSizeGb] = useState<number | null>(null)
   const [localDiskSizeMb, setLocalDiskSizeMb] = useState<number | null>(null)
-  const [pastedOutput, setPastedOutput] = useState('')
+  const [manualPhase, setManualPhase] = useState<ManualPhase>('lsblk')
+  const [lsblkOutput, setLsblkOutput] = useState('')
+  const [selectedSource, setSelectedSource] = useState('')
+  const [selectedDest, setSelectedDest] = useState('')
+  const [ddOutput, setDdOutput] = useState('')
   const [confirmName, setConfirmName] = useState('')
+  const [copyState, setCopyState] = useState<{
+    text: string
+    status: 'copied' | 'failed'
+  } | null>(null)
+  const copyResetTimeoutRef = useRef<number | null>(null)
   const [onboardError, setOnboardError] = useState<string | null>(null)
   const [onboardErrorWarnings, setOnboardErrorWarnings] = useState<string[] | null>(null)
   const ssh = useSshCredentials(undefined)
@@ -96,7 +113,11 @@ export function MigratePage() {
     setResolvedInstanceId(instanceId)
     setDestVolumeSizeGb(null)
     setLocalDiskSizeMb(null)
-    setPastedOutput('')
+    setManualPhase('lsblk')
+    setLsblkOutput('')
+    setSelectedSource('')
+    setSelectedDest('')
+    setDdOutput('')
     setConfirmName('')
     setOnboardError(null)
     setOnboardErrorWarnings(null)
@@ -107,7 +128,7 @@ export function MigratePage() {
       setError('No instance name given -- go back to Onboard and try again.')
       return
     }
-    if (statusBar.current?.key === migrationKey) {
+    if (trackedEntry) {
       setStep('live')
       return
     }
@@ -115,9 +136,9 @@ export function MigratePage() {
   }, [name, instanceId])
   useEffect(() => {
     if (step !== 'live') return
-    const current = statusBar.current
-    if (current?.key !== migrationKey || current.kind === 'pending') {
-      if (current?.key === migrationKey) return
+    const current = trackedEntry
+    if (current === null || current.kind === 'pending') {
+      if (current !== null) return
       checkResumability()
       return
     }
@@ -145,9 +166,16 @@ export function MigratePage() {
       () => {
         if (requestedKey === currentKeyRef.current) setStep('reconciled')
       },
-      () => checkResumability(),
+      () => {
+        if (requestedKey !== currentKeyRef.current) return
+        if (current.phase === 'resume') {
+          finishOnboarding()
+          return
+        }
+        checkResumability()
+      },
     )
-  }, [step, statusBar.current])
+  }, [step, trackedEntry])
   const startMigration = async () => {
     if (instanceId === null) return
     const requestedKey = migrationKey
@@ -220,7 +248,6 @@ export function MigratePage() {
           ),
         { onNavigate: returnToThisMigration, key: migrationKey, phase: 'resume' },
       )
-      if (requestedKey !== currentKeyRef.current) return
       if (result.outcome === 'resumed') {
         const resumeNotes: string[] = []
         if (result.previous_attempts_count > 0) {
@@ -240,15 +267,18 @@ export function MigratePage() {
               'boot). A backup was made before editing.',
           )
         }
-        if (resumeNotes.length > 0) setMigrateWarnings((prev) => [...prev, ...resumeNotes])
+        if (resumeNotes.length > 0 && requestedKey === currentKeyRef.current) {
+          setMigrateWarnings((prev) => [...prev, ...resumeNotes])
+        }
         await finishOnboarding(resumeNotes)
-      } else {
-        setError(
-          result.detail ??
-            'The migration itself completed, but recording that locally failed. Check the CLI (`migrate-resume`/`onboard`) to finish.',
-        )
-        setStep('incomplete')
+        return
       }
+      if (requestedKey !== currentKeyRef.current) return
+      setError(
+        result.detail ??
+          'The migration itself completed, but recording that locally failed. Check the CLI (`migrate-resume`/`onboard`) to finish.',
+      )
+      setStep('incomplete')
     } catch (e) {
       if (requestedKey !== currentKeyRef.current) return
       const carried = errorWarnings(e)
@@ -293,6 +323,56 @@ export function MigratePage() {
     }
     if (requestedKey === currentKeyRef.current) setStep('done')
   }
+  useEffect(() => {
+    return () => {
+      if (copyResetTimeoutRef.current !== null) window.clearTimeout(copyResetTimeoutRef.current)
+    }
+  }, [])
+  const copyText = async (text: string) => {
+    if (copyResetTimeoutRef.current !== null) window.clearTimeout(copyResetTimeoutRef.current)
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.style.position = 'fixed'
+        textarea.style.left = '-9999px'
+        document.body.appendChild(textarea)
+        textarea.select()
+        const ok = document.execCommand('copy')
+        document.body.removeChild(textarea)
+        if (!ok) throw new Error('execCommand copy failed')
+      }
+      setCopyState({ text, status: 'copied' })
+      if ('vibrate' in navigator) {
+        try {
+          navigator.vibrate(15)
+        } catch {}
+      }
+    } catch {
+      setCopyState({ text, status: 'failed' })
+    }
+    copyResetTimeoutRef.current = window.setTimeout(() => setCopyState(null), 2000)
+  }
+  const parsedDevices: LsblkDevice[] = useMemo(() => parseLsblkDevices(lsblkOutput), [lsblkOutput])
+  const deviceGuess = useMemo(
+    () => guessSourceAndDestination(parsedDevices, localDiskSizeMb, destVolumeSizeGb),
+    [parsedDevices, localDiskSizeMb, destVolumeSizeGb],
+  )
+  const ddCommand = selectedSource && selectedDest ? buildDdCommand(selectedSource, selectedDest) : null
+  const ddOutputVerification = useMemo(
+    () =>
+      selectedSource && selectedDest
+        ? verifyDdOutput(ddOutput, selectedSource, selectedDest)
+        : { status: 'inconclusive' as const },
+    [ddOutput, selectedSource, selectedDest],
+  )
+  const goToConfirmDevices = () => {
+    setSelectedSource((current) => current || (deviceGuess.source ?? ''))
+    setSelectedDest((current) => current || (deviceGuess.destination ?? ''))
+    setManualPhase('confirm_devices')
+  }
   return (
     <div>
       <PageHeader title="Migrate onto Block Storage" subtitle={name ? `For “${name}”` : undefined} />
@@ -320,8 +400,8 @@ export function MigratePage() {
                   A migration for “{name}” is already in progress — reconnected to its real, live status
                   below.
                 </p>
-                {statusBar.current?.key === migrationKey && typeof statusBar.current.percent === 'number' && (
-                  <ProgressBar percent={statusBar.current.percent} label={statusBar.current.detail ?? null} />
+                {trackedEntry && typeof trackedEntry.percent === 'number' && (
+                  <ProgressBar percent={trackedEntry.percent} label={trackedEntry.detail ?? null} />
                 )}
               </>
             )}
@@ -421,73 +501,218 @@ export function MigratePage() {
                   </div>
                 )}
 
-                <div className="space-y-3 text-sm text-slate-700">
-                  <p className="font-medium text-slate-900">Your turn — the one manual step:</p>
-                  <ol className="list-decimal space-y-2 pl-5">
-                    <li>
-                      In Cloud Manager, open instance <strong>{resolvedInstanceId ?? instanceId}</strong> and
-                      click "Launch LISH Console."
-                    </li>
-                    <li>Log in as root.</li>
-                    <li>
-                      Run <code className="rounded bg-slate-100 px-1 py-0.5">lsblk</code> FIRST and match
-                      devices by the sizes above — <strong>do not trust /dev/sda/sdb blindly.</strong> Rescue
-                      Mode's own device assignment isn't guaranteed to match what was requested. If lsblk
-                      shows different devices, substitute the correct names below.
-                    </li>
-                    <li>
-                      Once confirmed, run:
-                      <div className="mt-1.5 flex items-center gap-2">
-                        <code className="block flex-1 overflow-x-auto rounded-md bg-slate-900 px-3 py-2 text-xs text-slate-100">
-                          {DD_HINT}
-                        </code>
+                {manualPhase === 'lsblk' && step === 'manual' && (
+                  <div className="space-y-3 text-sm text-slate-700">
+                    <p className="font-medium text-slate-900">Step 1 of 3 — identify the devices</p>
+                    <ol className="list-decimal space-y-1.5 pl-5">
+                      <li>
+                        In Cloud Manager, open instance <strong>{resolvedInstanceId ?? instanceId}</strong>{' '}
+                        and click "Launch LISH Console."
+                      </li>
+                      <li>Log in as root.</li>
+                      <li>
+                        Run <code className="rounded bg-slate-100 px-1 py-0.5">lsblk</code> and paste its full
+                        output below — we'll match devices to the sizes above automatically, so you never have
+                        to trust a fixed device letter.
+                      </li>
+                    </ol>
+                    <label className="block">
+                      <span className="text-xs font-medium text-slate-500">lsblk output</span>
+                      <textarea
+                        className="mt-1 block w-full rounded-md border-0 py-1.5 px-3 font-mono text-xs text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-indigo-600"
+                        rows={5}
+                        placeholder={
+                          'NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS\nsda      8:0    0   20G  0 disk\nsdb      8:16   0   25G  0 disk'
+                        }
+                        value={lsblkOutput}
+                        onChange={(e) => setLsblkOutput(e.target.value)}
+                      />
+                    </label>
+                    {lsblkOutput.trim() && parsedDevices.length < 2 && (
+                      <div className="rounded-md bg-amber-50 px-3 py-2.5 text-xs text-amber-800 ring-1 ring-inset ring-amber-200">
+                        Couldn't recognize at least two block devices in this — make sure you pasted the full,
+                        unmodified <code>lsblk</code> output (with no extra flags).
+                      </div>
+                    )}
+                    {parsedDevices.length >= 2 && (
+                      <p className="text-xs text-slate-500">
+                        Found {parsedDevices.length} device{parsedDevices.length === 1 ? '' : 's'}:{' '}
+                        {parsedDevices.map((d) => `/dev/${d.name} (${d.type ?? 'unknown'})`).join(', ')}
+                      </p>
+                    )}
+                    <Button
+                      variant="primary"
+                      className="w-full"
+                      disabled={parsedDevices.length < 2}
+                      onClick={goToConfirmDevices}
+                    >
+                      Next — identify source and destination
+                    </Button>
+                  </div>
+                )}
+
+                {manualPhase === 'confirm_devices' && step === 'manual' && (
+                  <div className="space-y-3 text-sm text-slate-700">
+                    <p className="font-medium text-slate-900">Step 2 of 3 — confirm which device is which</p>
+                    {deviceGuess.source && deviceGuess.destination ? (
+                      <div className="rounded-md bg-slate-50 px-3 py-2.5 text-xs text-slate-600">
+                        Best guess based on the sizes above: <code>/dev/{deviceGuess.source}</code> is your
+                        original disk, <code>/dev/{deviceGuess.destination}</code> is the new volume. Double
+                        check and change either below if this looks wrong.
+                      </div>
+                    ) : (
+                      <div className="rounded-md bg-amber-50 px-3 py-2.5 text-xs text-amber-800 ring-1 ring-inset ring-amber-200">
+                        We couldn't confidently tell which device is which from the sizes alone — please
+                        select both manually below.
+                      </div>
+                    )}
+                    <label className="block">
+                      <span className="text-xs font-medium text-slate-500">
+                        Original disk (source — will be READ from)
+                      </span>
+                      <select
+                        className="mt-1 block w-full rounded-md border-0 py-1.5 px-3 text-sm text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-indigo-600"
+                        value={selectedSource}
+                        onChange={(e) => setSelectedSource(e.target.value)}
+                      >
+                        <option value="">Select...</option>
+                        {parsedDevices.map((d) => (
+                          <option key={d.name} value={d.name}>
+                            /dev/{d.name} — {Math.round(d.sizeMb / 1024)}G{d.type ? ` (${d.type})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-medium text-slate-500">
+                        New Block Storage volume (destination — will be WRITTEN to, currently empty)
+                      </span>
+                      <select
+                        className="mt-1 block w-full rounded-md border-0 py-1.5 px-3 text-sm text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-indigo-600"
+                        value={selectedDest}
+                        onChange={(e) => setSelectedDest(e.target.value)}
+                      >
+                        <option value="">Select...</option>
+                        {parsedDevices.map((d) => (
+                          <option key={d.name} value={d.name}>
+                            /dev/{d.name} — {Math.round(d.sizeMb / 1024)}G{d.type ? ` (${d.type})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {selectedSource && selectedDest && selectedSource === selectedDest && (
+                      <div className="rounded-md bg-red-50 px-3 py-2.5 text-xs text-red-800 ring-1 ring-inset ring-red-200">
+                        Source and destination must be different devices.
+                      </div>
+                    )}
+                    <div className="flex gap-2">
+                      <Button variant="secondary" onClick={() => setManualPhase('lsblk')}>
+                        ← Back
+                      </Button>
+                      <Button
+                        variant="primary"
+                        className="flex-1"
+                        disabled={!selectedSource || !selectedDest || selectedSource === selectedDest}
+                        onClick={() => setManualPhase('run_dd')}
+                      >
+                        Build the dd command
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {(manualPhase === 'run_dd' || step === 'resuming') && ddCommand && (
+                  <div className="space-y-3 text-sm text-slate-700">
+                    <p className="font-medium text-slate-900">Step 3 of 3 — run it and confirm</p>
+                    <p>
+                      Run this exact command in the same Lish session (same window you ran <code>lsblk</code>{' '}
+                      in):
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <code className="block flex-1 overflow-x-auto rounded-md bg-slate-900 px-3 py-2 text-xs text-slate-100">
+                        {ddCommand}
+                      </code>
+                      <Button
+                        variant="secondary"
+                        className={`!px-2.5 !py-1.5 text-xs ${
+                          copyState?.text === ddCommand && copyState.status === 'failed'
+                            ? '!text-red-700 !ring-red-300'
+                            : ''
+                        }`}
+                        onClick={() => copyText(ddCommand)}
+                        disabled={step === 'resuming'}
+                      >
+                        {copyState?.text === ddCommand
+                          ? copyState.status === 'copied'
+                            ? 'Copied!'
+                            : 'Copy failed'
+                          : 'Copy'}
+                      </Button>
+                    </div>
+                    <p>
+                      Wait for it to finish cleanly, then paste the FULL terminal output below —{' '}
+                      <strong>including the command line itself</strong> (however your terminal echoed it),
+                      not just the final "records in/out" summary. We check that the command you actually ran
+                      matches the one above, not just that some copy finished cleanly.
+                    </p>
+                    <label className="block">
+                      <span className="text-xs font-medium text-slate-500">
+                        Full terminal output (command + result)
+                      </span>
+                      <textarea
+                        className="mt-1 block w-full rounded-md border-0 py-1.5 px-3 font-mono text-xs text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-indigo-600"
+                        rows={5}
+                        placeholder={`# ${ddCommand ?? ''}\n5120+0 records in\n5120+0 records out\n21474836480 bytes (21 GB, 20 GiB) copied, 120 s, 179 MB/s`}
+                        value={ddOutput}
+                        onChange={(e) => setDdOutput(e.target.value)}
+                        disabled={step === 'resuming'}
+                      />
+                    </label>
+                    {ddOutputVerification.status === 'inconclusive' && ddOutput.trim() && (
+                      <div className="rounded-md bg-amber-50 px-3 py-2.5 text-xs text-amber-800 ring-1 ring-inset ring-amber-200">
+                        We couldn't find a clear "records in"/"records out" summary in this — make sure you've
+                        pasted dd's complete output, ideally including the command line itself.
+                      </div>
+                    )}
+
+                    {ddOutputVerification.status === 'looks_successful' && (
+                      <div className="rounded-md bg-emerald-50 px-3 py-2.5 text-xs text-emerald-800 ring-1 ring-inset ring-emerald-200">
+                        ✓ Looks like a clean copy — matching records in/out, no errors detected.
+                      </div>
+                    )}
+                    {ddOutputVerification.status === 'looks_failed' && (
+                      <div className="rounded-md bg-red-50 px-3 py-2.5 text-xs text-red-800 ring-1 ring-inset ring-red-200">
+                        ⚠ This doesn't look like it finished cleanly: {ddOutputVerification.detail}. Fix the
+                        issue and rerun the command above before continuing.
+                      </div>
+                    )}
+
+                    {error && <ErrorBanner message={error} />}
+
+                    {step === 'resuming' ? (
+                      <>
+                        <p className="text-sm text-slate-700">
+                          Exiting Rescue Mode, booting the real config, and verifying the migrated volume is
+                          genuinely serving root...
+                        </p>
+                        {progress && <ProgressBar percent={progress.percent} label={progress.label} />}
+                      </>
+                    ) : (
+                      <div className="flex gap-2">
+                        <Button variant="secondary" onClick={() => setManualPhase('confirm_devices')}>
+                          ← Back
+                        </Button>
                         <Button
-                          variant="secondary"
-                          className="!px-2.5 !py-1.5 text-xs"
-                          onClick={() => navigator.clipboard?.writeText(DD_HINT)}
+                          variant="primary"
+                          className="flex-1"
+                          disabled={!ddOutput.trim() || ddOutputVerification.status === 'looks_failed'}
+                          onClick={resumeMigration}
                         >
-                          Copy
+                          I've completed the copy — finish migration
                         </Button>
                       </div>
-                    </li>
-                    <li>Wait for it to finish cleanly, with no I/O errors.</li>
-                  </ol>
-                </div>
-
-                <label className="block">
-                  <span className="text-xs font-medium text-slate-500">
-                    Paste the terminal output here once it finishes (a sanity check for you — the real
-                    verification happens automatically in the next step, over SSH)
-                  </span>
-                  <textarea
-                    className="mt-1 block w-full rounded-md border-0 py-1.5 px-3 font-mono text-xs text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-indigo-600"
-                    rows={4}
-                    placeholder="12345678901+0 records in&#10;12345678901+0 records out&#10;...&#10;$"
-                    value={pastedOutput}
-                    onChange={(e) => setPastedOutput(e.target.value)}
-                    disabled={step === 'resuming'}
-                  />
-                </label>
-
-                {error && <ErrorBanner message={error} />}
-
-                {step === 'resuming' ? (
-                  <>
-                    <p className="text-sm text-slate-700">
-                      Exiting Rescue Mode, booting the real config, and verifying the migrated volume is
-                      genuinely serving root...
-                    </p>
-                    {progress && <ProgressBar percent={progress.percent} label={progress.label} />}
-                  </>
-                ) : (
-                  <Button
-                    variant="primary"
-                    className="w-full"
-                    disabled={!pastedOutput.trim()}
-                    onClick={resumeMigration}
-                  >
-                    I've completed the copy — finish migration
-                  </Button>
+                    )}
+                  </div>
                 )}
               </>
             )}
@@ -566,6 +791,11 @@ export function MigratePage() {
                   <>
                     {onboardErrorWarnings && <WarningBanner messages={onboardErrorWarnings} />}
                     {onboardError && <ErrorBanner message={`Automatic onboarding failed: ${onboardError}`} />}
+                    {onboardError && (
+                      <Button variant="secondary" className="w-full" onClick={() => finishOnboarding()}>
+                        Retry now
+                      </Button>
+                    )}
                     <Button
                       variant="primary"
                       className="w-full"

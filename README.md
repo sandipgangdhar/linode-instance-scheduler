@@ -1102,7 +1102,23 @@ configure — it talks to the same API server it's served from, using the same O
 Linode" button, instead of visiting `/login` by hand); an Onboard page that picks an existing
 Linode instance from your account and brings it under management (including a one-time SSH
 password/key field for a node that doesn't yet trust this deployment's own key — it's used only
-for that one attempt and never stored, see §3 above); a list of every onboarded
+for that one attempt and never stored, see §3 above) — and, if that instance still
+needs Path B migration (§6) first, a guided, three-step wizard for it, deliberately never printing
+a guessed `dd` command up front the way the CLI's own §6.2 output does: (1) you run `lsblk` in
+Lish and paste the output back — the page identifies which device is your original disk and which
+is the new, empty volume purely by matching sizes against the real source-disk and
+destination-volume sizes it already knows from the Linode API (entirely in your own browser — no
+external service, nothing sent anywhere for this check), and shows you its best guess to confirm
+or correct via two dropdowns before anything is built; (2) only once you've confirmed which device
+is which does it build the actual `dd` command, with a working Copy button; (3) after you run it,
+you paste `dd`'s own summary output back, and the page checks it for a clean completion (matching
+"records in"/"records out" counts, no I/O error text) before letting you continue — a command that
+doesn't look like it finished cleanly blocks the next step outright, with the reason shown. This
+is an early, best-effort check on top of the real safety net, not a replacement for it — the
+actual proof that the migration worked is still the root-device identity check performed over SSH
+once you click "finish migration" (§6.2's own device-mismatch warning still applies if you're
+using the CLI directly, which has no equivalent wizard: verify with `lsblk` before running `dd`,
+don't rely on the printed device letters alone). A list of every onboarded
 instance with its current status; a per-instance detail page for start/stop/extend, viewing and
 editing its individual schedule, its scheduled-vs-actual savings percentages, its recent event
 history, and two distinct one-way actions in its own separate cards — **Offboard** (permanently
