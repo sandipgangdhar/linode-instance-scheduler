@@ -1073,7 +1073,7 @@ def _asdict(result) -> dict:
     return dataclasses.asdict(result)
 
 
-_WEB_DIST = engine.BASE_DIR.parent / "web" / "dist"
+_WEB_DIST = engine.BASE_DIR / "web" / "dist"
 _DASHBOARD_BUILT = _WEB_DIST.is_dir()
 if _DASHBOARD_BUILT:
     from fastapi.staticfiles import StaticFiles

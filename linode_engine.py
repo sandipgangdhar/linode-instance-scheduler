@@ -828,9 +828,6 @@ class TransitioningError(RuntimeError):
     pass
 
 
-@contextmanager
-
-
 def acquire_transition_lock(state: dict, persist_fn) -> dict:
 
     if state.get("transitioning"):
