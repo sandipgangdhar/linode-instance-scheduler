@@ -38,12 +38,39 @@ runs a CI pipeline (export → structural safety gate → push) instead of a man
 safety gate includes direct regression tests for both bugs found in round 1, so they can't ship
 again silently.
 
-## Round 2 — 2026-09-17, in progress
+## Round 2 — 2026-09-17 through 2026-09-18, in progress
 
 Continuing live testing against `v1.2.1`, this time using a dedicated API token
 (`instance-scheduler-live-testing`, scoped full-access, isolated from any other credential) and
 covering every remaining command and both the full REST API surface and the dashboard's own
 pages via a real headless browser — the two pieces round 1 didn't finish. Any bug found gets
 fixed in the dev repo, released, and re-tested, looping until a full pass finds nothing.
+
+**Coverage so far**: every local-only command; a real 2-node onboard through the full Path B
+migration (`migrate-start`/manual `dd`/`migrate-resume`); `migrate-orphans`; and, deliberately
+before moving to scale, a real OS-diversity pass — 13 separate real instances, spanning Ubuntu
+20.04/22.04/24.04/25.10, Debian 11/12/13, AlmaLinux 8/9/10, Rocky 9, CentOS Stream 9, Fedora 43,
+and openSUSE 15.6, each taken through the real data-volume setup and Path B migration. 10 of 13
+migrated and onboarded cleanly; Debian 11/12 and openSUSE 15.6 were correctly refused by the
+tool's own cloud-init version pre-flight gate (not a bug — the gate working as designed, with
+clear upgrade guidance). One real, self-inflicted device-mismatch during this pass (a manual API
+boot call that booted the wrong config) was caught cleanly by the tool's own root-device
+verification, exactly the safety mechanism it exists for.
+
+**Found 1 real, customer-impacting bug — fixed and shipped as `v1.2.2`:**
+
+Every `--ssh-key` default (`migrate-start`/`migrate-resume`/`onboard`/`start`/`stop`/`poll`/
+`reset-host-key`/`rebuild`) silently ignored `LINODE_SSH_KEY_PATH` from `.env`, despite
+`.env.example`'s own comment claiming it worked the same way the API server already does.
+Reproduced live: a real `poll --once` run — run exactly the way an unattended cron/systemd job
+would, with no `--ssh-key` flag — failed 4 of 7 scheduled stops in a real schedule group with a
+genuine SSH permission error, while a manual stop with the key explicitly passed succeeded
+seconds later. Fixed at the root (the CLI now loads `.env` before computing any `--ssh-key`
+default, matching the API server's own correct order) and verified twice: once directly against
+the fix's own logic, and once for real — the exact failing scenario (a real, unattended
+`poll --once`, zero `--ssh-key` overrides) re-run against `v1.2.2` on the same real fleet,
+successfully firing 11 real stop/start actions across two schedule groups (7 and 6 members, two
+different timezones) with zero failures. Individual-schedule override precedence (an instance
+with its own schedule correctly ignoring its group's) held correctly throughout.
 
 *(Updated as testing proceeds — see the section below for the current pass's own findings.)*
