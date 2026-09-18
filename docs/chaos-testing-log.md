@@ -104,3 +104,12 @@ resources -- `instance_manager.py list` now shows all 12 fleet members accounted
 zero manual-recovery records outstanding. This is the first time this exact recovery sequence
 was exercised end-to-end against real infrastructure during this test run, not just asserted by
 a unit test.
+
+## Chaos round — 2026-09-18T09:21:29.941624+00:00
+
+**Scenario**: `out_of_band_delete` — target: `r2-os-rocky9`
+**Result**: Confirmed working as documented — outcome: `reset_to_stopped_cleanly`
+
+```
+{'stop_returncode': 0, 'stop_stdout_tail': "'r2-os-rocky9': instance 105631411 no longer exists (confirmed 404, presumably deleted out-of-band) -- reset to 'stopped'. Its OS volume, data volume(s), and reserved IP are unaffected.\n", 'recreated': True, 'recreate_retried': True, 'recreate_stderr_tail': None}
+```
