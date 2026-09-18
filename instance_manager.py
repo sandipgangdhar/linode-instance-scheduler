@@ -7,6 +7,7 @@ import errno
 import fcntl
 import json
 import math
+import os
 import re
 import secrets
 import shlex
@@ -23,6 +24,7 @@ from typing import Literal, TypeGuard
 from zoneinfo import ZoneInfo
 
 import requests.exceptions
+from dotenv import load_dotenv
 from linode_api4 import Instance, Volume
 from linode_api4.errors import ApiError
 
@@ -5023,6 +5025,13 @@ def delete_api_session(token: str) -> None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
+
+
+    load_dotenv(engine.BASE_DIR / ".env")
+    default_ssh_key = os.environ.get(
+        "LINODE_SSH_KEY_PATH", str(Path.home() / ".ssh" / "linode_spike_key")
+    )
+
     parser = argparse.ArgumentParser(
         prog="instance_manager.py",
         description="Onboard existing Linode instances and start/stop them by name.",
@@ -5035,7 +5044,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     migrate_start_parser.add_argument("--name", required=True, type=validate_instance_name, help="A short name to track this migration by.")
     migrate_start_parser.add_argument("--instance-id", type=int, required=True)
-    migrate_start_parser.add_argument("--ssh-key", default=str(Path.home() / ".ssh" / "linode_spike_key"))
+    migrate_start_parser.add_argument("--ssh-key", default=default_ssh_key)
     migrate_start_parser.add_argument("--force", action="store_true", help="Restart an in-progress migration.")
     migrate_start_parser.add_argument(
         "--yes", action="store_true",
@@ -5048,7 +5057,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path B: finish a migration after the manual dd step is done.",
     )
     migrate_resume_parser.add_argument("--name", required=True, type=validate_instance_name)
-    migrate_resume_parser.add_argument("--ssh-key", default=str(Path.home() / ".ssh" / "linode_spike_key"))
+    migrate_resume_parser.add_argument("--ssh-key", default=default_ssh_key)
 
     migrate_orphans_parser = subparsers.add_parser(
         "migrate-orphans",
@@ -5095,7 +5104,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "automatically. Also used as a fallback for the newer 'linode' interface model if "
         "its own captured vpc_id is ever missing (not expected in practice).",
     )
-    onboard_parser.add_argument("--ssh-key", default=str(Path.home() / ".ssh" / "linode_spike_key"))
+    onboard_parser.add_argument("--ssh-key", default=default_ssh_key)
     onboard_parser.add_argument("--force", action="store_true", help="Re-onboard even if already registered.")
     onboard_parser.add_argument(
         "--yes", action="store_true",
@@ -5105,7 +5114,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     start_parser = subparsers.add_parser("start", help="Start (create) an onboarded instance.")
     start_parser.add_argument("--name", required=True, type=validate_instance_name)
-    start_parser.add_argument("--ssh-key", default=str(Path.home() / ".ssh" / "linode_spike_key"))
+    start_parser.add_argument("--ssh-key", default=default_ssh_key)
     start_parser.add_argument(
         "--override-window-hours", type=float, default=None,
         help="Only relevant for a manual start outside a configured schedule's own on-window: "
@@ -5115,7 +5124,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     stop_parser = subparsers.add_parser("stop", help="Stop (delete) an onboarded instance.")
     stop_parser.add_argument("--name", required=True, type=validate_instance_name)
-    stop_parser.add_argument("--ssh-key", default=str(Path.home() / ".ssh" / "linode_spike_key"))
+    stop_parser.add_argument("--ssh-key", default=default_ssh_key)
     stop_parser.add_argument("--yes", action="store_true", help="Skip the interactive confirmation prompt.")
     stop_parser.add_argument(
         "--force", action="store_true",
@@ -5169,7 +5178,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"How long after a rule's start_time/stop_time the poller still considers it due "
         f"(default {DEFAULT_POLL_WINDOW_SECONDS}, tolerating ordinary poll-tick drift).",
     )
-    poll_parser.add_argument("--ssh-key", default=str(Path.home() / ".ssh" / "linode_spike_key"))
+    poll_parser.add_argument("--ssh-key", default=default_ssh_key)
 
     serve_api_parser = subparsers.add_parser(
         "serve-api",
@@ -5366,7 +5375,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "a newly reused/reissued address with a stale entry from a previous node. Mutually "
         "exclusive with --name.",
     )
-    reset_host_key_parser.add_argument("--ssh-key", default=str(Path.home() / ".ssh" / "linode_spike_key"))
+    reset_host_key_parser.add_argument("--ssh-key", default=default_ssh_key)
     reset_host_key_parser.add_argument("--yes", action="store_true")
 
     rebuild_parser = subparsers.add_parser(
@@ -5374,7 +5383,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disaster recovery: reconstruct the registry from tags on Linode's "
         "own account state, in case the local instances.json is lost.",
     )
-    rebuild_parser.add_argument("--ssh-key", default=str(Path.home() / ".ssh" / "linode_spike_key"))
+    rebuild_parser.add_argument("--ssh-key", default=default_ssh_key)
     rebuild_parser.add_argument(
         "--vpc-id", type=int, default=None,
         help="Required only if a recovered instance has a VPC interface under the "
