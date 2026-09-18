@@ -38,7 +38,7 @@ runs a CI pipeline (export → structural safety gate → push) instead of a man
 safety gate includes direct regression tests for both bugs found in round 1, so they can't ship
 again silently.
 
-## Round 2 — 2026-09-17 through 2026-09-18, in progress
+## Round 2 — 2026-09-17 through 2026-09-18, complete
 
 Continuing live testing against `v1.2.1`, this time using a dedicated API token
 (`instance-scheduler-live-testing`, scoped full-access, isolated from any other credential) and
@@ -73,4 +73,60 @@ successfully firing 11 real stop/start actions across two schedule groups (7 and
 different timezones) with zero failures. Individual-schedule override precedence (an instance
 with its own schedule correctly ignoring its group's) held correctly throughout.
 
-*(Updated as testing proceeds — see the section below for the current pass's own findings.)*
+**Remaining coverage, completed after the fix above:**
+
+- **Manual override, extend, auto-revert**: all three confirmed live on a real instance —
+  arming (`start` outside a schedule's on-window correctly prints the auto-stop time and sets
+  the timer), `extend` (pushes the timer forward, confirmed via `status`), and auto-revert
+  itself (a short 2-minute window, confirmed the instance genuinely stopped via `poll --once`
+  once it expired).
+- **Groups, full CRUD**: `group-create`, `group-schedule-set`, `group-add`/`group-remove` (both
+  `--copy-schedule` and `--keep-manual` paths confirmed — a removed member correctly either
+  gained the group's rules as its own individual schedule, or ended up purely manual with no
+  schedule at all), `group-show`, `group-list`, `group-delete`, all against 2 real schedule
+  groups (7 and 6 members, different timezones).
+- **Disaster recovery at real fleet scale**: the local registry database was deleted outright
+  a second time (13 real instances, 2 real groups, 2 individual schedules this time, not just a
+  single node) and `rebuild` reconstructed everything byte-for-byte from Linode's own tags —
+  both groups recreated from member tags, both individual schedules restored, every running
+  instance fully recovered, every stopped instance correctly flagged for the documented manual
+  recovery step (boot once, then re-`onboard`). Spot-checked one recovered record's
+  `os_volume_id`/`reserved_ip`/`group_id` against a pre-loss snapshot — exact match. Group
+  membership was also confirmed to survive an `onboard --force` re-onboard cleanly afterward.
+- **`clear-lock`/`reset-host-key`**: both `--name` and `--ip` modes of `reset-host-key`
+  confirmed working against a real instance.
+- **`offboard`/`deregister`**: `offboard` (default, keeping volumes) confirmed — the reserved
+  IP was independently confirmed released back to Linode's pool via a direct API read (404
+  afterward). `deregister` confirmed — the real Linode instance was independently confirmed
+  completely untouched afterward, then re-`onboard`ed back in cleanly.
+- **Every documented REST API endpoint**, using a real running `serve-api` process and a
+  directly-issued session token (the interactive "Login with Linode" step itself needs the
+  account owner's own password to complete, and was already live-verified once in this
+  project's history — see the note in `README.md`/`DEPLOYMENT.md`): every group and instance
+  CRUD endpoint, schedule set/clear, group membership PATCH, the savings endpoints (values
+  matched hand-computed expectations exactly, e.g. a daily 7h21m on-window correctly showing
+  69.4% savings), `history`, `/linode/ssh-check` (including its SSRF guard — a cloud metadata
+  address was correctly rejected with a clean 422, a real managed instance's IP correctly
+  returned reachable), the background-operation pattern for `start`/`stop` (polled to
+  completion with real incrementing progress), `/health`, `/logout` (confirmed the same token
+  is rejected immediately afterward), and a full onboard → stop → `offboard --delete-volumes`
+  cycle driven entirely through raw HTTP calls, independently confirmed via direct API reads
+  that both the volume and the reserved IP were genuinely gone afterward.
+- **The web dashboard**, via a real headless-Chromium pass against the real running server (no
+  mocking) — Instances list, Groups list, group detail (correct member list, correct schedule
+  editor, correct savings percentage), instance detail (correct volumes, correct "following
+  group" schedule display, a real Stop button correctly triggering its two-stage
+  type-to-confirm flow), and the Onboard page (correctly listing every real raw Linode instance
+  on the account, filterable by region/tag). Zero page errors and zero browser console errors
+  across the entire pass. One apparent issue (the very first page load briefly showing the
+  login screen even with a session token present) was investigated directly and confirmed to be
+  an artifact of the test script's own token-injection timing, not a real bug — a corrected
+  test with the token present from the very first render loaded the authenticated page
+  immediately, matching exactly how the real OAuth redirect delivers it in production.
+
+**Round 2 complete: one real bug found, fixed, shipped, and re-verified live (`v1.2.2`); no
+other bugs found across the full remaining command/API/dashboard surface.** The live fleet used
+for this round (12 real instances spanning 10 different OS/version combinations, 2 real schedule
+groups) was left running as known-good reference infrastructure rather than torn down.
+
+*(Future rounds append here.)*
