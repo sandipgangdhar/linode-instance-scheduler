@@ -122,3 +122,12 @@ a unit test.
 ```
 {'retry_returncode': 0, 'retry_stdout_tail': 'Tick complete: 0 fired, 0 failed, 12 instance(s) checked.\n', 'stuck_instances': []}
 ```
+
+## Chaos round — 2026-09-18T14:18:55.624643+00:00
+
+**Scenario**: `ssh_host_key_mismatch` — target: `r2-os-almalinux10`
+**Result**: Confirmed working as documented — outcome: `failed_closed_then_reset_ok`
+
+```
+{'start_stdout': "Starting 'r2-os-almalinux10'...\n  instance created: 105669025 (booting...)\n  instance: 105669025\n  running -- verifying real network reachability...\n", 'start_returncode': 1, 'recovery_start_returncode': 0}
+```
