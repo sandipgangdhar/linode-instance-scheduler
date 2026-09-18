@@ -113,3 +113,12 @@ a unit test.
 ```
 {'stop_returncode': 0, 'stop_stdout_tail': "'r2-os-rocky9': instance 105631411 no longer exists (confirmed 404, presumably deleted out-of-band) -- reset to 'stopped'. Its OS volume, data volume(s), and reserved IP are unaffected.\n", 'recreated': True, 'recreate_retried': True, 'recreate_stderr_tail': None}
 ```
+
+## Chaos round — 2026-09-18T13:08:05.564954+00:00
+
+**Scenario**: `poller_crash_mid_tick` — target: `n/a`
+**Result**: Confirmed working as documented — outcome: `clean_retry_no_stuck_locks`
+
+```
+{'retry_returncode': 0, 'retry_stdout_tail': 'Tick complete: 0 fired, 0 failed, 12 instance(s) checked.\n', 'stuck_instances': []}
+```
