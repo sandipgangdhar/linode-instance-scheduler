@@ -85,3 +85,22 @@ correctly evaluated and reported independently of the recovery step's own succes
 ```
 {'list_after_corruption_stderr': "Configuration error: the local registry database at /opt/soak-chaos/product/state/instances.db appears corrupted or unreadable (file is not a database). Recovering local records from Linode's own tags needs a working, even if empty, local database first -- move the corrupted file aside (e.g. `mv /opt/soak-chaos/product/state/instances.db /opt/soak-chaos/product/state/instances.db.corrupted`) and re-run this command; a fresh, empty database will be created automatically, and `rebuild` can then re", 'rebuild_stdout_tail': "am9''s membership in group 'dev-fleet-b' from tags.\n  restored schedule for 'r2-grp-01' from tags.\nScanned tags: 12 name(s) found.\n  fully recovered (was running): r2-node-1, r2-node-2, r2-os-ubuntu2204, r2-os-ubuntu2004, r2-os-almalinux9, r2-os-debian13, r2-os-fedora43, r2-grp-01\n  partially recovered (was stopped, needs manual recovery): r2-os-almalinux8, r2-os-almalinux10, r2-os-rocky9, r2-os-centos-stream9\n    -- boot each of these manually once via Cloud Manager from its os_volume_id, using its network_config from Cloud Manager's own UI, then re-run `onboard` to fully restore management.\n"}
 ```
+
+## Full recovery completed for the 4 partially-recovered nodes -- 2026-09-18T08:35Z
+
+Follow-up to the `registry_corruption` chaos round documented above: `rebuild`'s own documented
+contract only partially recovers a node that was `stopped` at the moment of local database loss
+(network/SSH details aren't knowable while it's off) -- 4 real fleet members
+(`r2-os-almalinux8`/`almalinux10`/`rocky9`/`centos-stream9`) ended up in `needs_manual_recovery`
+as a direct, expected consequence, exactly matching the documented recovery instructions
+`rebuild` itself printed.
+
+Live-exercised that documented recovery path for real, for all 4: booted each from its recorded
+`os_volume_id` with its recorded `reserved_ip` (via the raw API, since these were temporarily
+outside the tool's own management), `reset-host-key` to trust each fresh boot's genuinely new
+SSH host key, then `onboard --force --instance-id <id>` to hand full management back to the
+tool. All 4 confirmed back under management with the correct `linode_id` and no dangling
+resources -- `instance_manager.py list` now shows all 12 fleet members accounted for again, with
+zero manual-recovery records outstanding. This is the first time this exact recovery sequence
+was exercised end-to-end against real infrastructure during this test run, not just asserted by
+a unit test.
