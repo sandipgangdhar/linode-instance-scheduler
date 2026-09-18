@@ -149,3 +149,12 @@ a unit test.
 ```
 {'stop_returncode': 0, 'stop_stdout_tail': "'r2-os-fedora43': instance 105595545 no longer exists (confirmed 404, presumably deleted out-of-band) -- reset to 'stopped'. Its OS volume, data volume(s), and reserved IP are unaffected.\n", 'recreated': False, 'recreate_retried': True, 'recreate_stderr_tail': "Configuration error: failed to start 'r2-os-fedora43': POST /v4/linode/instances/105700611/configs: [400] Volume 18017664 already attached to Linode 105595545\n"}
 ```
+
+## Chaos round — 2026-09-18T21:47:02.610823+00:00
+
+**Scenario**: `poller_crash_mid_tick` — target: `n/a`
+**Result**: Confirmed working as documented — outcome: `clean_retry_no_stuck_locks`
+
+```
+{'retry_returncode': 0, 'retry_stdout_tail': 'Tick complete: 0 fired, 0 failed, 12 instance(s) checked.\n', 'stuck_instances': []}
+```
