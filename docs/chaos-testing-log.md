@@ -27,3 +27,12 @@ immediately once the lock is released. Fixed with a shared file-based mutex so t
 harnesses' registry-level operations can never run concurrently again, plus a calm startup
 delay on both. The live fleet was independently confirmed fully healthy throughout -- no
 instance was ever actually harmed by this.
+
+## Chaos round — 2026-09-18T05:05:12.526811+00:00
+
+**Scenario**: `out_of_band_delete` — target: `r2-node-2`
+**Result**: Confirmed working as documented — outcome: `reset_to_stopped_cleanly`
+
+```
+{'stop_returncode': 0, 'stop_stdout_tail': "'r2-node-2': instance 105592839 no longer exists (confirmed 404, presumably deleted out-of-band) -- reset to 'stopped'. Its OS volume, data volume(s), and reserved IP are unaffected.\n", 'recreated': False}
+```
