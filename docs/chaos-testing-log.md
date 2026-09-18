@@ -67,3 +67,12 @@ short pause if the first attempt fails, so a fleet member isn't left needlessly 
 rest of a long unattended run just because it raced the poller's own tick once. The scenario's
 actual pass/fail signal (the confirmed-404 reset) was never affected by this either way -- it's
 correctly evaluated and reported independently of the recovery step's own success.
+
+## Chaos round — 2026-09-18T05:12:32.109791+00:00
+
+**Scenario**: `poller_crash_mid_tick` — target: `n/a`
+**Result**: Confirmed working as documented — outcome: `clean_retry_no_stuck_locks`
+
+```
+{'retry_returncode': 0, 'retry_stdout_tail': 'Tick complete: 0 fired, 0 failed, 12 instance(s) checked.\n', 'stuck_instances': []}
+```
