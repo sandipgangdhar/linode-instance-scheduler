@@ -37,3 +37,22 @@ real 12-instance fleet with realistic multi-cycle daily schedules (dev-fleet-a: 
 windows/day UTC, dev-fleet-b: 3x1.5h windows/day IST, r2-node-1: 3x1h individual-schedule
 windows/day). 0 rotating check cycles completed since the last checkpoint, 0
 finding(s) recorded (see the JSONL event log for full detail on any).
+
+## Infrastructure migration + enhanced disaster-recovery coverage -- 2026-09-18T06:55Z
+
+Both harnesses moved off the developer's own laptop onto a dedicated Linode instance
+(`soak-chaos-runner`, in-bom-2, tagged `internal-infra`/`soak-chaos-runner`), running as real
+`systemd` services (`Restart=always`, enabled for boot) instead of a detached background
+process -- confirmed to survive a genuine reboot (triggered one for real, both services came
+back `active` automatically). This closes the gap where the run depended on the laptop staying
+powered on. No test-fleet impact: cutover was sequenced so the Mac-side poller was fully
+stopped and confirmed dead before the runner's own poller started, so there was never a moment
+with two independent pollers racing the same schedule.
+
+Also, at request, the existing daily disaster-recovery drill (already fully deleting
+`state/instances.db` and reconstructing it via a real `rebuild` against Linode's own tags -- a
+genuine total-database-loss scenario, not a partial corruption) now verifies the FULL metadata
+surface comes back: every individual instance's schedule and every schedule group's own
+definition, not just instance identity. Group membership is compared by group name rather than
+its internal numeric id, since a recreated group legitimately gets a new id on rebuild -- that
+would otherwise have been a guaranteed false alarm on every single drill run.
