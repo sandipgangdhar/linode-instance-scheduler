@@ -131,3 +131,12 @@ a unit test.
 ```
 {'start_stdout': "Starting 'r2-os-almalinux10'...\n  instance created: 105669025 (booting...)\n  instance: 105669025\n  running -- verifying real network reachability...\n", 'start_returncode': 1, 'recovery_start_returncode': 0}
 ```
+
+## Chaos round — 2026-09-18T16:11:33.095232+00:00
+
+**Scenario**: `lock_contention` — target: `r2-node-2`
+**Result**: Confirmed working as documented — outcome: `clean_lock_refusal_then_normal`
+
+```
+{'stop_while_locked_stdout': '', 'stop_while_locked_stderr': "Configuration error: Another start/stop/rebuild/clear-lock process is already operating on 'r2-node-2' right now. Wait for it to finish and try again.\n"}
+```
