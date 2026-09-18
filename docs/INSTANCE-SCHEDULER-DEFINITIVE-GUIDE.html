@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Linode Instance Scheduler: The Definitive Guide</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700;9..144,900&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root{
+  --paper:#f7f4ec;
+  --paper-raised:#ffffff;
+  --ink:#1b1f2b;
+  --ink-soft:#5a5f74;
+  --ink-faint:#8a8fa0;
+  --line:#ded8c6;
+  --line-strong:#c9c2ab;
+  --accent:#1f7a5c;
+  --accent-strong:#155f47;
+  --accent-soft:#e3f3ec;
+  --surface:#efece0;
+  --good:#1f8a52;
+  --good-soft:#e3f3e9;
+  --warn:#a8690f;
+  --warn-soft:#f8ecd8;
+  --crit:#bd3b3b;
+  --crit-soft:#fbe6e5;
+  --code-bg:#161d1c;
+  --code-ink:#dcf0e6;
+  --code-key:#7fd9b0;
+  --code-str:#c9d97a;
+  --code-mut:#7a958c;
+  --shadow: 0 1px 2px rgba(30,25,10,.06), 0 8px 24px rgba(30,25,10,.06);
+  --serif-display:'Fraunces', 'Iowan Old Style', 'Palatino Linotype', serif;
+  --serif-body:'Source Serif 4', 'Iowan Old Style', Georgia, serif;
+  --mono:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#101513;
+    --paper-raised:#161c1a;
+    --ink:#e6e9df;
+    --ink-soft:#a0aca4;
+    --ink-faint:#6a766f;
+    --line:#293430;
+    --line-strong:#38443f;
+    --accent:#5fd3a5;
+    --accent-strong:#8be6c1;
+    --accent-soft:#173328;
+    --surface:#191f1c;
+    --good:#5cc98d;
+    --good-soft:#173427;
+    --warn:#e0ab52;
+    --warn-soft:#3a2c14;
+    --crit:#f08585;
+    --crit-soft:#3a1c1e;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#101513;
+  --paper-raised:#161c1a;
+  --ink:#e6e9df;
+  --ink-soft:#a0aca4;
+  --ink-faint:#6a766f;
+  --line:#293430;
+  --line-strong:#38443f;
+  --accent:#5fd3a5;
+  --accent-strong:#8be6c1;
+  --accent-soft:#173328;
+  --surface:#191f1c;
+  --good:#5cc98d;
+  --good-soft:#173427;
+  --warn:#e0ab52;
+  --warn-soft:#3a2c14;
+  --crit:#f08585;
+  --crit-soft:#3a1c1e;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px rgba(0,0,0,.35);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--serif-body);
+  font-size:16.5px;
+  line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4{font-family:var(--serif-display);color:var(--ink);text-wrap:balance;font-weight:700;letter-spacing:-.01em}
+a{color:var(--accent)}
+code, pre, .mono{font-family:var(--mono)}
+
+.shell{display:flex;min-height:100vh}
+.sidebar{
+  width:308px;flex:0 0 308px;
+  border-right:1px solid var(--line);
+  background:var(--paper-raised);
+  position:sticky;top:0;height:100vh;overflow-y:auto;
+  padding:28px 22px 60px;
+}
+.sidebar::-webkit-scrollbar{width:8px}
+.sidebar::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:4px}
+
+.brand{display:flex;align-items:flex-start;gap:10px;margin-bottom:22px;padding-bottom:18px;border-bottom:1px solid var(--line)}
+.brand-mark-badge{width:34px;height:34px;flex:0 0 34px;border-radius:9px;background:var(--accent-soft);display:flex;align-items:center;justify-content:center;margin-top:1px;font-family:var(--mono);font-weight:700;color:var(--accent-strong);font-size:15px}
+.brand-text{display:flex;flex-direction:column;gap:2px}
+.brand-mark{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.brand-title{font-family:var(--serif-display);font-size:19px;font-weight:700;line-height:1.15;margin-top:4px}
+
+.cover-badge{
+  width:96px;height:96px;flex:0 0 96px;border-radius:20px;
+  background:radial-gradient(circle at 50% 38%,var(--accent-soft),var(--surface));
+  border:1px solid var(--line);display:flex;align-items:center;justify-content:center;
+  box-shadow:var(--shadow);
+}
+.cover-badge svg{width:56%;height:56%}
+.cover-top{display:flex;align-items:center;gap:26px;flex-wrap:wrap}
+
+.toc-part{margin-top:22px}
+.toc-part:first-of-type{margin-top:0}
+.toc-part-label{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-faint);margin:0 0 6px 2px;display:flex;gap:8px;align-items:baseline;
+}
+.toc-part-label b{color:var(--accent);font-weight:600}
+.toc-list{list-style:none;margin:0;padding:0}
+.toc-list li a{
+  display:block;padding:5px 8px;border-radius:6px;
+  font-size:14px;color:var(--ink-soft);text-decoration:none;
+  border-left:2px solid transparent;
+}
+.toc-list li a:hover{background:var(--surface);color:var(--ink)}
+.toc-list li a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft);font-weight:600}
+
+.menu-btn{display:none}
+
+main{flex:1;min-width:0;padding:0}
+.content{max-width:820px;margin:0 auto;padding:64px 48px 140px}
+
+.cover{
+  min-height:70vh;display:flex;flex-direction:column;justify-content:center;gap:22px;
+  border-bottom:1px solid var(--line);padding-bottom:56px;margin-bottom:56px;
+}
+.cover-eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.cover h1{font-size:clamp(34px,5vw,58px);line-height:1.05;margin:0;max-width:16ch}
+.cover .subtitle{font-family:var(--serif-body);font-size:19px;color:var(--ink-soft);max-width:60ch;font-style:italic}
+.cover-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px}
+.pill{
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.03em;color:var(--ink-soft);
+  border:1px solid var(--line-strong);border-radius:999px;padding:5px 12px;background:var(--paper-raised)
+}
+
+.part-open{margin:88px 0 34px;padding-top:8px}
+.part-open:first-of-type{margin-top:0}
+.part-num{font-family:var(--mono);font-size:13px;letter-spacing:.1em;color:var(--accent);font-weight:600;text-transform:uppercase}
+.part-title{font-size:clamp(24px,3.2vw,32px);margin:6px 0 10px}
+.part-dek{color:var(--ink-soft);font-size:16px;max-width:64ch}
+.part-rule{height:1px;background:linear-gradient(90deg,var(--accent),transparent);margin-top:22px}
+
+section.chapter{margin:52px 0;scroll-margin-top:24px}
+.chapter h2{font-size:23px;display:flex;align-items:baseline;gap:10px;margin-bottom:14px}
+.chapter h2 .chno{font-family:var(--mono);font-size:14px;color:var(--ink-faint);font-weight:500}
+.chapter h3{font-size:17.5px;margin:26px 0 10px}
+.chapter p{margin:12px 0}
+.chapter ul, .chapter ol{padding-left:22px;margin:12px 0}
+.chapter li{margin:6px 0}
+.lede{font-size:17.5px;color:var(--ink-soft)}
+
+.callout{
+  border:1px solid var(--line);border-left:3px solid var(--accent);
+  background:var(--surface);border-radius:8px;padding:14px 18px;margin:18px 0;
+  font-size:15px;
+}
+.callout.warn{border-left-color:var(--warn);background:var(--warn-soft)}
+.callout.crit{border-left-color:var(--crit);background:var(--crit-soft)}
+.callout.good{border-left-color:var(--good);background:var(--good-soft)}
+.callout .co-label{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-faint);display:block;margin-bottom:4px}
+.callout.warn .co-label{color:var(--warn)}
+.callout.crit .co-label{color:var(--crit)}
+.callout.good .co-label{color:var(--good)}
+
+.table-wrap{overflow-x:auto;margin:18px 0;border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%;background:var(--paper-raised);font-size:14.5px}
+thead th{
+  text-align:left;font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink-faint);background:var(--surface);padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap;
+}
+tbody td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+tbody tr:last-child td{border-bottom:none}
+tbody td:first-child{font-weight:600}
+td code, th code{background:var(--surface);padding:1px 5px;border-radius:4px;font-size:12.5px}
+
+.badge{display:inline-block;font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;padding:2px 8px;border-radius:5px;font-weight:600}
+.badge.crit{background:var(--crit-soft);color:var(--crit)}
+.badge.warn{background:var(--warn-soft);color:var(--warn)}
+.badge.info{background:var(--accent-soft);color:var(--accent)}
+
+pre.code{
+  background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:16px 18px;
+  overflow-x:auto;font-size:13.5px;line-height:1.6;box-shadow:var(--shadow);margin:16px 0;
+}
+pre.code .k{color:var(--code-key)}
+pre.code .s{color:var(--code-str)}
+pre.code .m{color:var(--code-mut)}
+.formula{
+  font-family:var(--mono);background:var(--code-bg);color:var(--code-ink);
+  border-radius:10px;padding:18px 22px;text-align:center;font-size:16px;margin:18px 0;box-shadow:var(--shadow);
+}
+
+.diagram-frame{
+  border:1px solid var(--line);border-radius:12px;background:var(--paper-raised);
+  padding:18px;margin:20px 0;box-shadow:var(--shadow);overflow-x:auto;
+}
+.diagram-cap{font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);text-align:center;margin-top:8px}
+.ascii{font-family:var(--mono);font-size:12.5px;line-height:1.5;white-space:pre;color:var(--ink)}
+
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px;margin:20px 0}
+.card{border:1px solid var(--line);border-radius:10px;padding:16px;background:var(--paper-raised);box-shadow:var(--shadow)}
+.card h4{font-size:15px;margin:0 0 6px;font-family:var(--serif-body);font-weight:700}
+.card .tag{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--accent)}
+.card p{font-size:13.5px;color:var(--ink-soft);margin:8px 0 0}
+
+.book-footer{border-top:1px solid var(--line);margin-top:80px;padding-top:26px;display:flex;flex-direction:column;gap:10px}
+.footer-desc{color:var(--ink-faint);font-size:13px;font-family:var(--mono)}
+
+::selection{background:var(--accent-soft);color:var(--ink)}
+
+@media (max-width: 920px){
+  .sidebar{position:fixed;left:0;top:0;z-index:40;transform:translateX(-100%);transition:transform .2s ease;box-shadow:var(--shadow)}
+  .sidebar.open{transform:translateX(0)}
+  .menu-btn{
+    display:flex;position:fixed;top:14px;left:14px;z-index:50;align-items:center;gap:8px;
+    background:var(--paper-raised);border:1px solid var(--line-strong);border-radius:8px;
+    padding:8px 12px;font-family:var(--mono);font-size:12px;color:var(--ink);box-shadow:var(--shadow);
+  }
+  .content{padding:88px 22px 100px}
+  .cover{min-height:55vh}
+}
+
+.glossary dl{margin:18px 0;padding:0}
+.glossary dt{font-family:var(--serif-display);font-weight:700;font-size:16.5px;color:var(--ink);margin:18px 0 4px;padding-top:14px;border-top:1px solid var(--line)}
+.glossary dt:first-of-type{border-top:none;padding-top:0}
+.glossary dt code{font-family:var(--mono);font-size:13px;background:var(--surface);padding:1px 5px;border-radius:4px}
+.glossary dd{margin:0;color:var(--ink);font-size:15.5px;line-height:1.6}
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <button class="menu-btn" id="menuBtn">&#9776; Contents</button>
+  <nav class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-mark-badge" aria-hidden="true">IS</div>
+      <div class="brand-text">
+        <span class="brand-mark">Reference &middot; Edition 1</span>
+        <span class="brand-title">Instance Scheduler: The Definitive Guide</span>
+      </div>
+    </div>
+    <div id="tocRoot"></div>
+  </nav>
+
+  <main>
+    <div class="content" id="content">
+
+      <!-- ============ COVER ============ -->
+      <div class="cover">
+        <div class="cover-top">
+          <div class="cover-badge" aria-hidden="true">
+            <svg viewBox="0 0 100 100">
+              <circle cx="50" cy="50" r="42" fill="none" stroke="#1f7a5c" stroke-width="6"/>
+              <path d="M50 22 L50 50 L68 62" fill="none" stroke="#1f7a5c" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div>
+            <span class="cover-eyebrow">Akamai Cloud &middot; Self-Hosted Cost Automation</span>
+            <h1>Linode Instance Scheduler: The Definitive Guide</h1>
+          </div>
+        </div>
+        <p class="subtitle">Everything required to understand, deploy, and operate a self-hosted tool that automatically stops paying for compute you're not using &mdash; on a schedule, per instance or per group &mdash; while keeping storage, network identity, and configuration exactly as you left them.</p>
+        <div class="cover-meta">
+          <span class="pill">How It Works</span>
+          <span class="pill">Onboarding</span>
+          <span class="pill">Scheduling</span>
+          <span class="pill">Disaster Recovery</span>
+          <span class="pill">CLI Reference</span>
+          <span class="pill">REST API</span>
+          <span class="pill">Security</span>
+        </div>
+      </div>
+
+      <!-- ============ PART 0 ============ -->
+      <div class="part-open" id="part-0">
+        <div class="part-num">Part 0</div>
+        <h2 class="part-title">Why This Exists</h2>
+        <p class="part-dek">The billing fact that makes this tool necessary, who it's built for, and the single sentence that describes what it actually does.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c0-1">
+        <h2><span class="chno">0.1</span> The Problem: A Stopped Instance Still Bills</h2>
+        <p class="lede">On most clouds, "stop the server" and "stop paying for it" are the same action. On Linode, they are not. A powered-off Compute Instance continues to reserve its RAM, CPU, and network capacity, and continues to bill at exactly the same hourly rate as a running one. The only action that actually stops compute billing is fully <strong>deleting</strong> the instance &mdash; not shutting it down, not powering it off, deleting it.</p>
+        <p>That single fact is the entire reason this tool exists. A team that wants to run a development environment only during business hours, a batch-processing fleet only overnight, or a demo environment only when someone is actually using it has no native "pause billing" button to press. The only way to genuinely stop paying is to delete the instance &mdash; and deleting an instance normally means losing it: its identity, its configuration, and, if the OS lives on local disk the way a freshly-deployed instance normally does, its data.</p>
+        <p>Instance Scheduler automates a full delete/recreate cycle and makes it <em>behave</em> like an ordinary stop/start, by making sure everything that makes an instance recognizably "the same machine" survives the cycle on resources that are never touched by the delete: its OS disk, any additional data volumes, its public IP address, and its VPC/VLAN network identity. From the outside, an instance managed by this tool looks like it has a stop button and a start button. Underneath, "stop" deletes it and "start" recreates it from exactly what was there before &mdash; and only while it's actually deleted does the compute billing genuinely stop.</p>
+      </section>
+
+      <section class="chapter" id="c0-2">
+        <h2><span class="chno">0.2</span> Who This Is For</h2>
+        <p>Any workload that doesn't need to run around the clock is a candidate: development and staging environments used on business hours only, CI/build agents that sit idle most of the day, demo or training environments spun up for specific sessions, batch or overnight-only processing fleets, and standby/failover nodes that only need to exist when actually promoted into service. The common shape is the same in every case &mdash; a real, persistent machine identity (data, network address, configuration) that only needs to be *running* some of the time.</p>
+        <p>It is not a fit for anything that needs to stay reachable continuously, or that can't tolerate the several-minutes-long window a full recreate cycle takes. A production database serving live traffic around the clock gets no benefit from this tool; a dev database that's only queried during working hours does.</p>
+      </section>
+
+      <section class="chapter" id="c0-3">
+        <h2><span class="chno">0.3</span> The Core Mechanism, in One Picture</h2>
+        <p>Every instance this tool manages has two states in its own registry: <code>running</code> (a real Linode instance currently exists) and <code>stopped</code> (it doesn't &mdash; and nothing is billing for compute). Moving between them is always the same sequence:</p>
+        <div class="diagram-frame">
+<div class="ascii">STOP                                       START
+&#9472;&#9472;&#9472;&#9472;                                       &#9472;&#9472;&#9472;&#9472;&#9472;
+1. Re-capture current identity            1. Create a new Linode instance
+   (network config, tags, label,             in the same region/plan
+   data-volume layout, SSH keys)
+2. Detach data volume(s)                  2. Reproduce network config exactly
+   (confirmed detached before                (legacy or new interface model,
+   continuing)                               VPC/VLAN addresses, reserved IP)
+3. Delete the Linode instance             3. Attach OS volume + data volumes
+   &mdash; compute billing stops here            in their original device order
+                                           4. Inject the correct network
+   Reserved IP:  stays reserved              configuration at boot time
+   OS volume:    untouched, independent   5. Boot, then verify real network
+   Data volumes: untouched, independent      reachability &mdash; not just that
+   VPC / VLAN:   independent resources,      the API reports "running"
+                 simply not attached to
+                 anything right now</div>
+        </div>
+        <div class="diagram-cap">Fig. 0.1 &mdash; what a managed stop/start cycle actually does underneath</div>
+        <p>Nothing about this is exotic Linode functionality &mdash; every step is an ordinary, documented API call. What the tool provides is doing all of it correctly, in the right order, every single time, with the exact configuration re-applied identically on every cycle, and a real health check before ever reporting success. Part I explains why each of those steps exists and what would break without it.</p>
+      </section>
+
+      <!-- ============ PART I ============ -->
+      <div class="part-open" id="part-1">
+        <div class="part-num">Part I</div>
+        <h2 class="part-title">How It Works</h2>
+        <p class="part-dek">What survives a delete/recreate cycle and why, the two Linode networking models this tool has to account for, and the network re-injection mechanism that keeps a recreated instance reachable at the same address every time.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c1-1">
+        <h2><span class="chno">1.1</span> What Survives, and Why</h2>
+        <p class="lede">A delete/recreate cycle only works as a stand-in for stop/start because four kinds of resources are independent of the Compute Instance's own lifecycle on Linode &mdash; deleting the instance never touches them.</p>
+        <div class="card-grid">
+          <div class="card"><span class="tag">Storage</span><h4>Block Storage volumes</h4><p>A volume is a separate resource from any instance, billed separately (a small per-GB/month rate, far below compute pricing) and completely unaffected by deleting the instance it happens to be attached to. This is why the OS itself has to live on a Block Storage volume, not local disk &mdash; see 1.2.</p></div>
+          <div class="card"><span class="tag">Networking</span><h4>Reserved public IP</h4><p>An ordinary instance's public IP returns to Linode's shared pool the moment the instance is deleted. A <em>reserved</em> IP is a standalone resource you own independently &mdash; it stays assigned to your account, in its original region, and can be attached to a newly created instance. It carries a small charge while unattached, and is permanently locked to the region it was first reserved in.</p></div>
+          <div class="card"><span class="tag">Networking</span><h4>VPC and VLAN identity</h4><p>A VPC subnet and a VLAN label are both persistent, independent resources &mdash; not tied to any one instance's lifecycle. Re-attaching a recreated instance to the same VPC subnet or VLAN, with the same internal address, requires no special preservation step; the resources themselves were never going anywhere.</p></div>
+          <div class="card"><span class="tag">Metadata</span><h4>Label, tags, plan, firewall</h4><p>None of these live on the instance in a way that survives deletion on their own &mdash; the tool re-captures the current label, tags, plan type, attached firewall(s), placement group, and watchdog setting before every stop, and replays them on the very next create, so a recreated instance looks and behaves identically in Cloud Manager and cost reports.</p></div>
+        </div>
+        <p>What does <em>not</em> survive, and has to be actively reproduced every single cycle, is anything Linode treats as belonging to the instance's own creation moment: its network configuration (which interface gets which address), its SSH host identity, and the instance ID itself (a brand-new one is assigned on every create). Parts 1.2 through 1.4 cover how each of those is handled.</p>
+      </section>
+
+      <section class="chapter" id="c1-2">
+        <h2><span class="chno">1.2</span> Why the OS Has to Live on a Block Volume</h2>
+        <p>A freshly deployed Linode instance normally gets its own local disk &mdash; fast, but tied to that specific instance, and gone the moment the instance is deleted. For a delete/recreate cycle to preserve the operating system and its data, the OS has to be moved onto a Block Storage volume instead, which is then attached fresh to each recreated instance at the same device slot every time.</p>
+        <p>Boot-from-volume carries a modest performance characteristic relative to local disk, which is why the standard approach &mdash; and the one this tool follows &mdash; is to build the OS disk locally once, as a golden template, then duplicate it onto a volume rather than installing directly onto Block Storage. Two onboarding paths follow directly from this: a brand-new instance can be provisioned straight from an already-prepared template volume (no migration needed, see Part II.1), while an existing instance already running on local disk needs a one-time migration to move its OS onto a volume before this tool can manage it (Part II.2).</p>
+        <p>Device order matters for every boot: the OS volume must always be attached at the first device slot, with any data volumes following in their original order, or the instance won't boot from the disk you expect.</p>
+      </section>
+
+      <section class="chapter" id="c1-3">
+        <h2><span class="chno">1.3</span> The Two Networking Models</h2>
+        <p>Linode instances use one of two mutually exclusive networking configurations &mdash; the older, config-attached interface model, and a newer model where interfaces are managed independently of any boot configuration, with explicit per-address NAT and default-route flags. An instance uses one or the other, never both, and the shape of a valid network configuration differs meaningfully between them (a public IP is delivered via a dedicated interface in one model, or via a NAT mapping with no separate public interface at all under the other).</p>
+        <p>This tool records which model a given instance actually uses at onboarding time, and reproduces the exact same model &mdash; and the exact same public-IP delivery topology &mdash; on every single recreate, never defaulting to one or silently translating between them. Getting this wrong for even one cycle would mean an instance that boots successfully but is unreachable, or reachable at the wrong address.</p>
+      </section>
+
+      <section class="chapter" id="c1-4">
+        <h2><span class="chno">1.4</span> Staying Reachable at the Same Address, Every Time</h2>
+        <p class="lede">A recreated instance needs to come back up already configured with the correct static IP, gateway, and subnet &mdash; not eventually, not after a manual fix, immediately on first boot.</p>
+        <p>Linode's own automatic network configuration writes a guest's network interface file once, the first time an instance boots on a given disk, based on whatever address that disk had at that moment. It does not re-run or self-correct when the same disk is later attached to a <em>different</em> instance with a different real address &mdash; which is exactly what happens on every recreate cycle, since the instance ID (and often the assigned interface) is new every time even though the disk and its intended address are unchanged.</p>
+        <p>The fix is to skip relying on that mechanism entirely for anything address-sensitive. At every create, this tool already knows the exact IP, gateway, and subnet each interface should have &mdash; it just captured them, or it's re-applying values fixed at onboarding &mdash; so it passes that configuration directly to the new instance via <code>cloud-init</code>, overwriting the guest's network files with the correct values before the network stack ever comes up, and restarting networking once they're in place. This runs on every single recreate, for every interface (public, VPC, and VLAN alike, when more than one is present), which is also why a multi-interface instance never ends up with more than one default route: every interface's configuration is stated explicitly, with nothing left to a default-assignment mechanism to guess at.</p>
+        <p>VPC and VLAN addresses specifically have to be explicit for the same underlying reason &mdash; Linode doesn't run address assignment on a VLAN interface at all, and a VPC's own automatic address assignment isn't guaranteed to hand back the same address on a later attachment, since a recreated instance gets a new hardware identity on every cycle.</p>
+      </section>
+
+      <section class="chapter" id="c1-5">
+        <h2><span class="chno">1.5</span> SSH Host-Key Stability</h2>
+        <p>An SSH client that connects to the same address twice and gets two different host keys back will refuse the second connection by design &mdash; the entire point of host-key checking is to detect exactly that. A naive recreate cycle would trigger this every single time, since cloud-init normally treats every new instance ID as a fresh machine and generates a brand-new host key on every boot.</p>
+        <p>This tool distinguishes two cases explicitly. The very first boot of a newly onboarded instance &mdash; a fresh clone of a golden template, or the first boot right after migrating an existing instance onto a volume &mdash; is allowed to generate a genuinely new key, since that's a real first-contact moment and every clone from the same template needs its own unique key, not a key shared across customers. Every steady-state recreate after that explicitly preserves the existing host key instead, so a managed instance presents the exact same SSH identity across every stop/start cycle, indefinitely.</p>
+        <div class="callout warn">
+          <span class="co-label">If you deliberately need to rotate a host key</span>
+          Do it through the tool's own key-rotation command, never by editing its trust store by hand &mdash; see Part VI's CLI reference. A steady-state cycle presenting an unexpected key is treated as a genuine security event and refused outright rather than silently trusted; see Part VIII.
+        </div>
+      </section>
+
+      <!-- ============ PART II ============ -->
+      <div class="part-open" id="part-2">
+        <div class="part-num">Part II</div>
+        <h2 class="part-title">Onboarding</h2>
+        <p class="part-dek">The two ways an instance comes under this tool's management &mdash; a fresh instance provisioned from a template, or an existing instance migrated in place &mdash; and what each one actually involves.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c2-1">
+        <h2><span class="chno">2.1</span> Path A &mdash; A Brand-New Instance</h2>
+        <p class="lede">The simple path: there is no existing instance yet, so there's nothing to migrate.</p>
+        <p>A golden template &mdash; a Block Storage volume already holding a fully prepared OS image &mdash; is cloned directly into a new volume dedicated to this one logical instance. The clone is billed from the moment it succeeds, the same as any other volume, and happens exactly once, at onboarding &mdash; every later stop/start cycle attaches and detaches that same volume, it is never re-cloned. The new instance is then created against that volume, with a reserved public IP assigned to it (a fresh reservation, or one already held) and its VPC/VLAN addresses chosen once, at this point, never rechosen on a later cycle.</p>
+      </section>
+
+      <section class="chapter" id="c2-2">
+        <h2><span class="chno">2.2</span> Path B &mdash; An Existing Instance</h2>
+        <p class="lede">The path for an instance that's already running on ordinary local disk and needs its OS moved onto a Block Storage volume before this tool can manage it.</p>
+        <p>This is a real, one-time migration with genuine downtime, not a background operation &mdash; it needs a scheduled maintenance window. The sequence: a correctly sized destination volume is created, the instance is booted into Linode's Rescue Mode, and the actual disk contents are copied block-for-block from the local disk onto the new volume. That copy step is the one piece of this entire process that cannot be automated end to end: Rescue Mode has no API-level way to execute commands remotely, so it has to be run manually, once, inside Linode's interactive console (Lish). Everything before and after that single manual step &mdash; sizing and creating the destination volume, entering and exiting Rescue Mode, rebuilding the boot configuration against the new volume, verifying the copy actually took, and converting the instance's existing public IP to a reserved one in place (never swapped for a different address, since DNS and any external allow-lists already point at it) &mdash; is handled automatically.</p>
+        <div class="callout warn">
+          <span class="co-label">Confirm device identity independently before copying</span>
+          The device letters this tool prints as a suggested copy command aren't guaranteed to match what the guest operating system actually sees for the source and destination disks. Before running the copy, independently list the guest's own block devices and match them by size to what's expected, rather than trusting the printed device letters as-is. Copying in the wrong direction is destructive and unrecoverable.
+        </div>
+        <p>Two pre-flight conditions are checked before this process is allowed to start at all. First, a minimum <code>cloud-init</code> version with the correct metadata source has to already be present on the instance &mdash; the network re-injection mechanism in Part 1.4 depends on it, with no fallback, so an instance that doesn't meet this bar needs its <code>cloud-init</code> upgraded (or the OS itself upgraded to a release that ships a new-enough version) during the same maintenance window, before migration proceeds. Second, if the instance has hand-configured static networking outside Linode's own automatic configuration, that customization is flagged as a non-blocking warning &mdash; migration proceeds either way, but any such customization will be silently overwritten by the standard network re-injection on the very next recreate cycle, so it's worth knowing about in advance.</p>
+        <p>Existing data volumes attached to the instance need no migration at all &mdash; they were already independent of the instance's own lifecycle before this tool was ever involved. They're simply captured (which device slot they're in) and carried forward on every future cycle, exactly like a Path A instance's data volumes.</p>
+      </section>
+
+      <!-- ============ PART III ============ -->
+      <div class="part-open" id="part-3">
+        <div class="part-num">Part III</div>
+        <h2 class="part-title">Scheduling</h2>
+        <p class="part-dek">Individual and group schedules, how the two interact when an instance has both, and the poller that actually enforces them.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c3-1">
+        <h2><span class="chno">3.1</span> Individual and Group Schedules</h2>
+        <p class="lede">A schedule is a set of rules &mdash; days of the week plus a start time and a stop time &mdash; attached either directly to one instance, or to a schedule group that several instances belong to.</p>
+        <p>An instance belongs to at most one group at a time. When both an individual schedule and a group are in play for the same instance, the rule is simple and absolute: an enabled individual schedule always wins outright, and the group's schedule is ignored entirely for that instance, not merged or blended with it in any way. Only when an instance has no enabled individual schedule of its own does its group's schedule take effect. An instance with neither is left under purely manual control &mdash; nothing is started or stopped automatically.</p>
+        <table><thead><tr><th>Situation</th><th>What governs the instance</th></tr></thead><tbody>
+          <tr><td>Has an enabled individual schedule</td><td>That schedule, full stop &mdash; any group membership is ignored</td></tr>
+          <tr><td>No individual schedule, belongs to a group</td><td>The group's schedule</td></tr>
+          <tr><td>No individual schedule, no group</td><td>Manual control only, no automation</td></tr>
+        </tbody></table>
+        <p>Removing an instance from a group never silently leaves it with no schedule at all &mdash; the choice is offered explicitly: keep it under purely manual control from that point on, or copy the group's current rules into a fresh individual schedule as a starting point.</p>
+      </section>
+
+      <section class="chapter" id="c3-2">
+        <h2><span class="chno">3.2</span> Timezones</h2>
+        <p>Every schedule &mdash; individual or group &mdash; is defined against a real IANA timezone name (for example <code>America/New_York</code> or <code>Asia/Kolkata</code>), never a fixed UTC offset. A fixed offset would silently drift by an hour across a daylight-saving transition; a named timezone resolves the correct wall-clock behavior automatically on both sides of that transition, with no special handling required from you. A group has exactly one timezone that every member following it inherits &mdash; an instance that needs a genuinely different timezone from the rest of its group is a signal that it should have its own individual schedule instead.</p>
+      </section>
+
+      <section class="chapter" id="c3-3">
+        <h2><span class="chno">3.3</span> The Poller</h2>
+        <p>A single long-running process evaluates every managed instance's effective schedule on a short, fixed interval, and fires a start or stop the moment a configured boundary is crossed. It matches against a small tolerance window rather than an exact instant, so ordinary timing drift between poll cycles never causes a scheduled action to be silently missed. Each action is recorded, so the same boundary is never fired twice in one day even if the poller restarts in between.</p>
+        <p>The poller is meant to run continuously under your own process supervisor (see Part IX.3 for a systemd example) &mdash; it doesn't need to be running for a manual start/stop to work, only for schedules and group memberships to actually be enforced automatically.</p>
+      </section>
+
+      <!-- ============ PART IV ============ -->
+      <div class="part-open" id="part-4">
+        <div class="part-num">Part IV</div>
+        <h2 class="part-title">Manual Control &amp; Cost Visibility</h2>
+        <p class="part-dek">What happens when you start or stop an instance yourself, outside its own schedule, and the two numbers this tool shows you for how much a schedule is actually saving.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c4-1">
+        <h2><span class="chno">4.1</span> Manual Override and Auto-Revert</h2>
+        <p class="lede">Manual control and scheduled automation are meant to coexist, not fight each other.</p>
+        <p>Stopping an instance manually, at any time, needs no special handling &mdash; its schedule simply resumes normally at its own next configured boundary. Starting an instance manually <em>outside</em> its configured on-window is the case that needs a deliberate answer, because left alone forever it would silently erode the entire point of having a schedule. The behavior here: a manual start outside the schedule arms an automatic countdown, two hours by default, after which the instance is stopped again automatically unless you explicitly extend it. The countdown is shown plainly wherever the instance's status is displayed, and extending it is a single explicit action &mdash; it is never silently renewed on its own.</p>
+        <div class="callout good">
+          <span class="co-label">Instances with no schedule at all are never affected</span>
+          The auto-revert countdown only ever arms when a start happens outside an <em>existing, configured</em> schedule's on-window. An instance under purely manual control, with no schedule of any kind, can be started and left running indefinitely with no timer ever attached &mdash; that would work against the very point of deliberately choosing manual-only control.
+        </div>
+      </section>
+
+      <section class="chapter" id="c4-2">
+        <h2><span class="chno">4.2</span> Savings Shown as a Percentage, Not a Dollar Figure</h2>
+        <p>Two numbers are shown for any instance or group with a configured schedule, and neither is a dollar estimate &mdash; contract and negotiated pricing aren't visible to this tool, so any dollar figure it produced would risk being flatly wrong for an account on a non-standard rate. Both are instead a percentage of a full week's hours avoided:</p>
+        <div class="formula">savings % = (1 &minus; scheduled_hours / 168) &times; 100</div>
+        <p><strong>Scheduled savings</strong> is computed purely from the configured schedule's own hours &mdash; visible the moment a schedule is set up, before it has ever run even once. <strong>Actual savings</strong> is computed retrospectively from real recorded uptime over a trailing window, and only becomes meaningful once a schedule has been in effect for a while. Shown together, the gap between the two is itself informative: a schedule configured for a high savings percentage that isn't being realized in practice is usually a sign that manual overrides are happening more often than the schedule intends.</p>
+      </section>
+
+      <!-- ============ PART V ============ -->
+      <div class="part-open" id="part-5">
+        <div class="part-num">Part V</div>
+        <h2 class="part-title">Disaster Recovery</h2>
+        <p class="part-dek">What happens if the local registry that tracks every managed instance is lost or corrupted &mdash; and the honest limits of how much of it can actually come back.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c5-1">
+        <h2><span class="chno">5.1</span> The Registry, and Why It Can Be Rebuilt From Nothing</h2>
+        <p class="lede">Every managed instance's identity &mdash; which OS volume, which data volumes, which reserved IP, which schedule, which group &mdash; lives in one local database. Losing that file would normally mean losing the only record of which real Linode resources belong to which logical instance, with no way to reconstruct it.</p>
+        <p>This tool avoids that by writing the same identifying information directly onto the Linode resources themselves, as tags, every time an instance is onboarded or stopped. The local database is the fast, day-to-day source of truth &mdash; but it is never the <em>only</em> copy of this information. A dedicated recovery command scans the account for these tags and reconstructs the registry from them alone, with no dependency on the local file at all, even one that's been deleted or is unreadable.</p>
+        <div class="callout">
+          <span class="co-label">What this covers</span>
+          Instance identity (OS volume, data volumes, reserved IP, region), individual schedules, and schedule-group membership and definitions are all mirrored onto tags and recoverable this way &mdash; not just the core instance record.
+        </div>
+      </section>
+
+      <section class="chapter" id="c5-2">
+        <h2><span class="chno">5.2</span> The Honest Limits of Recovery</h2>
+        <p>Recovery is complete for any instance that was actually <em>running</em> at the moment local state was lost &mdash; everything, including its live network configuration and SSH access list, can be re-read directly from the running instance itself. An instance that happened to be <em>stopped</em> at that exact moment can only be partially recovered: its identity and resource associations come back from tags exactly the same way, but its network configuration and SSH access list simply aren't knowable without a live boot to read them from, and recovery says so plainly rather than guessing. Bringing a partially recovered instance the rest of the way back under management is a short, explicit manual step &mdash; boot it once from its recorded volume and address, then hand it back to the tool the normal way.</p>
+        <p>One edge case worth knowing: a schedule group's own tags live on its <em>members'</em> reserved IPs, not on any standalone resource of its own. A group that currently has zero members has nothing anywhere in the account to reconstruct it from &mdash; if local state is lost at that exact moment, that one group's definition has to be recreated from scratch. This is a genuine, narrow limit, not a design oversight, and worth keeping in mind for a group you expect to sit empty for a while.</p>
+      </section>
+
+      <!-- ============ PART VI ============ -->
+      <div class="part-open" id="part-6">
+        <div class="part-num">Part VI</div>
+        <h2 class="part-title">The Command-Line Interface</h2>
+        <p class="part-dek">Every subcommand, grouped by what it does.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c6-1">
+        <h2><span class="chno">6.1</span> Onboarding &amp; Lifecycle</h2>
+        <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>onboard</code></td><td>Brings an instance under management &mdash; Path A (clone from a template) or Path B (an already-migrated existing instance). Refuses cleanly if the instance is still on local disk or its public IP isn't reserved.</td></tr>
+          <tr><td><code>start</code></td><td>Creates (recreates) a managed instance from its saved configuration and waits for a genuine network reachability check before reporting success.</td></tr>
+          <tr><td><code>stop</code></td><td>Re-captures current configuration, then deletes the instance. Compute billing stops the moment this completes.</td></tr>
+          <tr><td><code>offboard</code></td><td>Permanently decommissions a stopped instance &mdash; releases its reserved IP, and optionally deletes its volumes too. Requires typing the instance's name to confirm.</td></tr>
+          <tr><td><code>deregister</code></td><td>Removes an instance from local tracking only, with no changes to the real Linode resources at all &mdash; the safety net for correcting a mistaken or corrupted local record.</td></tr>
+          <tr><td><code>list</code></td><td>Lists every managed instance and its current status.</td></tr>
+          <tr><td><code>status</code></td><td>Shows one instance's complete stored record.</td></tr>
+          <tr><td><code>history</code></td><td>Shows the recorded audit trail of start/stop actions for one instance &mdash; what happened, when, and what triggered it.</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c6-2">
+        <h2><span class="chno">6.2</span> Migration (Path B)</h2>
+        <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>migrate-start</code></td><td>Runs pre-flight checks, creates the destination volume, and boots the instance into Rescue Mode &mdash; then hands back the manual copy step described in Part II.2.</td></tr>
+          <tr><td><code>migrate-resume</code></td><td>Run after the manual copy is done &mdash; rebuilds the boot configuration against the new volume, verifies the copy, and converts the instance's public IP to reserved.</td></tr>
+          <tr><td><code>migrate-orphans</code></td><td>Lists (or, with <code>--cleanup</code>, permanently deletes) volumes left behind by an incomplete or abandoned migration attempt.</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c6-3">
+        <h2><span class="chno">6.3</span> Scheduling</h2>
+        <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>schedule-set</code></td><td>Creates or replaces an instance's individual schedule &mdash; timezone plus one or more day/start/stop rules.</td></tr>
+          <tr><td><code>schedule-show</code></td><td>Shows an instance's current individual schedule.</td></tr>
+          <tr><td><code>schedule-clear</code></td><td>Removes an instance's individual schedule &mdash; it then falls back to its group's schedule, if it belongs to one.</td></tr>
+          <tr><td><code>extend</code></td><td>Pushes an active manual-override countdown forward by another window.</td></tr>
+          <tr><td><code>poll</code></td><td>Runs the scheduler loop &mdash; continuously by default, or a single evaluation pass with <code>--once</code>.</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c6-4">
+        <h2><span class="chno">6.4</span> Groups</h2>
+        <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>group-create</code></td><td>Creates a new, empty schedule group.</td></tr>
+          <tr><td><code>group-schedule-set</code></td><td>Sets or replaces a group's schedule &mdash; also the way to change a group's timezone later, not just at creation.</td></tr>
+          <tr><td><code>group-add</code></td><td>Adds an instance to a group.</td></tr>
+          <tr><td><code>group-remove</code></td><td>Removes an instance from a group &mdash; prompts whether to keep it purely manual or copy the group's rules into a new individual schedule.</td></tr>
+          <tr><td><code>group-show</code></td><td>Shows one group's schedule and current members.</td></tr>
+          <tr><td><code>group-list</code></td><td>Lists every schedule group.</td></tr>
+          <tr><td><code>group-delete</code></td><td>Deletes a group &mdash; refuses while it still has members.</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c6-5">
+        <h2><span class="chno">6.5</span> Recovery &amp; Maintenance</h2>
+        <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>rebuild</code></td><td>Reconstructs the local registry from Linode's own tags &mdash; the disaster-recovery mechanism described in Part V.</td></tr>
+          <tr><td><code>clear-lock</code></td><td>Clears a stuck per-instance operation lock &mdash; an administrative escape hatch, used rarely.</td></tr>
+          <tr><td><code>reset-host-key</code></td><td>Deliberately rotates the trusted SSH host key recorded for an instance (see Part I.5) &mdash; the only sanctioned way to do this.</td></tr>
+          <tr><td><code>serve-api</code></td><td>Starts the REST API server and, once built, the web dashboard (Part VII).</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <!-- ============ PART VII ============ -->
+      <div class="part-open" id="part-7">
+        <div class="part-num">Part VII</div>
+        <h2 class="part-title">The REST API &amp; Web Dashboard</h2>
+        <p class="part-dek">The full route surface, the authentication model, and what the dashboard covers.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c7-1">
+        <h2><span class="chno">7.1</span> Route Surface</h2>
+        <div class="table-wrap"><table><thead><tr><th>Route</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>GET /instances</code></td><td>List every managed instance</td></tr>
+          <tr><td><code>POST /instances</code></td><td>Onboard a new instance</td></tr>
+          <tr><td><code>GET /instances/{name}/status</code></td><td>One instance's status</td></tr>
+          <tr><td><code>GET /instances/{name}/history</code></td><td>Its audit trail</td></tr>
+          <tr><td><code>POST /instances/{name}/start</code> / <code>/stop</code></td><td>Manual start/stop</td></tr>
+          <tr><td><code>POST /instances/{name}/extend</code></td><td>Extend an active manual-override window</td></tr>
+          <tr><td><code>GET</code> / <code>POST</code> / <code>DELETE /instances/{name}/schedule</code></td><td>Read, set, or clear an individual schedule</td></tr>
+          <tr><td><code>PATCH /instances/{name}</code></td><td>Change (or clear) group membership</td></tr>
+          <tr><td><code>POST /instances/{name}/offboard</code> / <code>/deregister</code></td><td>Decommission, or deregister locally only</td></tr>
+          <tr><td><code>POST /instances/{name}/migrate-start</code> / <code>/migrate-resume</code></td><td>Drive a Path B migration from the dashboard</td></tr>
+          <tr><td><code>GET /instances/{name}/savings</code></td><td>The two savings percentages for one instance</td></tr>
+          <tr><td><code>POST /groups</code> &middot; <code>GET /groups</code> &middot; <code>GET</code>/<code>DELETE /groups/{name}</code></td><td>Group CRUD</td></tr>
+          <tr><td><code>POST /groups/{name}/schedule</code></td><td>Set a group's schedule</td></tr>
+          <tr><td><code>GET /groups/{name}/savings</code></td><td>The two savings percentages for a group</td></tr>
+        </tbody></table></div>
+        <p>Every route mirrors a CLI command one-to-one &mdash; there is no capability in the API that isn't equally available from the command line, and vice versa.</p>
+      </section>
+
+      <section class="chapter" id="c7-2">
+        <h2><span class="chno">7.2</span> Authentication: Two Credentials, Two Jobs</h2>
+        <p class="lede">The API supports "Login with Linode" &mdash; your team signs in with the exact same account credentials they already use for Cloud Manager, rather than a separate shared secret.</p>
+        <p>This login token answers exactly one question &mdash; <em>who is calling right now</em> &mdash; and is never used to talk to Linode's own API directly. A completely separate, full-access Linode API token, configured once by whoever deploys the tool, is what actually performs every real operation. This separation is deliberate: the scheduler has to keep running and firing scheduled actions even when nobody is logged in, which only works if the credential doing the real work isn't tied to any one person's login session.</p>
+      </section>
+
+      <section class="chapter" id="c7-3">
+        <h2><span class="chno">7.3</span> The Web Dashboard</h2>
+        <p>A browser-based dashboard, served by the same API process, covers the full day-to-day surface: signing in, viewing and onboarding instances, configuring individual and group schedules, starting and stopping instances manually (with the auto-revert countdown shown plainly when active), managing group membership, and both savings percentages. It's a thin visual layer over the identical API described above &mdash; nothing it does isn't equally available from the CLI.</p>
+      </section>
+
+      <!-- ============ PART VIII ============ -->
+      <div class="part-open" id="part-8">
+        <div class="part-num">Part VIII</div>
+        <h2 class="part-title">Security</h2>
+        <p class="part-dek">How SSH access, host-key trust, and the two credential types are handled.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c8-1">
+        <h2><span class="chno">8.1</span> One SSH Keypair, Never a Stored Credential</h2>
+        <p class="lede">SSH access is needed on an ongoing basis &mdash; to verify real reachability after every recreate, and to re-read the current authorized-keys list before every stop so a departing team member's revoked access isn't silently reinstated on the next cycle.</p>
+        <p>This never requires storing a customer's root credential anywhere. One SSH keypair belongs to the deployment itself &mdash; its private key lives only on the server running this tool, read fresh at each use, never written into the database. For a brand-new instance provisioned from a template, this deployment's public key is simply baked into the template once, with no credential ever exchanged. For an existing instance being brought under management, you add this deployment's public key yourself, the normal way you'd add any key &mdash; through access you already have.</p>
+        <p>A one-time fallback exists on the onboarding screen for a customer who'd rather hand over temporary access than add the key themselves &mdash; a password or a private key pasted directly into the form. Neither is ever written to the database: a pasted password is used once, for that single request, and discarded; a pasted private key is written to a locked-down temporary file, used once, and deleted immediately afterward regardless of whether onboarding succeeds or fails.</p>
+      </section>
+
+      <section class="chapter" id="c8-2">
+        <h2><span class="chno">8.2</span> Host-Key Trust Fails Closed</h2>
+        <p>Every steady-state reachability check verifies the presented SSH host key strictly against the one recorded for that instance (see Part I.5) &mdash; a mismatch is refused outright, exactly the way an ordinary SSH client would refuse it, rather than silently accepted. A genuinely new host key is only ever trusted at a deliberate first-contact moment (initial onboarding, or an explicit, operator-run key rotation) &mdash; never automatically during ordinary operation.</p>
+      </section>
+
+      <!-- ============ PART IX ============ -->
+      <div class="part-open" id="part-9">
+        <div class="part-num">Part IX</div>
+        <h2 class="part-title">Deployment Model</h2>
+        <p class="part-dek">Who runs this, on what, and why the design choices fit that model.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c9-1">
+        <h2><span class="chno">9.1</span> Self-Hosted, One Deployment Per Account</h2>
+        <p class="lede">This is a tool you run yourself, against your own Linode account &mdash; not a shared service operated on your behalf.</p>
+        <p>Every design choice downstream of this follows from it. The local registry is a single SQLite database file &mdash; no separate database server to stand up, secure, or back up, appropriate for a single-tenant, self-hosted deployment where the alternative (a full relational database server per customer) would be a heavy, unjustified operational ask for what's meant to stay a lightweight tool. If you register a dashboard login, it's your own OAuth application registered in your own Linode account &mdash; there is no shared vendor infrastructure of any kind in the credential path.</p>
+      </section>
+
+      <section class="chapter" id="c9-2">
+        <h2><span class="chno">9.2</span> High Availability, the Appropriate Way for This Workload</h2>
+        <p>This tool's availability model is built around fast, safe recovery rather than redundant, always-on replicas &mdash; the right trade for a cost-scheduling tool, where a delayed scheduled action costs at most a few extra minutes of avoidable compute, rather than a system serving live customer traffic, where that trade would be wrong. Three layers, from most to least commonly needed: a process supervisor restarts the scheduler automatically if it ever crashes (Part IX.3); a simple periodic file copy of the local database makes a routine restore fast; and if even that's gone, the tag-based reconstruction described in Part V is the guaranteed fallback of last resort. Deliberately absent is a second, simultaneously active scheduler process &mdash; two schedulers racing to fire the same action with no real coordination between them is a correctness risk, not a safety net, and isn't needed when a brief automatic restart already self-heals.</p>
+      </section>
+
+      <!-- ============ APPENDIX ============ -->
+      <div class="part-open" id="part-A">
+        <div class="part-num">Appendix</div>
+        <h2 class="part-title">Glossary</h2>
+        <p class="part-dek">Terms of art used throughout this guide.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter glossary" id="cA-1">
+        <h2><span class="chno">A.1</span> Terms of Art</h2>
+        <dl>
+          <dt><code>reserved IP</code></dt><dd>A public IPv4 address held independently of any instance, so it survives that instance being deleted and can be reattached to whatever's recreated in its place. Permanently locked to the region it was first reserved in; carries a small charge while unattached.</dd>
+          <dt>golden template / template volume</dt><dd>A Block Storage volume holding a fully prepared OS image, cloned once per new logical instance at onboarding (Path A).</dd>
+          <dt>legacy interface model / newer interface model</dt><dd>The two mutually exclusive ways a Linode instance's networking can be configured &mdash; see Part I.3.</dd>
+          <dt>manual override</dt><dd>Starting an instance manually outside its own configured schedule window; arms an auto-revert countdown (Part IV.1).</dd>
+          <dt>schedule group</dt><dd>A named, shared schedule several instances can follow at once; an instance's own individual schedule, if enabled, always overrides its group's (Part III.1).</dd>
+          <dt>rebuild</dt><dd>The disaster-recovery command that reconstructs the local registry entirely from tags recorded on live Linode resources (Part V).</dd>
+          <dt>Path A / Path B</dt><dd>The two onboarding routes &mdash; a fresh instance from a template, or an existing instance migrated onto a volume in place (Part II).</dd>
+        </dl>
+      </section>
+
+      <div class="book-footer">
+        <span class="footer-desc">Instance Scheduler &middot; Definitive Guide &middot; Edition 1</span>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script>
+(function(){
+  var parts = [
+    {label:"Part 0", title:"Why This Exists", chapters:[
+      ["c0-1","0.1 The Billing Problem"],["c0-2","0.2 Who This Is For"],["c0-3","0.3 The Core Mechanism"]
+    ]},
+    {label:"Part I", title:"How It Works", chapters:[
+      ["c1-1","1.1 What Survives"],["c1-2","1.2 Why a Block Volume"],
+      ["c1-3","1.3 The Two Networking Models"],["c1-4","1.4 Staying Reachable"],
+      ["c1-5","1.5 SSH Host-Key Stability"]
+    ]},
+    {label:"Part II", title:"Onboarding", chapters:[
+      ["c2-1","2.1 Path A &mdash; Greenfield"],["c2-2","2.2 Path B &mdash; Migration"]
+    ]},
+    {label:"Part III", title:"Scheduling", chapters:[
+      ["c3-1","3.1 Individual &amp; Group"],["c3-2","3.2 Timezones"],["c3-3","3.3 The Poller"]
+    ]},
+    {label:"Part IV", title:"Manual Control &amp; Savings", chapters:[
+      ["c4-1","4.1 Override &amp; Auto-Revert"],["c4-2","4.2 Savings as a Percentage"]
+    ]},
+    {label:"Part V", title:"Disaster Recovery", chapters:[
+      ["c5-1","5.1 The Registry"],["c5-2","5.2 Honest Limits"]
+    ]},
+    {label:"Part VI", title:"The CLI", chapters:[
+      ["c6-1","6.1 Onboarding &amp; Lifecycle"],["c6-2","6.2 Migration"],
+      ["c6-3","6.3 Scheduling"],["c6-4","6.4 Groups"],["c6-5","6.5 Recovery &amp; Maintenance"]
+    ]},
+    {label:"Part VII", title:"API &amp; Dashboard", chapters:[
+      ["c7-1","7.1 Route Surface"],["c7-2","7.2 Authentication"],["c7-3","7.3 The Dashboard"]
+    ]},
+    {label:"Part VIII", title:"Security", chapters:[
+      ["c8-1","8.1 SSH Keypair"],["c8-2","8.2 Host-Key Trust"]
+    ]},
+    {label:"Part IX", title:"Deployment Model", chapters:[
+      ["c9-1","9.1 Self-Hosted"],["c9-2","9.2 High Availability"]
+    ]},
+    {label:"Appendix", title:"Glossary", chapters:[
+      ["cA-1","A.1 Terms of Art"]
+    ]}
+  ];
+
+  var root = document.getElementById('tocRoot');
+  var frag = document.createDocumentFragment();
+  parts.forEach(function(p){
+    var div = document.createElement('div');
+    div.className = 'toc-part';
+    var lbl = document.createElement('div');
+    lbl.className = 'toc-part-label';
+    lbl.innerHTML = '<b>'+p.label+'</b><span>'+p.title+'</span>';
+    div.appendChild(lbl);
+    var ul = document.createElement('ul');
+    ul.className = 'toc-list';
+    p.chapters.forEach(function(c){
+      var li = document.createElement('li');
+      var a = document.createElement('a');
+      a.href = '#'+c[0];
+      a.innerHTML = c[1];
+      a.dataset.target = c[0];
+      li.appendChild(a);
+      ul.appendChild(li);
+    });
+    div.appendChild(ul);
+    frag.appendChild(div);
+  });
+  root.appendChild(frag);
+
+  var links = Array.prototype.slice.call(document.querySelectorAll('.toc-list a'));
+  var sections = links.map(function(a){ return document.getElementById(a.dataset.target); }).filter(Boolean);
+
+  function setActive(id){
+    links.forEach(function(a){ a.classList.toggle('active', a.dataset.target === id); });
+  }
+
+  try{
+    var io = new IntersectionObserver(function(entries){
+      var best = null, bestTop = Infinity;
+      entries.forEach(function(e){
+        if(e.isIntersecting){
+          var top = e.boundingClientRect.top;
+          if(top >= 0 && top < bestTop){ bestTop = top; best = e.target.id; }
+        }
+      });
+      if(best) setActive(best);
+    }, {rootMargin: "-10% 0px -70% 0px", threshold: [0, 1]});
+    sections.forEach(function(s){ io.observe(s); });
+  }catch(e){}
+
+  var menuBtn = document.getElementById('menuBtn');
+  var sidebar = document.getElementById('sidebar');
+  if(menuBtn){
+    menuBtn.addEventListener('click', function(){
+      sidebar.classList.toggle('open');
+    });
+    links.forEach(function(a){
+      a.addEventListener('click', function(){ sidebar.classList.remove('open'); });
+    });
+  }
+})();
+</script>
+</body>
+</html>

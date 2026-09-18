@@ -4008,7 +4008,7 @@ class PollTickInstanceResult:
     name: str
     outcome: Literal[
         "no_schedule", "disabled", "not_due", "already_transitioning", "already_fired_today",
-        "fired_success", "fired_failure", "error", "auto_revert_window_reopened",
+        "fired_success", "fired_noop", "fired_failure", "error", "auto_revert_window_reopened",
     ]
     action: Literal["create", "delete"] | None = None
     detail: str | None = None
@@ -4030,6 +4030,10 @@ class PollTickResult:
     @property
     def failed_count(self) -> int:
         return sum(1 for r in self.results if r.outcome in ("fired_failure", "error"))
+
+
+_POLL_NOOP_START_OUTCOMES = frozenset({"already_running"})
+_POLL_NOOP_STOP_OUTCOMES = frozenset({"already_stopped", "aborted_by_user"})
 
 
 def poll_tick(
@@ -4168,17 +4172,24 @@ def poll_tick(
                     on_progress=on_progress, on_warning=on_warning,
                 )
                 event_result = _START_EVENT_RESULTS.get(op_result.outcome)
+                is_noop = op_result.outcome in _POLL_NOOP_START_OUTCOMES
             else:
                 op_result = stop_instance(
                     client, name, ssh_key, triggered_by="schedule",
                     on_progress=on_progress, on_warning=on_warning,
                 )
                 event_result = _STOP_EVENT_RESULTS.get(op_result.outcome)
+                is_noop = op_result.outcome in _POLL_NOOP_STOP_OUTCOMES
 
 
             if event_result == "success":
                 results.append(PollTickInstanceResult(
                     name, "fired_success", action=action, via_group=via_group,
+                ))
+            elif is_noop:
+                results.append(PollTickInstanceResult(
+                    name, "fired_noop", action=action, detail=f"outcome={op_result.outcome}",
+                    via_group=via_group,
                 ))
             else:
                 results.append(PollTickInstanceResult(
