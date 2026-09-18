@@ -140,3 +140,12 @@ a unit test.
 ```
 {'stop_while_locked_stdout': '', 'stop_while_locked_stderr': "Configuration error: Another start/stop/rebuild/clear-lock process is already operating on 'r2-node-2' right now. Wait for it to finish and try again.\n"}
 ```
+
+## Chaos round — 2026-09-18T19:53:41.827966+00:00
+
+**Scenario**: `out_of_band_delete` — target: `r2-os-fedora43`
+**Result**: Confirmed working as documented — outcome: `reset_to_stopped_cleanly`
+
+```
+{'stop_returncode': 0, 'stop_stdout_tail': "'r2-os-fedora43': instance 105595545 no longer exists (confirmed 404, presumably deleted out-of-band) -- reset to 'stopped'. Its OS volume, data volume(s), and reserved IP are unaffected.\n", 'recreated': False, 'recreate_retried': True, 'recreate_stderr_tail': "Configuration error: failed to start 'r2-os-fedora43': POST /v4/linode/instances/105700611/configs: [400] Volume 18017664 already attached to Linode 105595545\n"}
+```
