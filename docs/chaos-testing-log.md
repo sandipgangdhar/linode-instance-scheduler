@@ -10,3 +10,20 @@
 ```
 {'stop_while_locked_stdout': '', 'stop_while_locked_stderr': "Configuration error: Another start/stop/rebuild/clear-lock process is already operating on 'r2-os-ubuntu2004' right now. Wait for it to finish and try again.\n"}
 ```
+
+## Correction — 2026-09-18
+
+The `lock_contention` FINDING immediately above (2026-09-18T04:59:26Z) was a bug in the
+chaos-monkey harness itself, not the product, found and fixed within the hour: the
+long-running soak harness's own daily disaster-recovery drill fired immediately at startup
+(an uninitialized "last run" timestamp made the first interval look overdue on the very
+first loop iteration) and raced against this exact chaos round, which happened to be running
+against a different instance at the same moment -- the two harnesses mutating/reading the
+shared registry concurrently produced confusing, hard-to-attribute output. Manually reproducing
+the identical scenario in isolation (no concurrent drill) confirmed the real product behavior
+is correct: a held per-instance lock is refused cleanly ("Configuration error: Another
+start/stop/rebuild/clear-lock process is already operating..."), and normal operation resumes
+immediately once the lock is released. Fixed with a shared file-based mutex so the two
+harnesses' registry-level operations can never run concurrently again, plus a calm startup
+delay on both. The live fleet was independently confirmed fully healthy throughout -- no
+instance was ever actually harmed by this.
