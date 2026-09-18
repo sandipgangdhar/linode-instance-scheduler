@@ -64,3 +64,26 @@ real 12-instance fleet with realistic multi-cycle daily schedules (dev-fleet-a: 
 windows/day UTC, dev-fleet-b: 3x1.5h windows/day IST, r2-node-1: 3x1h individual-schedule
 windows/day). 12 rotating check cycles completed since the last checkpoint, 0
 finding(s) recorded (see the JSONL event log for full detail on any).
+
+## Round 2 finding -- 2026-09-18
+
+While the soak test was running against the round-2 fleet, a routine check-in caught several
+`dev-fleet-b` group members being reported as `fired_failure` for an ordinary scheduled
+"create" that opened while they were already running (from an earlier, overlapping window) --
+every instance was actually healthy the whole time. Root cause: `poll_tick()`'s success/failure
+classification treated "already running" / "already stopped" (documented no-op outcomes,
+nothing wrong) the same as a real failure, which meant `poll --once`'s exit code -- the intended
+signal for a cron/systemd wrapper or monitoring script to detect a tick that needs attention --
+could report failure on a run where nothing was actually wrong. Fixed with a new, distinct
+no-op outcome so a genuine no-op is never counted as a failure. Shipped as `v1.2.3`.
+
+Cutting that release also surfaced two problems in the publish pipeline itself, both fixed the
+same day: the automated GitHub Actions publish workflow had never actually succeeded on a
+genuinely clean checkout (a missing dependency-install step for part of the export process,
+undetected by local testing since that machine already had the dependency installed); and the
+release script's wipe-and-replace step briefly deleted this log and its sibling
+`chaos-testing-log.md` before restoring both from git history and fixing the script so every
+file meant to persist across a release is protected the same way, not just the first one that
+needed it.
+
+Both fleets restarted cleanly on the fixed code with zero disruption.
