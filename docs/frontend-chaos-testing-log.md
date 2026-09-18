@@ -14,3 +14,8 @@
 
 **Scenario**: `network_abort_mid_poll`
 **Result**: Confirmed working as expected -- outcome: `clean_failure_recovered`
+
+## Chaos round -- 2026-09-18T16:21:50.258908+00:00
+
+**Scenario**: `network_abort_mid_poll`
+**Result**: Confirmed working as expected -- outcome: `clean_failure_recovered`
