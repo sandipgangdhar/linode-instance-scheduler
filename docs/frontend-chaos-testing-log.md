@@ -69,3 +69,8 @@
 
 **Scenario**: `stale_navigation_leak`
 **Result**: Confirmed working as expected -- outcome: `clean_no_leak`
+
+## Chaos round -- 2026-09-18T22:03:55.625370+00:00
+
+**Scenario**: `malformed_error_body`
+**Result**: Confirmed working as expected -- outcome: `clean_error_no_exception`
