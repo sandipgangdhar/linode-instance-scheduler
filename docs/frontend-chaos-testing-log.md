@@ -254,3 +254,8 @@
 
 **Scenario**: `malformed_error_body`
 **Result**: Confirmed working as expected -- outcome: `clean_error_no_exception`
+
+## Chaos round -- 2026-09-19T21:47:30.810802+00:00
+
+**Scenario**: `rapid_double_submit`
+**Result**: Confirmed working as expected -- outcome: `clean_single_call`
