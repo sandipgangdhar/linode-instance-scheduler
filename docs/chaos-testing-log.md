@@ -176,3 +176,12 @@ a unit test.
 ```
 {'retry_returncode': 1, 'retry_stdout_tail': "'r2-node-1': create due, firing (triggered_by=schedule)...\n  r2-node-1: error action=create (Another start/stop/rebuild/clear-lock process is already operating on 'r2-node-1' right now. Wait for it to finish and try again.)\nTick complete: 0 fired, 1 failed, 12 instance(s) checked.\n", 'stuck_instances': []}
 ```
+
+## Chaos round — 2026-09-19T04:49:17.841092+00:00
+
+**Scenario**: `out_of_band_shutdown` — target: `r2-os-centos-stream9`
+**Result**: Confirmed working as documented — outcome: `recovered`
+
+```
+{'first_start_returncode': 1, 'first_start_stdout_tail': "'r2-os-centos-stream9' instance 105746813 exists but is offline -- likely powered off out-of-band. Marking it for recovery...\n", 'second_start_returncode': 0, 'second_start_stdout_tail': "'r2-os-centos-stream9' has an unreachable instance (105746813) from a previous start attempt -- retrying the reachability check instead of creating a new one...\n  running -- verifying real network reachability...\n'r2-os-centos-stream9' is up at 172.236.177.58.\n"}
+```
