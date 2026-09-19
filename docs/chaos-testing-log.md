@@ -248,3 +248,12 @@ a unit test.
 ```
 {'retry_returncode': 0, 'retry_stdout_tail': 'Tick complete: 0 fired, 0 failed, 12 instance(s) checked.\n', 'stuck_instances': []}
 ```
+
+## Chaos round — 2026-09-19T23:37:42.022918+00:00
+
+**Scenario**: `out_of_band_delete` — target: `r2-os-almalinux10`
+**Result**: Confirmed working as documented — outcome: `skipped_not_running`
+
+```
+{}
+```
