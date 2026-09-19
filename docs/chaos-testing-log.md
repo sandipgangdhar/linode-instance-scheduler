@@ -212,3 +212,12 @@ a unit test.
 ```
 {}
 ```
+
+## Chaos round — 2026-09-19T12:46:17.084924+00:00
+
+**Scenario**: `lock_contention` — target: `r2-node-2`
+**Result**: Confirmed working as documented — outcome: `clean_lock_refusal_then_normal`
+
+```
+{'stop_while_locked_stdout': '', 'stop_while_locked_stderr': "Configuration error: Another start/stop/rebuild/clear-lock process is already operating on 'r2-node-2' right now. Wait for it to finish and try again.\n"}
+```
