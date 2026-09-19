@@ -129,3 +129,8 @@
 
 **Scenario**: `malformed_error_body`
 **Result**: Confirmed working as expected -- outcome: `clean_error_no_exception`
+
+## Chaos round -- 2026-09-19T06:15:12.013608+00:00
+
+**Scenario**: `malformed_error_body`
+**Result**: Confirmed working as expected -- outcome: `clean_error_no_exception`
