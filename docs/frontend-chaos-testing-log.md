@@ -104,3 +104,8 @@
 
 **Scenario**: `stale_navigation_leak`
 **Result**: Confirmed working as expected -- outcome: `clean_no_leak`
+
+## Chaos round -- 2026-09-19T02:26:08.057639+00:00
+
+**Scenario**: `stale_navigation_leak`
+**Result**: Confirmed working as expected -- outcome: `clean_no_leak`
