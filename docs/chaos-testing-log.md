@@ -194,3 +194,12 @@ a unit test.
 ```
 {'stop_while_locked_stdout': '', 'stop_while_locked_stderr': "Configuration error: Another start/stop/rebuild/clear-lock process is already operating on 'r2-os-ubuntu2204' right now. Wait for it to finish and try again.\n"}
 ```
+
+## Chaos round — 2026-09-19T09:33:12.493293+00:00
+
+**Scenario**: `tag_tampering` — target: `r2-os-rocky9`
+**Result**: Confirmed working as documented — outcome: `retagged_on_next_cycle`
+
+```
+{'stop_returncode': 0, 'start_returncode': 0, 'tags_after': ['linode-scheduler-name:r2-os-rocky9', 'linode-scheduler-role:os']}
+```
