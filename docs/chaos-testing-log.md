@@ -203,3 +203,12 @@ a unit test.
 ```
 {'stop_returncode': 0, 'start_returncode': 0, 'tags_after': ['linode-scheduler-name:r2-os-rocky9', 'linode-scheduler-role:os']}
 ```
+
+## Chaos round — 2026-09-19T10:35:01.085762+00:00
+
+**Scenario**: `out_of_band_delete` — target: `r2-os-ubuntu2204`
+**Result**: Confirmed working as documented — outcome: `skipped_not_running`
+
+```
+{}
+```
