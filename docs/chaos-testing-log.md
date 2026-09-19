@@ -221,3 +221,12 @@ a unit test.
 ```
 {'stop_while_locked_stdout': '', 'stop_while_locked_stderr': "Configuration error: Another start/stop/rebuild/clear-lock process is already operating on 'r2-node-2' right now. Wait for it to finish and try again.\n"}
 ```
+
+## Chaos round — 2026-09-19T14:59:15.348227+00:00
+
+**Scenario**: `out_of_band_shutdown` — target: `r2-os-ubuntu2004`
+**Result**: Confirmed working as documented — outcome: `skipped_not_running`
+
+```
+{}
+```
