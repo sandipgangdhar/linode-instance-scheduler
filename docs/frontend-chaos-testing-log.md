@@ -139,3 +139,8 @@
 
 **Scenario**: `stale_navigation_leak`
 **Result**: Confirmed working as expected -- outcome: `clean_no_leak`
+
+## Chaos round -- 2026-09-19T07:18:23.755187+00:00
+
+**Scenario**: `network_abort_mid_poll`
+**Result**: Confirmed working as expected -- outcome: `clean_failure_recovered`
