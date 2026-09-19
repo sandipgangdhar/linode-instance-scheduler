@@ -239,3 +239,12 @@ a unit test.
 ```
 {'list_after_corruption_stderr': "Configuration error: the local registry database at /opt/soak-chaos/product/state/instances.db appears corrupted or unreadable (file is not a database). Recovering local records from Linode's own tags needs a working, even if empty, local database first -- move the corrupted file aside (e.g. `mv /opt/soak-chaos/product/state/instances.db /opt/soak-chaos/product/state/instances.db.corrupted`) and re-run this command; a fresh, empty database will be created automatically, and `rebuild` can then re", 'rebuild_stdout_tail': "am9''s membership in group 'dev-fleet-b' from tags.\n  restored schedule for 'r2-grp-01' from tags.\nScanned tags: 12 name(s) found.\n  fully recovered (was running): r2-os-almalinux10, r2-os-rocky9, r2-os-centos-stream9\n  partially recovered (was stopped, needs manual recovery): r2-node-1, r2-node-2, r2-os-ubuntu2204, r2-os-ubuntu2004, r2-os-almalinux9, r2-os-debian13, r2-os-almalinux8, r2-os-fedora43, r2-grp-01\n    -- boot each of these manually once via Cloud Manager from its os_volume_id, using its network_config from Cloud Manager's own UI, then re-run `onboard` to fully restore management.\n"}
 ```
+
+## Chaos round — 2026-09-19T21:36:04.229081+00:00
+
+**Scenario**: `poller_crash_mid_tick` — target: `n/a`
+**Result**: Confirmed working as documented — outcome: `clean_retry_no_stuck_locks`
+
+```
+{'retry_returncode': 0, 'retry_stdout_tail': 'Tick complete: 0 fired, 0 failed, 12 instance(s) checked.\n', 'stuck_instances': []}
+```
