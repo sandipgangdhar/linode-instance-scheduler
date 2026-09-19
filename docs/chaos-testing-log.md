@@ -167,3 +167,12 @@ a unit test.
 ```
 {}
 ```
+
+## Chaos round — 2026-09-19T03:02:05.720619+00:00
+
+**Scenario**: `poller_crash_mid_tick` — target: `n/a`
+**Result**: Confirmed working as documented — outcome: `clean_retry_no_stuck_locks`
+
+```
+{'retry_returncode': 1, 'retry_stdout_tail': "'r2-node-1': create due, firing (triggered_by=schedule)...\n  r2-node-1: error action=create (Another start/stop/rebuild/clear-lock process is already operating on 'r2-node-1' right now. Wait for it to finish and try again.)\nTick complete: 0 fired, 1 failed, 12 instance(s) checked.\n", 'stuck_instances': []}
+```
