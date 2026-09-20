@@ -257,3 +257,12 @@ a unit test.
 ```
 {}
 ```
+
+## Chaos round — 2026-09-20T02:13:02.222139+00:00
+
+**Scenario**: `tag_tampering` — target: `r2-os-debian13`
+**Result**: FINDING — outcome: `FINDING`
+
+```
+{'stop_returncode': 1, 'start_returncode': 1, 'tags_after': []}
+```
