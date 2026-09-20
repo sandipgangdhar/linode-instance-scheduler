@@ -289,3 +289,8 @@
 
 **Scenario**: `rapid_double_submit`
 **Result**: Confirmed working as expected -- outcome: `clean_single_call`
+
+## Chaos round -- 2026-09-20T02:11:38.206673+00:00
+
+**Scenario**: `rapid_double_submit`
+**Result**: Confirmed working as expected -- outcome: `clean_single_call`
