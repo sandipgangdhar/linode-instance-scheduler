@@ -343,3 +343,7 @@ Current JS heap sample: 15635083 bytes (baseline 17061900 bytes). 0 console/page
 ## Checkpoint -- 13735 navigation cycles, 95 full-operations walks completed
 
 Current JS heap sample: 18318937 bytes (baseline 17061900 bytes). 0 console/page errors and no heap-growth alarm since the last checkpoint (see the JSONL event log for full detail on any finding, including per-operation results from the full-operations walk).
+
+## Checkpoint -- 14157 navigation cycles, 98 full-operations walks completed
+
+Current JS heap sample: 16616023 bytes (baseline 17061900 bytes). 0 console/page errors and no heap-growth alarm since the last checkpoint (see the JSONL event log for full detail on any finding, including per-operation results from the full-operations walk).
