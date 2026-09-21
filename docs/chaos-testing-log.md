@@ -328,3 +328,12 @@ the fleet was confirmed fully healthy.
 ```
 {'stop_while_locked_stdout': '', 'stop_while_locked_stderr': "Configuration error: Another start/stop/rebuild/clear-lock process is already operating on 'r2-os-almalinux8' right now. Wait for it to finish and try again.\n"}
 ```
+
+## Chaos round — 2026-09-21T15:52:17.207245+00:00
+
+**Scenario**: `tag_tampering` — target: `r2-os-almalinux9`
+**Result**: FINDING — outcome: `FINDING`
+
+```
+{'stop_returncode': 0, 'start_returncode': 0, 'tags_after': []}
+```
