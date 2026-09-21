@@ -367,3 +367,12 @@ Chaos testing resumed.
 ```
 {'stop_during_outage_returncode': 0, 'warned_during_outage': True, 'recovery_backup_returncode': 0, 'resynced': True}
 ```
+
+## Chaos round — 2026-09-21T21:04:04.421756+00:00
+
+**Scenario**: `lock_contention` — target: `r2-os-almalinux8`
+**Result**: Confirmed working as documented — outcome: `clean_lock_refusal_then_normal`
+
+```
+{'stop_while_locked_stdout': '', 'stop_while_locked_stderr': "Configuration error: Another start/stop/rebuild/clear-lock process is already operating on 'r2-os-almalinux8' right now. Wait for it to finish and try again.\n"}
+```
