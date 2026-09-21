@@ -32,6 +32,18 @@ export function errorWarnings(e: unknown): string[] | null {
   }
   return null
 }
+let pollingCancelled = false
+export class PollingCancelledError extends Error {
+  constructor() {
+    super('Cancelled: signed out.')
+  }
+}
+export function cancelBackgroundPolling(): void {
+  pollingCancelled = true
+}
+export function resetBackgroundPollingCancellation(): void {
+  pollingCancelled = false
+}
 async function pollOperation<T>(
   operationId: string,
   onProgress?: (percent: number, currentStep: string | null) => void,
@@ -39,6 +51,7 @@ async function pollOperation<T>(
 ): Promise<T> {
   let lastReported: readonly [number, string | null] | null = null
   for (;;) {
+    if (pollingCancelled) throw new PollingCancelledError()
     const op = await request<OperationStatus<T>>('GET', `/operations/${encodeURIComponent(operationId)}`)
     if (lastReported === null || lastReported[0] !== op.percent || lastReported[1] !== op.current_step) {
       onProgress?.(op.percent, op.current_step)

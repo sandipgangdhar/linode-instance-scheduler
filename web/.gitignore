@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Playwright/Vitest run artifacts -- never committed, regenerated on every run
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+coverage/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

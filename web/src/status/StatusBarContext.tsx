@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { PollingCancelledError } from '../api/client'
 type StatusKind = 'pending' | 'success' | 'error'
 interface StatusEntry {
   id: number
@@ -78,12 +79,16 @@ export function StatusBarProvider({ children }: { children: ReactNode }) {
         dismissTimers.current.set(id, t)
         return result
       } catch (e) {
+        if (e instanceof PollingCancelledError) {
+          dismiss(id)
+          return new Promise<T>(() => {})
+        }
         const detail = e instanceof Error ? e.message : 'Something went wrong.'
         setEntries((es) => es.map((en) => (en.id === id ? { ...base, kind: 'error' as const, detail } : en)))
         throw e
       }
     },
-    [],
+    [dismiss],
   )
   const current = entries.find((e) => e.id === frontId) ?? entries[entries.length - 1] ?? null
   const others = current ? entries.filter((e) => e.id !== current.id) : entries

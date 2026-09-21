@@ -29,6 +29,7 @@ from linode_api4 import Instance, Volume
 from linode_api4.errors import ApiError
 
 import linode_engine as engine
+import object_storage_backup as osb
 from linode_engine import validate_instance_name
 
 REGISTRY_PATH = engine.BASE_DIR / "state" / "instances.db"
@@ -2023,6 +2024,23 @@ def onboard_instance(
 
 
         try:
+            matched_key_ids, _unmatched_keys = _classify_authorized_keys(
+                client, record["authorized_keys"],
+            )
+            _sync_extra_recovery_tags_locked(client, name, record, matched_key_ids)
+        except Exception as e:
+
+            if on_warning is not None:
+                on_warning(
+                    f"  WARNING: could not sync network-config/SSH-key recovery tags for "
+                    f"'{name}' onto its reserved IP ({e}) -- onboarding still succeeded and "
+                    "'{name}' is fully correct locally; this only affects recovery after a "
+                    "total local database loss (safe to retry: `onboard --force`)."
+                )
+        osb.sync_object_storage_backup(name, record, on_warning=on_warning)
+
+
+        try:
             fresh_os_volume = client.load(Volume, os_volume_id)
             other_names = [n for n in engine.names_from_tags(fresh_os_volume.tags) if n != name]
             if other_names and on_warning is not None:
@@ -2705,6 +2723,19 @@ def _stop_instance_locked(
                 f"`status --name {name}` reflects whatever was captured before the failure.",
             )
 
+
+        try:
+            matched_key_ids, _unmatched_keys = _classify_authorized_keys(client, fresh_authorized_keys)
+            _sync_extra_recovery_tags_locked(client, name, record, matched_key_ids)
+        except Exception as e:
+            if on_warning is not None:
+                on_warning(
+                    f"  WARNING: could not sync network-config/SSH-key recovery tags for "
+                    f"'{name}' onto its reserved IP ({e}) -- '{name}' is fully stopped and "
+                    "correct locally; this only affects recovery after a total local database "
+                    "loss (safe to retry: just run `stop`/`start` again)."
+                )
+        osb.sync_object_storage_backup(name, record, on_warning=on_warning)
 
         return StopResult(outcome="stopped")
 
@@ -3549,6 +3580,260 @@ def _sync_group_membership_tags(
                 "effect, but won't be recoverable via `rebuild` if the local database is lost "
                 "before this is retried (safe to retry: re-run group-add for this instance)."
             )
+
+
+_SIMPLE_NETWORK_CONFIG_TAG_PREFIX = "net-"
+_SSH_KEY_TAG_PREFIX = "sshkeys"
+
+
+_MAX_TAG_LENGTH = 50
+
+
+def _is_extra_recovery_tag(tag: str) -> bool:
+
+    if tag.startswith(_SIMPLE_NETWORK_CONFIG_TAG_PREFIX):
+        return True
+    if tag.startswith(_SSH_KEY_TAG_PREFIX):
+        suffix = tag.partition(":")[0][len(_SSH_KEY_TAG_PREFIX):]
+        return suffix.isdigit()
+    return False
+
+
+def _encode_simple_network_config_as_tags(
+    network_interface_model: str | None, network_config: list | None, network_helper_enabled: bool | None
+) -> list[str]:
+
+    if network_interface_model != "legacy_config" or network_helper_enabled is None:
+        return []
+    if not isinstance(network_config, list) or len(network_config) != 1:
+        return []
+    iface = network_config[0]
+    if not isinstance(iface, dict) or set(iface.keys()) - {"purpose", "primary"}:
+        return []
+    if iface.get("purpose") != "public":
+        return []
+    primary = 1 if iface.get("primary") else 0
+    return [
+        f"{_SIMPLE_NETWORK_CONFIG_TAG_PREFIX}if:pub-{primary}",
+        f"{_SIMPLE_NETWORK_CONFIG_TAG_PREFIX}nh:{1 if network_helper_enabled else 0}",
+    ]
+
+
+def _decode_simple_network_config_from_tags(tags: list[str] | None) -> dict | None:
+
+    if_prefix, nh_prefix = f"{_SIMPLE_NETWORK_CONFIG_TAG_PREFIX}if:", f"{_SIMPLE_NETWORK_CONFIG_TAG_PREFIX}nh:"
+    primary = None
+    network_helper_enabled = None
+    for tag in tags or []:
+        if tag.startswith(if_prefix):
+            value = tag[len(if_prefix):]
+            if value == "pub-0":
+                primary = False
+            elif value == "pub-1":
+                primary = True
+        elif tag.startswith(nh_prefix):
+            network_helper_enabled = tag[len(nh_prefix):] == "1"
+    if primary is None or network_helper_enabled is None:
+        return None
+    return {
+        "network_interface_model": "legacy_config",
+        "network_config": [{"purpose": "public", "primary": primary}],
+        "network_helper_enabled": network_helper_enabled,
+    }
+
+
+def _classify_authorized_keys(client, raw_keys: list[str]) -> tuple[list[int], list[str]]:
+
+    if not raw_keys:
+        return [], []
+    try:
+        registered = {
+            k.ssh_key: k.id
+            for k in engine.retry_transient(lambda: list(client.profile.ssh_keys()))
+        }
+    except Exception:
+        return [], list(raw_keys)
+    matched_ids: list[int] = []
+    unmatched: list[str] = []
+    for key in raw_keys:
+        key_id = registered.get(key)
+        if key_id is not None:
+            matched_ids.append(key_id)
+        else:
+            unmatched.append(key)
+    return matched_ids, unmatched
+
+
+def _encode_ssh_key_ids_as_tags(key_ids: list[int]) -> list[str]:
+
+    tags: list[str] = []
+    current: list[str] = []
+    index = 0
+    for key_id in key_ids:
+        candidate = [*current, str(key_id)]
+        candidate_tag = f"{_SSH_KEY_TAG_PREFIX}{index}:{'-'.join(candidate)}"
+        if len(candidate_tag) > _MAX_TAG_LENGTH and current:
+            tags.append(f"{_SSH_KEY_TAG_PREFIX}{index}:{'-'.join(current)}")
+            index += 1
+            current = [str(key_id)]
+        else:
+            current = candidate
+    if current:
+        tags.append(f"{_SSH_KEY_TAG_PREFIX}{index}:{'-'.join(current)}")
+    return tags
+
+
+def _decode_ssh_key_ids_from_tags(tags: list[str] | None) -> list[int]:
+
+    ids: list[int] = []
+    for tag in tags or []:
+        prefix_part, sep, rest = tag.partition(":")
+        if not sep or not prefix_part.startswith(_SSH_KEY_TAG_PREFIX):
+            continue
+        if not prefix_part[len(_SSH_KEY_TAG_PREFIX):].isdigit():
+            continue
+        for id_str in rest.split("-"):
+            if id_str.isdigit():
+                ids.append(int(id_str))
+    return ids
+
+
+def _resolve_ssh_key_ids_to_content(client, key_ids: list[int]) -> list[str]:
+
+    if not key_ids:
+        return []
+    try:
+        registered = {
+            k.id: k.ssh_key
+            for k in engine.retry_transient(lambda: list(client.profile.ssh_keys()))
+        }
+    except Exception:
+        return []
+    return [registered[key_id] for key_id in key_ids if key_id in registered]
+
+
+def _sync_extra_recovery_tags_locked(client, name: str, record: dict, ssh_key_ids: list[int]) -> None:
+
+    ip = engine.retry_transient(
+        lambda: client.load(engine.ReservedIPAddress, record["reserved_ip"])
+    )
+    kept = [t for t in (ip.tags or []) if not _is_extra_recovery_tag(t)]
+    new_extra = (
+        _encode_simple_network_config_as_tags(
+            record.get("network_interface_model"), record.get("network_config"),
+            record.get("network_helper_enabled"),
+        )
+        + _encode_ssh_key_ids_as_tags(ssh_key_ids)
+    )
+    new_tags = kept + new_extra
+    if new_tags != (ip.tags or []):
+        ip.tags = new_tags
+        ip.save()
+        _verify_reserved_ip_tag_write(client, record["reserved_ip"], new_tags)
+
+
+@dataclass
+class BackupResult:
+
+    object_storage_configured: bool = False
+    instances_synced: list[str] = field(default_factory=list)
+    instances_failed: list[str] = field(default_factory=list)
+    object_storage_snapshot_key: str | None = None
+    object_storage_snapshot_error: str | None = None
+    local_snapshot_path: str | None = None
+    local_snapshot_error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+
+        return not (
+            self.instances_failed
+            or self.object_storage_snapshot_error
+            or self.local_snapshot_error
+        )
+
+
+def backup_full_system(
+    *, local_dir: Path | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> BackupResult:
+
+    result = BackupResult(object_storage_configured=osb.is_configured())
+
+    if result.object_storage_configured:
+        registry = load_registry()
+        if on_progress is not None:
+            on_progress(f"Re-syncing {len(registry)} instance record(s) to Object Storage...")
+        for name, record in registry.items():
+            try:
+                osb.upload_instance_backup(name, record)
+                result.instances_synced.append(name)
+            except Exception as e:
+                result.instances_failed.append(name)
+                if on_warning is not None:
+                    on_warning(f"  WARNING: could not back up '{name}' to Object Storage ({e})")
+
+        if on_progress is not None:
+            on_progress("Uploading a full database snapshot to Object Storage...")
+        try:
+            result.object_storage_snapshot_key = osb.upload_database_snapshot(REGISTRY_PATH)
+        except Exception as e:
+            result.object_storage_snapshot_error = str(e)
+            if on_warning is not None:
+                on_warning(f"  WARNING: could not upload full database snapshot ({e})")
+    elif on_warning is not None:
+        on_warning(
+            "  WARNING: Object Storage is not configured (LINODE_OBJ_STORAGE_* unset) -- "
+            "skipping the per-instance Object Storage re-sync and snapshot upload. See "
+            "docs/OPERATIONS.md to set this up."
+        )
+
+    if local_dir is not None:
+        local_dir.mkdir(parents=True, exist_ok=True)
+        local_path = local_dir / f"instances-{int(time.time())}.db"
+        if on_progress is not None:
+            on_progress(f"Writing a full database snapshot to {local_path}...")
+        try:
+            osb.snapshot_database(REGISTRY_PATH, local_path)
+            result.local_snapshot_path = str(local_path)
+        except Exception as e:
+            result.local_snapshot_error = str(e)
+            if on_warning is not None:
+                on_warning(f"  WARNING: could not write local database snapshot ({e})")
+
+    return result
+
+
+def cmd_backup(args) -> int:
+    if not osb.is_configured() and not args.backup_dir:
+        print(
+            "Configuration error: nothing to back up to -- Object Storage isn't configured "
+            "(LINODE_OBJ_STORAGE_* unset in .env) and no --backup-dir was given. Configure "
+            "Object Storage (see docs/OPERATIONS.md) or pass --backup-dir.",
+            file=sys.stderr,
+        )
+        return 1
+
+    local_dir = Path(args.backup_dir) if args.backup_dir else None
+    result = backup_full_system(
+        local_dir=local_dir, on_progress=print, on_warning=_print_to_stderr,
+    )
+
+    if result.object_storage_configured:
+        summary = f"Object Storage: {len(result.instances_synced)} instance record(s) re-synced"
+        if result.instances_failed:
+            summary += f", {len(result.instances_failed)} failed"
+        print(summary + ".")
+        if result.object_storage_snapshot_key:
+            print(
+                f"Object Storage: full database snapshot uploaded as "
+                f"'{result.object_storage_snapshot_key}'."
+            )
+    if result.local_snapshot_path:
+        print(f"Local snapshot written to {result.local_snapshot_path}.")
+
+    return 0 if result.ok else 1
 
 
 def _set_group_schedule_row(group_name: str, timezone: str, rules: list, enabled: bool) -> None:
@@ -4770,7 +5055,9 @@ def rebuild_instances(
             continue
 
         registry[name] = record
-        if record["current_status"] == "running":
+
+
+        if record["current_status"] in ("running", "stopped"):
             recovered.append(name)
         else:
             partial.append(name)
@@ -4778,7 +5065,7 @@ def rebuild_instances(
     if on_progress is not None:
         on_progress(f"Scanned tags: {len(found)} name(s) found.")
         if recovered:
-            on_progress(f"  fully recovered (was running): {', '.join(recovered)}")
+            on_progress(f"  fully recovered: {', '.join(recovered)}")
         if partial:
             on_progress(
                 f"  partially recovered (was stopped, needs manual recovery): "
@@ -4958,7 +5245,7 @@ def _rebuild_one_record(
             f"{len(slot_names)} non-OS device slots a boot config supports -- refusing "
             "to silently drop any of them from the reconstructed record."
         )
-    return {
+    record = {
         "name": name,
         "region": resources["region"],
         "os_volume_id": resources["os_volume_id"],
@@ -4973,6 +5260,63 @@ def _rebuild_one_record(
         "current_status": "needs_manual_recovery",
         "transitioning": False,
     }
+
+
+    try:
+        ip = engine.retry_transient(
+            lambda: client.load(engine.ReservedIPAddress, resources["reserved_ip"])
+        )
+
+
+        ip_tags = ip.tags if isinstance(ip.tags, list) else []
+    except Exception:
+        ip_tags = []
+
+    simple_network = _decode_simple_network_config_from_tags(ip_tags)
+    if simple_network is not None:
+        record.update(simple_network)
+
+    tag_ssh_key_ids = _decode_ssh_key_ids_from_tags(ip_tags)
+    tag_authorized_keys = (
+        _resolve_ssh_key_ids_to_content(client, tag_ssh_key_ids) if tag_ssh_key_ids else []
+    )
+
+    backup = osb.download_instance_backup(name)
+
+    if simple_network is None and backup is not None:
+        record["network_interface_model"] = backup.get("network_interface_model")
+        record["network_config"] = backup.get("network_config")
+        record["network_helper_enabled"] = backup.get("network_helper_enabled")
+
+    merged_keys = list(tag_authorized_keys)
+    if backup is not None:
+
+
+        for key in backup.get("authorized_keys") or []:
+            if key not in merged_keys:
+                merged_keys.append(key)
+    if merged_keys:
+        record["authorized_keys"] = merged_keys
+
+    if backup is not None:
+        record["vpc_prefix"] = backup.get("vpc_prefix")
+        record["label"] = backup.get("label")
+        record["tags"] = backup.get("tags")
+        record["instance_attrs"] = backup.get("instance_attrs")
+
+
+    has_network = (
+        record.get("network_interface_model") is not None
+        and record.get("network_config") is not None
+        and (
+            record.get("network_interface_model") != "legacy_config"
+            or record.get("network_helper_enabled") is not None
+        )
+    )
+    if has_network and record.get("authorized_keys"):
+        record["current_status"] = "stopped"
+
+    return record
 
 
 DEFAULT_SESSION_LIFETIME_HOURS = 24.0
@@ -5408,6 +5752,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Overwrite an existing local entry with the rebuilt one, if one already exists.",
     )
 
+    backup_parser = subparsers.add_parser(
+        "backup",
+        help="On-demand, whole-system backup -- re-syncs every instance's Object Storage "
+        "record and takes a full database snapshot. Meant to be run on a schedule (cron/"
+        "systemd timer), not just invoked manually.",
+    )
+    backup_parser.add_argument(
+        "--backup-dir", default=None,
+        help="Also write a full local database snapshot into this directory, independent of "
+        "Object Storage. Give this, configure Object Storage (LINODE_OBJ_STORAGE_* in .env), "
+        "or both -- refuses if neither is available, since there'd be nothing to actually do.",
+    )
+
     return parser
 
 
@@ -5458,6 +5815,8 @@ def _route(args) -> int:
         return cmd_deregister(args)
     if args.command == "reset-host-key":
         return cmd_reset_host_key(args)
+    if args.command == "backup":
+        return cmd_backup(args)
 
     try:
         token = engine.load_token()

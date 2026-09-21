@@ -87,8 +87,9 @@ Before you start, make sure you have:
 
 This section is exactly what you'd do today, with no automation involved — building a Redis
 standby or TiDB replica node from scratch. If you already have existing nodes running Redis or
-TiDB, skip to [§4](#4-getting-the-automation) and come back to [§6](#6-one-time-migration-onto-block-storage-path-b)
-for what's different about bringing an *existing* node under this tool's management.
+TiDB, skip to [§4](#4-installing-and-configuring-the-automation) and come back to
+[§6](#6-one-time-migration-onto-block-storage-path-b) for what's different about bringing an
+*existing* node under this tool's management.
 
 ### 3.1 Create the Linode instance
 
@@ -177,7 +178,7 @@ expects.
 
 ---
 
-## 4. Getting the automation
+## 4. Installing and configuring the automation
 
 **Run this from a centralized server, not your local laptop.** This tool keeps track of every
 node it manages in a local registry file on whatever machine you run it from (see §8's `rebuild`
@@ -271,6 +272,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `clear-lock` | Admin escape hatch — forcibly clears a stuck in-progress operation. You should rarely need this. |
 | `reset-host-key` | Admin escape hatch — re-establishes SSH trust for a node after a genuine, confirmed key change. You should rarely need this either; see [§8](#8-day-to-day-usage) and the one-time migration note below. |
 | `rebuild` | Disaster recovery — reconstructs your local registry from tags on your own Linode account, in case the machine running this tool (and its local records) is ever lost. You should rarely need this either. |
+| `backup` | On-demand, whole-system backup — re-syncs every node's Object Storage record and takes a full local/remote database snapshot. Meant to be run on a schedule (cron/systemd timer). See §8.10. |
 | `offboard` | Permanently decommission a stopped node — releases its reserved IP, removes it from tracking, and optionally deletes its volumes. For when you're actually done with a node, not just pausing it. |
 
 > **Upgrading this tool on a fleet you already manage?** Read the one-time migration note in
@@ -1129,6 +1131,69 @@ that's simply wrong rather than a node you're actually done with); a group list 
 detail page for the same schedule/savings view plus membership management. It's a thin client
 over the REST API in §8.8 — every action it takes is one of that API's own endpoints, nothing the
 dashboard can do that the CLI/API couldn't already do directly.
+
+### 8.10 `backup` — scheduling your own whole-system backups
+
+Every stop/onboard already backs that one node up automatically (see the disaster recovery
+section of the Definitive Guide) — `backup` is a separate, explicit command for taking a backup
+of *everything at once*, on your own schedule, rather than waiting for individual nodes to be
+touched:
+
+```
+python instance_manager.py backup --backup-dir /var/backups/instance-scheduler
+```
+
+This does two things every time it runs: if Object Storage is configured (see the Operations
+Guide), it re-syncs every currently-onboarded node's own Object Storage record in one pass, and
+uploads a single, consistent snapshot of your entire local database there too — covering
+schedules and groups, which the per-node records don't. If `--backup-dir` is given, it also
+writes that same snapshot to a local file. Give it one, the other, or both; it refuses with a
+clear error if neither is available, since there'd be nothing to actually do.
+
+Run it on whatever schedule matches your own risk tolerance — a daily cron entry is a reasonable
+default:
+
+```
+# /etc/cron.d/instance-scheduler-backup
+0 3 * * * root cd /opt/instance-scheduler && .venv/bin/python instance_manager.py backup --backup-dir /var/backups/instance-scheduler >> /var/log/instance-scheduler-backup.log 2>&1
+```
+
+Exits non-zero if anything didn't complete (a per-node re-sync failure, either snapshot
+destination failing) — check the exit code if you're wiring this into your own monitoring rather
+than just reading the log.
+
+### 8.11 High availability — why this isn't an always-on active-active or active-passive setup
+
+Run exactly **one** `poll` process at a time, on one machine — never two running simultaneously,
+and never a hot standby waiting in the wings. That's not a corner cut; it's the right fit for
+what `poll` actually does.
+
+`poll` doesn't serve live requests — it checks every schedule on a short, fixed interval with a
+tolerant matching window (typically a few minutes either side), and fires the due action. If
+that process is briefly down (a crash, a host reboot, a deploy), the worst case is a due action
+firing a few seconds late once your process supervisor brings it back up — nothing waits on it
+in real time, so nothing downstream notices. Manual `start`/`stop` keeps working the entire time
+regardless, since it never depends on `poll` being up.
+
+An **active-active** setup (two schedulers running at once) would trade that harmless delay for
+a real correctness risk instead: two processes with no genuine coordination between them could
+race to act on the same node at the same moment, or have one fire a start while the other is
+mid-firing a stop for it — a new failure mode, introduced to solve a problem (a few seconds of
+downtime) a plain restart already solves for free. An **active-passive** setup avoids the double-
+fire risk, but only by adding its own always-on standby plus real failure-detection machinery
+(health checks, a way for the standby to agree it should take over, a shared view of state) —
+infrastructure that has to be running and paid for continuously, to protect against an outage a
+single supervised process already recovers from in seconds.
+
+That's also, directly, why it saves you money rather than costs you any: this whole tool exists
+to stop you paying for compute that isn't earning its keep. Running a second, always-on
+scheduler instance as insurance against a multi-second restart would mean paying for exactly
+that kind of idle, always-on capacity — just moved onto this tool's own infrastructure instead
+of your managed fleet. The approach actually used costs nothing extra: one process, under
+whatever process supervisor your OS already has built in, on the one machine you're already
+running this from. If the underlying data is ever lost too, `rebuild` and the Object Storage
+backup (§8.10, above) recover it without needing a second live system standing by either — see
+the Definitive Guide's Deployment Model chapter for the fuller comparison.
 
 ---
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 function allTimezones(): string[] {
   try {
     if (typeof Intl.supportedValuesOf === 'function') {
-      return Intl.supportedValuesOf('timeZone')
+      return [...Intl.supportedValuesOf('timeZone'), 'UTC']
     }
   } catch {}
   return [

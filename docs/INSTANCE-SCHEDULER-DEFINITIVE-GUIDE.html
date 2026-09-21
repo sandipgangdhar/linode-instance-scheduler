@@ -481,17 +481,69 @@ pre.code .m{color:var(--code-mut)}
       <section class="chapter" id="c5-1">
         <h2><span class="chno">5.1</span> The Registry, and Why It Can Be Rebuilt From Nothing</h2>
         <p class="lede">Every managed instance's identity &mdash; which OS volume, which data volumes, which reserved IP, which schedule, which group &mdash; lives in one local database. Losing that file would normally mean losing the only record of which real Linode resources belong to which logical instance, with no way to reconstruct it.</p>
-        <p>This tool avoids that by writing the same identifying information directly onto the Linode resources themselves, as tags, every time an instance is onboarded or stopped. The local database is the fast, day-to-day source of truth &mdash; but it is never the <em>only</em> copy of this information. A dedicated recovery command scans the account for these tags and reconstructs the registry from them alone, with no dependency on the local file at all, even one that's been deleted or is unreadable.</p>
+        <p>This tool avoids that with two independent, layered backups, neither of which the local database ever depends on to function day to day. The first is Linode's own resource tags: the same identifying information is written directly onto the OS volume, each data volume, and the reserved IP themselves, every time an instance is onboarded or stopped. The second, optional layer is Object Storage: a single, complete backup of everything about the instance that tags can't hold, written to a bucket you control. The local database is always the fast, authoritative source of truth for day-to-day operation &mdash; recovery only ever reads from tags or Object Storage when that database itself is gone or unreadable, never otherwise.</p>
         <div class="callout">
-          <span class="co-label">What this covers</span>
-          Instance identity (OS volume, data volumes, reserved IP, region), individual schedules, and schedule-group membership and definitions are all mirrored onto tags and recoverable this way &mdash; not just the core instance record.
+          <span class="co-label">Who answers "what's the truth" at any given moment</span>
+          The local database, without exception, whenever it's readable. Tags and Object Storage are never consulted during ordinary operation &mdash; not by the poller, not by a manual start or stop, not by the dashboard. They exist purely so the recovery command has somewhere to read from on the one occasion the local database itself is the thing that's broken.
         </div>
       </section>
 
       <section class="chapter" id="c5-2">
-        <h2><span class="chno">5.2</span> The Honest Limits of Recovery</h2>
-        <p>Recovery is complete for any instance that was actually <em>running</em> at the moment local state was lost &mdash; everything, including its live network configuration and SSH access list, can be re-read directly from the running instance itself. An instance that happened to be <em>stopped</em> at that exact moment can only be partially recovered: its identity and resource associations come back from tags exactly the same way, but its network configuration and SSH access list simply aren't knowable without a live boot to read them from, and recovery says so plainly rather than guessing. Bringing a partially recovered instance the rest of the way back under management is a short, explicit manual step &mdash; boot it once from its recorded volume and address, then hand it back to the tool the normal way.</p>
-        <p>One edge case worth knowing: a schedule group's own tags live on its <em>members'</em> reserved IPs, not on any standalone resource of its own. A group that currently has zero members has nothing anywhere in the account to reconstruct it from &mdash; if local state is lost at that exact moment, that one group's definition has to be recreated from scratch. This is a genuine, narrow limit, not a design oversight, and worth keeping in mind for a group you expect to sit empty for a while.</p>
+        <h2><span class="chno">5.2</span> What's Stored Where, and Why</h2>
+        <p class="lede">Not everything about an instance is backed up the same way. Each piece of data goes wherever is cheap enough to be worth it, without ever pretending a size- and shape-constrained system like a resource tag can hold something it structurally can't.</p>
+        <p><strong>Linode tags</strong> hold instance identity (which OS volume, which data volumes, which reserved IP), individual schedules, schedule-group membership and definitions, a simple single-network-interface configuration, and a reference to any SSH key that's also registered directly on the Linode account. Tags are free, visible directly in Cloud Manager, and survive independently of this tool's own database entirely &mdash; but each one is capped at fifty characters, a single resource can only hold a bounded number of them, and there is no way to write to more than one Linode resource at once as a single atomic operation. That combination makes tags the right home for small, fixed-shape facts, and the wrong one for anything of unpredictable size.</p>
+        <p><strong>Object Storage</strong>, if configured, holds a single complete backup of everything else: a multi-interface or VPC/VLAN network configuration, an SSH key that isn't registered on the Linode account under any name, the instance's plan/firewall/placement-group/maintenance-policy/watchdog settings, its label, and its own Linode tags (the customer's own labeling tags, distinct from this tool's disaster-recovery tags). One plain record per instance, no size constraint, no bespoke encoding required &mdash; the tradeoff is that it's an optional layer a deployment has to explicitly set up, not something that exists automatically the way tags do.</p>
+        <p>Two things are recoverable through <em>neither</em> mechanism, both by deliberate choice, described fully in 5.6: a manual-override auto-revert timer that happens to be armed at the exact moment local state is lost, and the audit/history log. Both are explained there, including exactly what's actually at stake in each case.</p>
+        <div class="table-wrap"><table><thead><tr><th>What</th><th>Linode tags</th><th>Object Storage</th></tr></thead><tbody>
+          <tr><td>Identity: OS volume, data volumes, reserved IP</td><td>Always</td><td>&mdash;</td></tr>
+          <tr><td>Individual schedule &amp; group membership</td><td>Always</td><td>&mdash;</td></tr>
+          <tr><td>A simple, single public interface configuration</td><td>Yes</td><td>Also, as a fallback</td></tr>
+          <tr><td>A more complex configuration (multiple interfaces, VPC, VLAN)</td><td>&mdash;</td><td>Yes, if configured</td></tr>
+          <tr><td>An SSH key also registered on the Linode account</td><td>A reference to it</td><td>The key itself, as a fallback</td></tr>
+          <tr><td>An SSH key registered nowhere on the account</td><td>&mdash;</td><td>Yes, if configured</td></tr>
+          <tr><td>Plan, firewall, placement group, maintenance policy, watchdog</td><td>&mdash;</td><td>Yes, if configured</td></tr>
+          <tr><td>Label, and the customer's own Linode tags</td><td>&mdash;</td><td>Yes, if configured</td></tr>
+          <tr><td>An armed manual-override timer</td><td>&mdash;</td><td>&mdash;</td></tr>
+          <tr><td>Audit/history log</td><td>&mdash;</td><td>&mdash;</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c5-3">
+        <h2><span class="chno">5.3</span> Recovering a Stopped Instance</h2>
+        <p class="lede">An instance that was genuinely running at the moment local state was lost recovers completely, always &mdash; everything about it, including its live network configuration and SSH access list, is simply read fresh off the running instance itself. A stopped instance has nothing live to read from, so it depends on what was captured and backed up the last time it was stopped or onboarded.</p>
+        <p>Recovery for a stopped instance follows a fixed order, and never guesses. First, the account is scanned for tagged resources by name &mdash; this is where identity comes from, always, and nothing later in the process ever overrides it. Second, the reserved IP's own tags are read for a schedule, group membership, and, if the instance's network configuration was simple enough to tag-encode, that configuration itself, plus a reference to any SSH key that's also a registered key on the Linode account &mdash; that reference is resolved back to the key's actual current content by looking it up on the account directly, not by trusting a stored copy. Third, if Object Storage is configured, the instance's full backup record is fetched and used to fill in whatever tags didn't already provide &mdash; a more complex network configuration, an SSH key with no account match, plan and firewall settings, label. Object Storage is consulted last and only ever fills a gap; it's never allowed to override what the tag scan already established for identity.</p>
+        <p>Once a network configuration and at least one SSH key are known &mdash; by any combination of the sources above &mdash; the instance is reported as fully recovered and ready to start normally, exactly like one that was running. If, after all of that, either is still missing, the instance comes back with its identity correctly restored but is flagged for the one remaining manual step: boot it once from its recorded volume and address, then hand it back to the tool the normal way.</p>
+      </section>
+
+      <section class="chapter" id="c5-4">
+        <h2><span class="chno">5.4</span> Durable, Verified, Self-Healing Writes</h2>
+        <p class="lede">Every stop or onboard writes the instance's newly captured state in two separate steps, to two independent systems &mdash; and those two steps are deliberately not, and cannot be, one atomic operation.</p>
+        <p>The local database write happens first, and it is real, immediate, and fully in effect the moment it succeeds &mdash; this is the one write every day-to-day operation of the tool actually depends on. The tag and Object Storage backups happen as a separate, second step, right after: each one is written, then read back and compared against what was just sent, and retried automatically on a transient failure. That verify-then-retry discipline exists because a write that appears to succeed isn't always trustworthy on its own &mdash; reading it back is the only way to be sure.</p>
+        <p>What isn't attempted is making the local write and the backup writes succeed or fail together. Two independent systems &mdash; a local file and a remote store &mdash; have no shared way to guarantee that; promising otherwise would be promising something this design can't actually deliver. What's guaranteed instead is durability without that guarantee mattering in practice: a backup failure never blocks or reverses the real operation (the local database write has already happened by the time a backup is even attempted), and it never needs to be manually tracked or retried, because the very next time that instance is stopped or onboarded again, its entire current state is backed up again from scratch. A single missed backup corrects itself on the next ordinary use of the instance &mdash; that's what "self-healing" means here: not that a failure is detected and repaired by some separate watcher process, but that the next routine write is always a full, current snapshot, never a partial update, so there's nothing stale left over to repair.</p>
+      </section>
+
+      <section class="chapter" id="c5-5">
+        <h2><span class="chno">5.5</span> Recovering From a Corrupted or Lost Database File</h2>
+        <p class="lede">A missing database file and a corrupted one are handled differently on purpose, because they mean different things.</p>
+        <p>A missing file is the easy case: the tool creates a fresh, empty database automatically the next time it runs, no special action needed at all beyond then running the recovery command described below. A genuinely <em>corrupted</em> file &mdash; present, but not a valid database &mdash; is detected specifically and distinguished from an ordinary momentary lock conflict between two processes; the tool refuses to proceed with a clear, direct message rather than behaving unpredictably against a file it can't actually trust.</p>
+        <div class="callout warn">
+          <span class="co-label">Recovering from a corrupted database file</span>
+          Move the corrupted file aside (its exact location is named in the error message itself). Run the recovery command once. A fresh, empty database is created automatically, and the command reconstructs every managed instance's identity, individual schedule, and group membership from tags &mdash; plus, for any instance with a usable tag-based or Object Storage backup as described in 5.2&ndash;5.3, its full network configuration and SSH access too.
+        </div>
+        <p>Nothing about this recovery path is destructive to the real infrastructure it's recovering the record of &mdash; the instances, volumes, and reserved IPs it reconstructs a registry entry for were never touched by the loss of the local file in the first place. The recovery command only ever reads and reconstructs; it never deletes or recreates anything on the Linode side as part of this process.</p>
+      </section>
+
+      <section class="chapter" id="c5-6">
+        <h2><span class="chno">5.6</span> Edge Cases, and What's Actually at Risk in Each</h2>
+        <p class="lede">Most of what could theoretically go wrong here turns out not to matter in practice, because the design already accounts for it. The genuine edge cases are narrow, and worth stating plainly rather than leaving implicit.</p>
+        <div class="table-wrap"><table><thead><tr><th>Situation</th><th>What actually happens</th></tr></thead><tbody>
+          <tr><td>The local database write succeeds; the tag or Object Storage backup fails</td><td>The real operation (stop, start, onboard) is already fully successful &mdash; both backups are best-effort and never block or reverse it. The next successful stop or onboard for that same instance re-attempts the backup with its then-current state. The only actual exposure is a total local database loss landing in the narrow window before that next backup succeeds, in which case recovery falls back to whatever the last successful backup provided.</td></tr>
+          <tr><td>Both the tag and the Object Storage backup happen to disagree</td><td>Tags win, for the fields tags cover. Both are written at the same moment from the same captured state, so in practice they only ever disagree if one of the two most recent write attempts failed while the other succeeded &mdash; not a routine occurrence.</td></tr>
+          <tr><td>A schedule group currently has zero members</td><td>A group's own definition lives only on its members' tags, never on a standalone resource of its own &mdash; an empty group has nothing anywhere in the account to reconstruct it from. If local state is lost at that exact moment, that one group's definition has to be recreated from scratch. Any instance it previously had is unaffected; only the group's own name/schedule needs to be redefined.</td></tr>
+          <tr><td>A manual-override auto-revert timer is armed</td><td>Not recoverable through either backup. If local state is lost while one happens to be armed, it's silently discarded &mdash; the instance simply reverts to ordinary schedule or manual behavior on its next check, never an unsafe or unexpected action either way.</td></tr>
+          <tr><td>The audit/history log</td><td>Not recoverable through either backup &mdash; it's a local-only record by design. Recovery restores an instance to a fully working state; it does not restore the history of what happened to it before the loss.</td></tr>
+          <tr><td>Object Storage was never configured at all</td><td>Everything in 5.2&ndash;5.3 that depends on it simply doesn't apply &mdash; a stopped instance's recovery is limited to whatever tags alone provide (identity, schedule, group, and, when applicable, a simple network configuration and an account-registered SSH key). This is the same outcome as before this layer existed at all, never worse.</td></tr>
+        </tbody></table></div>
       </section>
 
       <!-- ============ PART VI ============ -->
@@ -553,6 +605,7 @@ pre.code .m{color:var(--code-mut)}
         <h2><span class="chno">6.5</span> Recovery &amp; Maintenance</h2>
         <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
           <tr><td><code>rebuild</code></td><td>Reconstructs the local registry from Linode's own tags &mdash; the disaster-recovery mechanism described in Part V.</td></tr>
+          <tr><td><code>backup</code></td><td>On-demand, whole-system backup &mdash; re-syncs every instance's Object Storage record and takes a full database snapshot (locally, to Object Storage, or both). Meant to be run on a schedule, not just invoked manually; see the Operations Guide.</td></tr>
           <tr><td><code>clear-lock</code></td><td>Clears a stuck per-instance operation lock &mdash; an administrative escape hatch, used rarely.</td></tr>
           <tr><td><code>reset-host-key</code></td><td>Deliberately rotates the trusted SSH host key recorded for an instance (see Part I.5) &mdash; the only sanctioned way to do this.</td></tr>
           <tr><td><code>serve-api</code></td><td>Starts the REST API server and, once built, the web dashboard (Part VII).</td></tr>
@@ -635,7 +688,38 @@ pre.code .m{color:var(--code-mut)}
 
       <section class="chapter" id="c9-2">
         <h2><span class="chno">9.2</span> High Availability, the Appropriate Way for This Workload</h2>
-        <p>This tool's availability model is built around fast, safe recovery rather than redundant, always-on replicas &mdash; the right trade for a cost-scheduling tool, where a delayed scheduled action costs at most a few extra minutes of avoidable compute, rather than a system serving live customer traffic, where that trade would be wrong. Three layers, from most to least commonly needed: a process supervisor restarts the scheduler automatically if it ever crashes (Part IX.3); a simple periodic file copy of the local database makes a routine restore fast; and if even that's gone, the tag-based reconstruction described in Part V is the guaranteed fallback of last resort. Deliberately absent is a second, simultaneously active scheduler process &mdash; two schedulers racing to fire the same action with no real coordination between them is a correctness risk, not a safety net, and isn't needed when a brief automatic restart already self-heals.</p>
+        <p class="lede">This tool's availability model is built around fast, safe recovery rather than redundant, always-on replicas &mdash; a deliberate choice, not the absence of one.</p>
+        <p>An active-active setup (two or more scheduler processes running at once) and an active-passive setup (a hot standby ready to take over) both solve the same underlying problem: keeping a system reachable and correct through the brief window while one instance of it is down. Neither problem actually exists here in a way that justifies the cost of solving it. The scheduler's whole job is to notice a scheduled boundary has been crossed and fire a start or stop &mdash; it evaluates on a short, fixed interval with a tolerant matching window (typically a few minutes either side), not on every incoming request the way a system serving live traffic does. If the process is briefly down &mdash; a crash, a host reboot, a deploy &mdash; the next scheduled action simply fires a few seconds late, once an ordinary process supervisor brings it back up; nothing downstream notices or breaks, since nothing downstream is waiting on it in real time. Manual control (the CLI and, if you run it, the REST API and dashboard) works independently of the scheduler the entire time regardless &mdash; an operator is never blocked from starting or stopping a node by hand just because the scheduler happens to be restarting.</p>
+        <p>Active-active would trade that brief, harmless delay for a real correctness risk instead: two scheduler processes with no genuine coordination between them (a distributed lock, a leader election, a consensus protocol &mdash; the actual infrastructure "active-active" implies) could both decide the same instance is due for the same action at the same moment and race each other, or worse, one could fire a start while the other is mid-firing a stop for the same node. That's a new failure mode this tool would be introducing to solve a problem &mdash; a few seconds of scheduler downtime &mdash; that a plain restart already solves for free. Active-passive avoids the double-fire risk but still needs its own machinery to be worth anything: health checks to detect the primary is actually down (not just slow), a way for the standby to agree it should now be the one acting, and a shared or replicated view of state so the standby doesn't start from a blank slate. All of that is real, ongoing infrastructure with its own failure modes, kept running and paid for at all times, to protect against an outage that a single supervised process already recovers from in the time it takes to restart.</p>
+        <p>This is also, directly, a cost decision, not just an architectural one. This whole product exists to eliminate paying for compute that isn't earning its keep &mdash; running a second, always-on scheduler instance (active-passive) or two simultaneously-active ones (active-active) purely as insurance against a multi-second restart would mean paying for exactly the kind of idle, always-on capacity this tool is built to help you stop paying for, just moved from your managed fleet onto the tool's own infrastructure instead. The model actually used costs nothing extra to run: one process, under whatever process supervisor already ships with the host operating system, on the one machine you're already running this from.</p>
+        <div class="table-wrap"><table><thead><tr><th></th><th>Active-active / active-passive</th><th>What this tool does instead</th></tr></thead><tbody>
+          <tr><td>Extra compute to run and pay for</td><td>At least one more always-on instance, continuously</td><td>None &mdash; a single process on the machine you already have</td></tr>
+          <tr><td>New coordination infrastructure</td><td>Leader election / distributed locking, or health-check-driven failover</td><td>None needed &mdash; only one scheduler is ever running</td></tr>
+          <tr><td>New failure modes introduced</td><td>Split-brain double-firing, or a failed failover leaving nothing acting</td><td>None beyond "the process is briefly down," already handled</td></tr>
+          <tr><td>Recovery mechanism</td><td>An automated handoff to a second running process</td><td>A process supervisor restart (seconds), backed by tag/Object Storage recovery if the data itself is ever lost (Part V)</td></tr>
+          <tr><td>Right fit for</td><td>Systems serving live, latency-sensitive traffic</td><td>A scheduler whose actions tolerate a several-minute matching window by design</td></tr>
+        </tbody></table></div>
+        <p>Three layers make up the actual model, from most to least commonly needed: a process supervisor restarts the scheduler automatically if it ever crashes (9.3, below); a simple periodic file copy of the local database, plus the tag and Object Storage backups described in Part V, make a routine restore fast; and if even the local file itself is gone, the tag-based reconstruction described there is the guaranteed fallback of last resort. Deliberately absent, at every layer, is a second, simultaneously active scheduler process.</p>
+      </section>
+
+      <section class="chapter" id="c9-3">
+        <h2><span class="chno">9.3</span> Installing and Configuring</h2>
+        <p class="lede">A self-hosted tool means there's a genuine install step &mdash; brief, and the same on every deployment.</p>
+        <p>The tool is a plain Python program with no database server, no message queue, and no other infrastructure of its own to stand up. Cloning the repository, creating a virtual environment, and installing its dependencies is the entire installation:</p>
+        <div class="table-wrap"><table><thead><tr><th>Step</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>git clone</code></td><td>Gets the code &mdash; run this on the one centralized, persistent machine your whole team will use, not a personal laptop (see 9.1).</td></tr>
+          <tr><td><code>python3 -m venv .venv &amp;&amp; source .venv/bin/activate</code></td><td>An isolated Python environment, so this tool's own dependencies never conflict with anything else on the host.</td></tr>
+          <tr><td><code>pip install -r requirements.txt</code></td><td>Installs everything the tool needs to run.</td></tr>
+          <tr><td><code>cp .env.example .env</code></td><td>Creates your own local configuration file &mdash; already excluded from version control, since it's about to hold a real credential.</td></tr>
+        </tbody></table></div>
+        <p>Configuration is one flat file, <code>.env</code>, read once at process startup. Exactly one setting is required to run anything at all &mdash; a full-access Linode Personal Access Token, since this tool creates, deletes, and tags real Linode resources on your behalf. Everything else is optional, and each piece only matters if you're using the specific feature it enables:</p>
+        <div class="table-wrap"><table><thead><tr><th>Setting</th><th>Required?</th><th>Enables</th></tr></thead><tbody>
+          <tr><td><code>LINODE_API_TOKEN</code></td><td>Always</td><td>Every real operation this tool performs.</td></tr>
+          <tr><td><code>LINODE_SSH_KEY_PATH</code></td><td>No &mdash; has a working default</td><td>Where this deployment's own SSH key lives (Part VIII.1).</td></tr>
+          <tr><td><code>LINODE_OAUTH_CLIENT_ID</code> / <code>_SECRET</code> / <code>LINODE_OAUTH_REDIRECT_URI</code></td><td>Only for dashboard login</td><td>"Login with Linode" for the web dashboard (Part VII.2).</td></tr>
+          <tr><td><code>LINODE_OBJ_STORAGE_BUCKET</code> / <code>_ENDPOINT</code> / <code>_ACCESS_KEY</code> / <code>_SECRET_KEY</code></td><td>Only for the fuller backup layer</td><td>Object Storage backup, described fully in Part V.</td></tr>
+        </tbody></table></div>
+        <p>Once <code>.env</code> has a real token in it, <code>python instance_manager.py list</code> confirms the install itself is working (it prints cleanly whether or not anything is onboarded yet), and a real command against the API &mdash; <code>status</code>, or onboarding a first instance &mdash; confirms the token is valid. From there, running the scheduler and, if you want it, the API server and dashboard as supervised background processes is the last step before this is a genuinely running deployment &mdash; see the Operations Guide for the exact process-supervisor configuration.</p>
       </section>
 
       <!-- ============ APPENDIX ============ -->
@@ -688,7 +772,9 @@ pre.code .m{color:var(--code-mut)}
       ["c4-1","4.1 Override &amp; Auto-Revert"],["c4-2","4.2 Savings as a Percentage"]
     ]},
     {label:"Part V", title:"Disaster Recovery", chapters:[
-      ["c5-1","5.1 The Registry"],["c5-2","5.2 Honest Limits"]
+      ["c5-1","5.1 The Registry"],["c5-2","5.2 What's Stored Where"],
+      ["c5-3","5.3 Recovering a Stopped Instance"],["c5-4","5.4 Self-Healing Writes"],
+      ["c5-5","5.5 A Corrupted Database"],["c5-6","5.6 Edge Cases"]
     ]},
     {label:"Part VI", title:"The CLI", chapters:[
       ["c6-1","6.1 Onboarding &amp; Lifecycle"],["c6-2","6.2 Migration"],
@@ -701,7 +787,8 @@ pre.code .m{color:var(--code-mut)}
       ["c8-1","8.1 SSH Keypair"],["c8-2","8.2 Host-Key Trust"]
     ]},
     {label:"Part IX", title:"Deployment Model", chapters:[
-      ["c9-1","9.1 Self-Hosted"],["c9-2","9.2 High Availability"]
+      ["c9-1","9.1 Self-Hosted"],["c9-2","9.2 High Availability"],
+      ["c9-3","9.3 Installing and Configuring"]
     ]},
     {label:"Appendix", title:"Glossary", chapters:[
       ["cA-1","A.1 Terms of Art"]

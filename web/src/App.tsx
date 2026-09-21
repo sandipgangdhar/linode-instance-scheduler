@@ -1,5 +1,7 @@
 import type { ReactElement } from 'react'
+import { useEffect } from 'react'
 import { Navigate, Route, HashRouter as Router, Routes } from 'react-router-dom'
+import { cancelBackgroundPolling, resetBackgroundPollingCancellation } from './api/client'
 import { AuthProvider, useAuth } from './auth/AuthContext'
 import { DashboardLayout } from './pages/DashboardLayout'
 import { GroupDetailPage } from './pages/GroupDetailPage'
@@ -16,6 +18,10 @@ function RequireAuth({ children }: { children: ReactElement }) {
 }
 function AppRoutes() {
   const { isAuthenticated } = useAuth()
+  useEffect(() => {
+    if (isAuthenticated) resetBackgroundPollingCancellation()
+    else cancelBackgroundPolling()
+  }, [isAuthenticated])
   return (
     <Routes>
       <Route path="/login" element={isAuthenticated ? <Navigate to="/instances" replace /> : <LoginPage />} />
