@@ -337,3 +337,24 @@ the fleet was confirmed fully healthy.
 ```
 {'stop_returncode': 0, 'start_returncode': 0, 'tags_after': []}
 ```
+
+## 2026-09-22: tag_tampering FINDING (r2-os-almalinux9, 2026-09-21T15:52) reviewed
+
+Investigated directly: the volumes checkpoint tags were empty immediately after a stop/start
+cycle that itself reported success (stop_returncode=0, start_returncode=0, timing ~59s -- a
+genuine, real cycle, not an instant refusal like the earlier r2-os-debian13 case). Confirmed via
+`instance_manager.py history` that a *later*, independently poller-triggered stop/start cycle
+(17:53-18:04 UTC, roughly 2 hours after the chaos round) correctly re-tagged the same OS volume --
+confirmed live via a direct API read (both r2-os-almalinux9 and r2-os-debian13 currently show
+correct `linode-scheduler-name:`/`linode-scheduler-role:` tags).
+
+Root cause not conclusively pinned down -- the chaos scenario does not capture stop/start's full
+stdout, so there is no direct evidence of a warning being emitted during the tag-sync step of that
+specific stop call. `tag_managed_resources()` write+verify is designed to raise (aborting stop
+outright) on a genuine failure, not silently proceed -- since stop reported success, either the
+write+verify genuinely succeeded and a later, unrelated read briefly observed stale state, or
+there is a narrower gap in this path not yet identified. Given zero permanent harm (the tags
+self-healed on the very next cycle to touch this resource, exactly as tag_managed_resources()s own
+best-effort design promises for its documented failure modes), this is not being escalated to a
+code fix without a second, reproducible occurrence -- flagged here for visibility if it recurs.
+Chaos testing resumed.
