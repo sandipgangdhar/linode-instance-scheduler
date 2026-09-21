@@ -301,3 +301,12 @@ the fleet was confirmed fully healthy.
 ```
 {}
 ```
+
+## Chaos round — 2026-09-21T08:38:48.568554+00:00
+
+**Scenario**: `out_of_band_delete` — target: `r2-os-rocky9`
+**Result**: Confirmed working as documented — outcome: `skipped_not_running`
+
+```
+{}
+```
