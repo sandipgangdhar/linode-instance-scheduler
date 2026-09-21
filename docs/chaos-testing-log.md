@@ -292,3 +292,12 @@ the fleet was confirmed fully healthy.
 ```
 {'first_start_returncode': 1, 'first_start_stdout_tail': "'r2-os-centos-stream9' instance 105924364 exists but is offline -- likely powered off out-of-band. Marking it for recovery...\n", 'second_start_returncode': 0, 'second_start_stdout_tail': "'r2-os-centos-stream9' has an unreachable instance (105924364) from a previous start attempt -- retrying the reachability check instead of creating a new one...\n  running -- verifying real network reachability...\n'r2-os-centos-stream9' is up at 172.236.177.58.\n"}
 ```
+
+## Chaos round — 2026-09-21T07:04:52.504650+00:00
+
+**Scenario**: `out_of_band_delete` — target: `r2-os-almalinux8`
+**Result**: Confirmed working as documented — outcome: `skipped_not_running`
+
+```
+{}
+```
