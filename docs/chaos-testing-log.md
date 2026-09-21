@@ -358,3 +358,12 @@ self-healed on the very next cycle to touch this resource, exactly as tag_manage
 best-effort design promises for its documented failure modes), this is not being escalated to a
 code fix without a second, reproducible occurrence -- flagged here for visibility if it recurs.
 Chaos testing resumed.
+
+## Chaos round — 2026-09-21T18:48:23.885726+00:00
+
+**Scenario**: `object_storage_outage` — target: `r2-grp-01`
+**Result**: Confirmed working as documented — outcome: `stop_succeeded_despite_outage_then_self_healed`
+
+```
+{'stop_during_outage_returncode': 0, 'warned_during_outage': True, 'recovery_backup_returncode': 0, 'resynced': True}
+```
