@@ -384,3 +384,8 @@
 
 **Scenario**: `network_abort_mid_poll`
 **Result**: Confirmed working as expected -- outcome: `clean_failure_recovered`
+
+## Chaos round -- 2026-09-21T18:46:06.522134+00:00
+
+**Scenario**: `malformed_error_body`
+**Result**: Confirmed working as expected -- outcome: `clean_error_no_exception`
