@@ -266,3 +266,20 @@ a unit test.
 ```
 {'stop_returncode': 1, 'start_returncode': 1, 'tags_after': []}
 ```
+
+## 2026-09-21: tag_tampering FINDING was a downstream effect of the drill stranding above
+
+A `tag_tampering` round picked `r2-os-debian13` as its target while it was already stuck in
+`needs_manual_recovery` (see the same-day long-running-test-log entry). Both the scenario's own
+`stop` and `start` calls correctly refused (the product's own designed behavior for that status),
+but since neither ran, the volume's tampered-away disaster-recovery tags were never restored --
+the instance lost its tag-based identity entirely and stopped showing up in the registry at all.
+The chaos monkey correctly flagged this as a FINDING and self-paused.
+
+Root cause was the drill stranding above, not an independent product defect -- confirmed by
+recovering the instance (fresh boot from its still-tag-identifiable OS volume + reserved IP, then
+`onboard --force`) and confirming its tags round-trip correctly afterward. Hardened
+`pick_target()` (used by every chaos scenario) to only ever select a name currently in a normal
+`running`/`stopped` state, so no future scenario can inject against an already-broken instance and
+risk compounding it into something worse. Chaos injection resumed after the fix was deployed and
+the fleet was confirmed fully healthy.
