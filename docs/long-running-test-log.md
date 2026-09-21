@@ -175,3 +175,22 @@ real 11-instance fleet with realistic multi-cycle daily schedules (dev-fleet-a: 
 windows/day UTC, dev-fleet-b: 3x1.5h windows/day IST, r2-node-1: 3x1h individual-schedule
 windows/day). 12 rotating check cycles completed since the last checkpoint, 0
 finding(s) recorded (see the JSONL event log for full detail on any).
+
+## 2026-09-21: Daily disaster-recovery drill stranded stopped instances
+
+The soak test's own daily "delete `state/instances.db` entirely, confirm `rebuild` reconstructs
+everything from Linode's tags" drill correctly proved recovery works, but any instance that
+happened to be *stopped* at drill time only gets the product's own documented **partial**
+recovery (`needs_manual_recovery` -- network config/SSH keys/label aren't knowable from tags
+alone with nothing live to read them from; `start`/`stop` both refuse in this state by design).
+Nothing then completed that documented recovery step, so the drill was silently, permanently
+stranding part of the test fleet every day it ran -- eventually all 12 instances ended up stuck.
+
+This is not a product bug -- `needs_manual_recovery` is correct, intentional behavior, and the
+documented recovery ("boot it once via Cloud Manager from the recovered `os_volume_id`, then
+`onboard --force`") worked exactly as designed once performed. The gap was in the harness: it
+validated recovery but never finished it. Fixed by having the drill complete that same documented
+recovery automatically for any record left `needs_manual_recovery`, restoring the fleet to full
+health as part of the drill itself instead of leaving it degraded. All 12 stranded instances were
+recovered by hand and confirmed fully healthy (running, correct tags, correct registry state)
+before the fix was deployed.
