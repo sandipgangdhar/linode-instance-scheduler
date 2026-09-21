@@ -379,3 +379,8 @@
 
 **Scenario**: `rapid_double_submit`
 **Result**: Confirmed working as expected -- outcome: `clean_single_call`
+
+## Chaos round -- 2026-09-21T15:32:49.534494+00:00
+
+**Scenario**: `network_abort_mid_poll`
+**Result**: Confirmed working as expected -- outcome: `clean_failure_recovered`
