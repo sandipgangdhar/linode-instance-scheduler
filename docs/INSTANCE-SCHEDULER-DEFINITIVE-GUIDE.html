@@ -352,7 +352,11 @@ pre.code .m{color:var(--code-mut)}
           <div class="card"><span class="tag">Storage</span><h4>Block Storage volumes</h4><p>A volume is a separate resource from any instance, billed separately (a small per-GB/month rate, far below compute pricing) and completely unaffected by deleting the instance it happens to be attached to. This is why the OS itself has to live on a Block Storage volume, not local disk &mdash; see 1.2.</p></div>
           <div class="card"><span class="tag">Networking</span><h4>Reserved public IP</h4><p>An ordinary instance's public IP returns to Linode's shared pool the moment the instance is deleted. A <em>reserved</em> IP is a standalone resource you own independently &mdash; it stays assigned to your account, in its original region, and can be attached to a newly created instance. It carries a small charge while unattached, and is permanently locked to the region it was first reserved in.</p></div>
           <div class="card"><span class="tag">Networking</span><h4>VPC and VLAN identity</h4><p>A VPC subnet and a VLAN label are both persistent, independent resources &mdash; not tied to any one instance's lifecycle. Re-attaching a recreated instance to the same VPC subnet or VLAN, with the same internal address, requires no special preservation step; the resources themselves were never going anywhere.</p></div>
-          <div class="card"><span class="tag">Metadata</span><h4>Label, tags, plan, firewall</h4><p>None of these live on the instance in a way that survives deletion on their own &mdash; the tool re-captures the current label, tags, plan type, attached firewall(s), placement group, and watchdog setting before every stop, and replays them on the very next create, so a recreated instance looks and behaves identically in Cloud Manager and cost reports.</p></div>
+          <div class="card"><span class="tag">Metadata</span><h4>Label, tags, plan, firewall</h4><p>None of these live on the instance in a way that survives deletion on their own &mdash; the tool re-captures the current label, tags, plan type, attached firewall, placement group, and watchdog setting before every stop, and replays them on the very next create, so a recreated instance looks and behaves identically in Cloud Manager and cost reports.</p></div>
+        </div>
+        <div class="callout warn">
+          <span class="co-label">Only one firewall survives a recreate</span>
+          A Linode instance can only ever have a single active Cloud Firewall attached at a time on the older networking model this tool works with &mdash; not a limitation this tool introduces, an account-wide constraint from the platform itself. If an instance has more than one firewall attached when it's onboarded, only the first one is captured and replayed on every future cycle; any others are silently dropped. If your instance needs multiple firewalls' worth of rules, consolidate them into one firewall before onboarding.
         </div>
         <p>What does <em>not</em> survive, and has to be actively reproduced every single cycle, is anything Linode treats as belonging to the instance's own creation moment: its network configuration (which interface gets which address), its SSH host identity, and the instance ID itself (a brand-new one is assigned on every create). Parts 1.2 through 1.4 cover how each of those is handled.</p>
       </section>
@@ -368,6 +372,10 @@ pre.code .m{color:var(--code-mut)}
         <h2><span class="chno">1.3</span> The Two Networking Models</h2>
         <p>Linode instances use one of two mutually exclusive networking configurations &mdash; the older, config-attached interface model, and a newer model where interfaces are managed independently of any boot configuration, with explicit per-address NAT and default-route flags. An instance uses one or the other, never both, and the shape of a valid network configuration differs meaningfully between them (a public IP is delivered via a dedicated interface in one model, or via a NAT mapping with no separate public interface at all under the other).</p>
         <p>This tool records which model a given instance actually uses at onboarding time, and reproduces the exact same model &mdash; and the exact same public-IP delivery topology &mdash; on every single recreate, never defaulting to one or silently translating between them. Getting this wrong for even one cycle would mean an instance that boots successfully but is unreachable, or reachable at the wrong address.</p>
+        <div class="callout warn">
+          <span class="co-label">One public-IP topology isn't supported yet</span>
+          Under the older networking model, a public IP can reach an instance one of two ways: through a dedicated public interface carrying the address directly, or through a VPC's own 1:1 NAT mapping with no separate public interface at all. This tool fully supports the first. The second &mdash; an instance reachable only via VPC 1:1 NAT &mdash; is deliberately refused at onboarding rather than guessed at, since reproducing it incorrectly on a recreate would silently change how the instance is reachable. If your instance uses VPC 1:1 NAT for its public address, it isn't a candidate for onboarding today.
+        </div>
       </section>
 
       <section class="chapter" id="c1-4">
@@ -428,10 +436,12 @@ pre.code .m{color:var(--code-mut)}
         <p>An instance belongs to at most one group at a time. When both an individual schedule and a group are in play for the same instance, the rule is simple and absolute: an enabled individual schedule always wins outright, and the group's schedule is ignored entirely for that instance, not merged or blended with it in any way. Only when an instance has no enabled individual schedule of its own does its group's schedule take effect. An instance with neither is left under purely manual control &mdash; nothing is started or stopped automatically.</p>
         <table><thead><tr><th>Situation</th><th>What governs the instance</th></tr></thead><tbody>
           <tr><td>Has an enabled individual schedule</td><td>That schedule, full stop &mdash; any group membership is ignored</td></tr>
+          <tr><td>Has an individual schedule, but it's disabled, belongs to a group</td><td>The group's schedule &mdash; a disabled individual schedule is treated exactly like having none at all, so it never silently blocks a group from taking effect</td></tr>
           <tr><td>No individual schedule, belongs to a group</td><td>The group's schedule</td></tr>
           <tr><td>No individual schedule, no group</td><td>Manual control only, no automation</td></tr>
         </tbody></table>
         <p>Removing an instance from a group never silently leaves it with no schedule at all &mdash; the choice is offered explicitly: keep it under purely manual control from that point on, or copy the group's current rules into a fresh individual schedule as a starting point.</p>
+        <p>When a group's schedule boundary fires, every current member is started or stopped independently &mdash; one instance failing (an API blip, a stuck lock, anything else specific to that one node) never blocks, delays, or rolls back the rest of the group. Each member's own outcome is tracked and recorded separately; a group is never treated as one all-or-nothing unit.</p>
       </section>
 
       <section class="chapter" id="c3-2">
@@ -441,7 +451,7 @@ pre.code .m{color:var(--code-mut)}
 
       <section class="chapter" id="c3-3">
         <h2><span class="chno">3.3</span> The Poller</h2>
-        <p>A single long-running process evaluates every managed instance's effective schedule on a short, fixed interval, and fires a start or stop the moment a configured boundary is crossed. It matches against a small tolerance window rather than an exact instant, so ordinary timing drift between poll cycles never causes a scheduled action to be silently missed. Each action is recorded, so the same boundary is never fired twice in one day even if the poller restarts in between.</p>
+        <p>A single long-running process evaluates every managed instance's effective schedule on a short, fixed interval &mdash; every 300 seconds by default &mdash; and fires a start or stop the moment a configured boundary is crossed. It matches against a small tolerance window (also 300 seconds by default) rather than an exact instant, so ordinary timing drift between poll cycles never causes a scheduled action to be silently missed. Both numbers are configurable per deployment (<code>poll --interval-seconds</code> / <code>--window-seconds</code>), with the window required to be at least as large as the interval, so no gap can open up between one tick and the next that a boundary could fall through unnoticed. Each action is recorded, so the same boundary is never fired twice in one day even if the poller restarts in between.</p>
         <p>The poller is meant to run continuously under your own process supervisor (see Part IX.3 for a systemd example) &mdash; it doesn't need to be running for a manual start/stop to work, only for schedules and group memberships to actually be enforced automatically.</p>
       </section>
 
@@ -467,7 +477,7 @@ pre.code .m{color:var(--code-mut)}
         <h2><span class="chno">4.2</span> Savings Shown as a Percentage, Not a Dollar Figure</h2>
         <p>Two numbers are shown for any instance or group with a configured schedule, and neither is a dollar estimate &mdash; contract and negotiated pricing aren't visible to this tool, so any dollar figure it produced would risk being flatly wrong for an account on a non-standard rate. Both are instead a percentage of a full week's hours avoided:</p>
         <div class="formula">savings % = (1 &minus; scheduled_hours / 168) &times; 100</div>
-        <p><strong>Scheduled savings</strong> is computed purely from the configured schedule's own hours &mdash; visible the moment a schedule is set up, before it has ever run even once. <strong>Actual savings</strong> is computed retrospectively from real recorded uptime over a trailing window, and only becomes meaningful once a schedule has been in effect for a while. Shown together, the gap between the two is itself informative: a schedule configured for a high savings percentage that isn't being realized in practice is usually a sign that manual overrides are happening more often than the schedule intends.</p>
+        <p><strong>Scheduled savings</strong> is computed purely from the configured schedule's own hours &mdash; visible the moment a schedule is set up, before it has ever run even once. <strong>Actual savings</strong> is computed retrospectively from real recorded uptime over a trailing window &mdash; seven days by default, adjustable per request &mdash; and only becomes meaningful once a schedule has been in effect for at least that long. Shown together, the gap between the two is itself informative: a schedule configured for a high savings percentage that isn't being realized in practice is usually a sign that manual overrides are happening more often than the schedule intends.</p>
       </section>
 
       <!-- ============ PART V ============ -->
@@ -512,7 +522,11 @@ pre.code .m{color:var(--code-mut)}
         <h2><span class="chno">5.3</span> Recovering a Stopped Instance</h2>
         <p class="lede">An instance that was genuinely running at the moment local state was lost recovers completely, always &mdash; everything about it, including its live network configuration and SSH access list, is simply read fresh off the running instance itself. A stopped instance has nothing live to read from, so it depends on what was captured and backed up the last time it was stopped or onboarded.</p>
         <p>Recovery for a stopped instance follows a fixed order, and never guesses. First, the account is scanned for tagged resources by name &mdash; this is where identity comes from, always, and nothing later in the process ever overrides it. Second, the reserved IP's own tags are read for a schedule, group membership, and, if the instance's network configuration was simple enough to tag-encode, that configuration itself, plus a reference to any SSH key that's also a registered key on the Linode account &mdash; that reference is resolved back to the key's actual current content by looking it up on the account directly, not by trusting a stored copy. Third, if Object Storage is configured, the instance's full backup record is fetched and used to fill in whatever tags didn't already provide &mdash; a more complex network configuration, an SSH key with no account match, plan and firewall settings, label. Object Storage is consulted last and only ever fills a gap; it's never allowed to override what the tag scan already established for identity.</p>
-        <p>Once a network configuration and at least one SSH key are known &mdash; by any combination of the sources above &mdash; the instance is reported as fully recovered and ready to start normally, exactly like one that was running. If, after all of that, either is still missing, the instance comes back with its identity correctly restored but is flagged for the one remaining manual step: boot it once from its recorded volume and address, then hand it back to the tool the normal way.</p>
+        <p>Once a network configuration and at least one SSH key are known &mdash; by any combination of the sources above &mdash; the instance is reported as fully recovered, with its status restored to <code>stopped</code>, ready to start normally exactly like one that was running. If, after all of that, either is still missing, the instance comes back with its identity correctly restored but its status set to <code>needs_manual_recovery</code> &mdash; a plain marker that one step is still outstanding: boot it once from its recorded volume and address, then hand it back to the tool the normal way (running <code>onboard</code> again completes the recovery).</p>
+        <div class="callout">
+          <span class="co-label">A third status: <code>unreachable</code></span>
+          Separate from disaster recovery, an instance can also show <code>unreachable</code> in day-to-day operation &mdash; either right after a create, before the first network reachability check has succeeded, or when an already-running instance is found powered off out-of-band (through Cloud Manager, not through this tool). Either way, the fix is the same: run <code>start</code> again. The tool detects a confirmed-gone or genuinely powered-off instance automatically and completes the recovery, rather than creating a second, duplicate one.
+        </div>
       </section>
 
       <section class="chapter" id="c5-4">
@@ -557,23 +571,27 @@ pre.code .m{color:var(--code-mut)}
       <section class="chapter" id="c6-1">
         <h2><span class="chno">6.1</span> Onboarding &amp; Lifecycle</h2>
         <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
-          <tr><td><code>onboard</code></td><td>Brings an instance under management &mdash; Path A (clone from a template) or Path B (an already-migrated existing instance). Refuses cleanly if the instance is still on local disk or its public IP isn't reserved.</td></tr>
+          <tr><td><code>onboard</code></td><td>Brings an instance under management &mdash; Path A (clone from a template) or Path B (an already-migrated existing instance). Refuses cleanly if the instance is still on local disk or its public IP isn't reserved. Refuses again, separately, if the name is already onboarded &mdash; <code>--force</code> re-onboards anyway, showing exactly what identity details (volumes, IP, network config) would change first, and requiring confirmation before proceeding. Intended for correcting a record after a <code>needs_manual_recovery</code> partial recovery, not routine re-onboarding.</td></tr>
           <tr><td><code>start</code></td><td>Creates (recreates) a managed instance from its saved configuration and waits for a genuine network reachability check before reporting success.</td></tr>
-          <tr><td><code>stop</code></td><td>Re-captures current configuration, then deletes the instance. Compute billing stops the moment this completes.</td></tr>
+          <tr><td><code>stop</code></td><td>Re-captures current configuration, then deletes the instance. Compute billing stops the moment this completes. <code>--skip-precapture</code> recovers an instance that's genuinely SSH-unreachable but still billing, by falling back to the last-known configuration instead of a fresh capture &mdash; see the callout below.</td></tr>
           <tr><td><code>offboard</code></td><td>Permanently decommissions a stopped instance &mdash; releases its reserved IP, and optionally deletes its volumes too. Requires typing the instance's name to confirm.</td></tr>
           <tr><td><code>deregister</code></td><td>Removes an instance from local tracking only, with no changes to the real Linode resources at all &mdash; the safety net for correcting a mistaken or corrupted local record.</td></tr>
           <tr><td><code>list</code></td><td>Lists every managed instance and its current status.</td></tr>
           <tr><td><code>status</code></td><td>Shows one instance's complete stored record.</td></tr>
           <tr><td><code>history</code></td><td>Shows the recorded audit trail of start/stop actions for one instance &mdash; what happened, when, and what triggered it.</td></tr>
         </tbody></table></div>
+        <div class="callout warn">
+          <span class="co-label"><code>stop --skip-precapture</code>: a deliberate security tradeoff</span>
+          An ordinary <code>stop</code> refuses outright if it can't reach the instance over SSH to re-capture its current configuration first &mdash; on purpose, since deleting a billing instance you can no longer see into is risky. <code>--skip-precapture</code> is the escape hatch for the case where you need to stop it anyway: it falls back to the last successfully captured configuration instead. The real cost is that it also falls back to the last-known <code>authorized_keys</code> list &mdash; if SSH access was revoked or changed since that last capture, the recreated instance will present that <em>stale</em> access list, not the current one. Use it only when you understand that tradeoff, and re-verify SSH access on the instance once it's reachable again.
+        </div>
       </section>
 
       <section class="chapter" id="c6-2">
         <h2><span class="chno">6.2</span> Migration (Path B)</h2>
         <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
-          <tr><td><code>migrate-start</code></td><td>Runs pre-flight checks, creates the destination volume, and boots the instance into Rescue Mode &mdash; then hands back the manual copy step described in Part II.2.</td></tr>
+          <tr><td><code>migrate-start</code></td><td>Runs pre-flight checks, creates the destination volume, and boots the instance into Rescue Mode &mdash; then hands back the manual copy step described in Part II.2. <code>--force</code> restarts an in-progress attempt from scratch (a fresh destination volume, the old one tagged for later cleanup) &mdash; use it if an earlier attempt was abandoned or needs to be redone.</td></tr>
           <tr><td><code>migrate-resume</code></td><td>Run after the manual copy is done &mdash; rebuilds the boot configuration against the new volume, verifies the copy, and converts the instance's public IP to reserved.</td></tr>
-          <tr><td><code>migrate-orphans</code></td><td>Lists (or, with <code>--cleanup</code>, permanently deletes) volumes left behind by an incomplete or abandoned migration attempt.</td></tr>
+          <tr><td><code>migrate-orphans</code></td><td>Lists (or, with <code>--cleanup</code>, permanently deletes) volumes left behind by an incomplete or abandoned migration attempt. <code>--mark-orphaned --name &lt;name&gt; --volume-id &lt;id&gt;</code> manually marks one specific volume orphaned when local migration state has already been lost and the usual automatic detection has nothing left to go on.</td></tr>
         </tbody></table></div>
       </section>
 
@@ -645,11 +663,13 @@ pre.code .m{color:var(--code-mut)}
         <h2><span class="chno">7.2</span> Authentication: Two Credentials, Two Jobs</h2>
         <p class="lede">The API supports "Login with Linode" &mdash; your team signs in with the exact same account credentials they already use for Cloud Manager, rather than a separate shared secret.</p>
         <p>This login token answers exactly one question &mdash; <em>who is calling right now</em> &mdash; and is never used to talk to Linode's own API directly. A completely separate, full-access Linode API token, configured once by whoever deploys the tool, is what actually performs every real operation. This separation is deliberate: the scheduler has to keep running and firing scheduled actions even when nobody is logged in, which only works if the credential doing the real work isn't tied to any one person's login session.</p>
+        <p>The session token produced by logging in isn't tied to a browser either &mdash; it's a plain bearer token, sent the same way (an <code>Authorization</code> header) whether the caller is the dashboard or a script. A team wanting to automate against this API directly, not through the browser UI, completes the same OAuth login flow once to obtain a token, then uses it exactly like any other bearer-token API client.</p>
       </section>
 
       <section class="chapter" id="c7-3">
         <h2><span class="chno">7.3</span> The Web Dashboard</h2>
         <p>A browser-based dashboard, served by the same API process, covers the full day-to-day surface: signing in, viewing and onboarding instances, configuring individual and group schedules, starting and stopping instances manually (with the auto-revert countdown shown plainly when active), managing group membership, and both savings percentages. It's a thin visual layer over the identical API described above &mdash; nothing it does isn't equally available from the CLI.</p>
+        <p>Path B migration (Part II.2) can be driven entirely from the dashboard, not just the CLI &mdash; a guided flow walks through the same pre-flight checks, starts the migration, then presents the manual copy step directly in the browser: paste the guest's own device listing to confirm the correct disks before copying, run the copy in the Lish console as usual, then paste its output back in to verify and complete the migration. A successful migration chains straight into onboarding automatically, landing on the instance's own detail page with no separate manual step. The same one-time SSH password/key fallback described in Part VIII.1 is available here too, for a node that doesn't yet trust this deployment's key.</p>
       </section>
 
       <!-- ============ PART VIII ============ -->
@@ -740,6 +760,8 @@ pre.code .m{color:var(--code-mut)}
           <dt>schedule group</dt><dd>A named, shared schedule several instances can follow at once; an instance's own individual schedule, if enabled, always overrides its group's (Part III.1).</dd>
           <dt>rebuild</dt><dd>The disaster-recovery command that reconstructs the local registry entirely from tags recorded on live Linode resources (Part V).</dd>
           <dt>Path A / Path B</dt><dd>The two onboarding routes &mdash; a fresh instance from a template, or an existing instance migrated onto a volume in place (Part II).</dd>
+          <dt><code>unreachable</code></dt><dd>A status meaning a real instance exists but hasn't yet passed its network reachability check &mdash; either because it just started and the check hasn't completed, or because it was found powered off out-of-band. Resolved by simply running <code>start</code> again (Part 5.3).</dd>
+          <dt><code>needs_manual_recovery</code></dt><dd>A status meaning disaster recovery restored an instance's identity but couldn't determine its network configuration or SSH access from tags or Object Storage alone. Resolved by booting the instance once manually, then running <code>onboard</code> again (Part 5.3).</dd>
         </dl>
       </section>
 

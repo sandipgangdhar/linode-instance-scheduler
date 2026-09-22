@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 try:
     import boto3
@@ -83,6 +83,7 @@ def _retry(fn, *, attempts: int = DEFAULT_ATTEMPTS, delay_s: float = DEFAULT_DEL
             if not _is_transient(e) or attempt == attempts - 1:
                 raise
             time.sleep(delay_s)
+    assert last_exc is not None
     raise last_exc
 
 
