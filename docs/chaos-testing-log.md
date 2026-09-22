@@ -376,3 +376,12 @@ Chaos testing resumed.
 ```
 {'stop_while_locked_stdout': '', 'stop_while_locked_stderr': "Configuration error: Another start/stop/rebuild/clear-lock process is already operating on 'r2-os-almalinux8' right now. Wait for it to finish and try again.\n"}
 ```
+
+## Chaos round — 2026-09-22T00:21:44.188992+00:00
+
+**Scenario**: `registry_corruption` — target: `n/a`
+**Result**: Confirmed working as documented — outcome: `clean_refusal_then_recovered`
+
+```
+{'list_after_corruption_stderr': "Configuration error: the local registry database at /opt/soak-chaos/product/state/instances.db appears corrupted or unreadable (file is not a database). Recovering local records from Linode's own tags needs a working, even if empty, local database first -- move the corrupted file aside (e.g. `mv /opt/soak-chaos/product/state/instances.db /opt/soak-chaos/product/state/instances.db.corrupted`) and re-run this command; a fresh, empty database will be created automatically, and `rebuild` can then re", 'rebuild_stdout_tail': ".\n  restored 'r2-os-almalinux8''s membership in group 'dev-fleet-b' from tags.\n  restored 'r2-os-almalinux10''s membership in group 'dev-fleet-b' from tags.\n  restored 'r2-os-rocky9''s membership in group 'dev-fleet-b' from tags.\n  restored 'r2-os-centos-stream9''s membership in group 'dev-fleet-b' from tags.\n  restored schedule for 'r2-grp-01' from tags.\nScanned tags: 12 name(s) found.\n  fully recovered: r2-node-1, r2-node-2, r2-os-ubuntu2204, r2-os-ubuntu2004, r2-os-almalinux9, r2-os-debian13, r2-os-almalinux8, r2-os-almalinux10, r2-os-rocky9, r2-os-centos-stream9, r2-os-fedora43, r2-grp-01\n"}
+```
