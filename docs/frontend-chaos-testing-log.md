@@ -449,3 +449,8 @@
 
 **Scenario**: `stale_navigation_leak`
 **Result**: Confirmed working as expected -- outcome: `clean_no_leak`
+
+## Chaos round -- 2026-09-22T04:06:12.514433+00:00
+
+**Scenario**: `rapid_double_submit`
+**Result**: Confirmed working as expected -- outcome: `clean_single_call`
