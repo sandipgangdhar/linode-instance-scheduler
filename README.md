@@ -274,6 +274,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `rebuild` | Disaster recovery — reconstructs your local registry from tags on your own Linode account, in case the machine running this tool (and its local records) is ever lost. You should rarely need this either. |
 | `backup` | On-demand, whole-system backup — re-syncs every node's Object Storage record and takes a full local/remote database snapshot. Meant to be run on a schedule (cron/systemd timer). See §8.10. |
 | `offboard` | Permanently decommission a stopped node — releases its reserved IP, removes it from tracking, and optionally deletes its volumes. For when you're actually done with a node, not just pausing it. |
+| `deregister` | Admin escape hatch — removes a node from local tracking only, with no changes to the real Linode instance, volumes, or reserved IP at all. For correcting a wrong or unsafe local record, not for decommissioning a real node (use `offboard` for that). |
 
 > **Upgrading this tool on a fleet you already manage?** Read the one-time migration note in
 > [§8](#8-day-to-day-usage) before your next `start`/`stop` — it takes one command per existing
@@ -544,21 +545,21 @@ unrelated node won't need a manual `reset-host-key --ip` first.
 
 ## 8. Day-to-day usage
 
-> **One-time migration note — read this if you're upgrading this tool on nodes it already
-> manages.** As of 2026-08-23, `start`/`stop`/`rebuild` verify a node's SSH host key against a
-> record this tool keeps itself (`state/known_hosts`) — strictly, by default, since a
-> steady-state recreate is guaranteed to present the *same* key every time (see `start` below).
-> That record has to exist first. A node onboarded *before* this change has nothing recorded yet,
-> so its very next `start` will fail with a `SECURITY WARNING` about a key mismatch — not because
-> anything is actually wrong, but because there was nothing to compare against. **Fix, once per
-> already-onboarded node, before your next `start`/`stop`:**
+> **One-time migration note — read this if a node in your fleet was onboarded with an older
+> version of this tool, before SSH host-key verification existed.** `start`/`stop`/`rebuild`
+> verify a node's SSH host key against a record this tool keeps itself (`state/known_hosts`) —
+> strictly, by default, since a steady-state recreate is guaranteed to present the *same* key
+> every time (see `start` below). That record has to exist first. A node with nothing recorded
+> yet will fail its very next `start` with a `SECURITY WARNING` about a key mismatch — not
+> because anything is actually wrong, but because there was nothing to compare against yet.
+> **Fix, once per node with nothing recorded, before your next `start`/`stop`:**
 > ```
 > python instance_manager.py reset-host-key --name redis-standby-1 --yes
 > ```
 > This connects once, trusts whatever key the node currently presents, and records it. Do this
-> for every node in your fleet that was onboarded before this update — after that, every future
-> `start`/`stop` verifies against it automatically and you'll never need to touch this again
-> unless you genuinely rotate a host's key on purpose (see `reset-host-key` below).
+> for every node in this situation — after that, every future `start`/`stop` verifies against it
+> automatically and you'll never need to touch this again unless you genuinely rotate a host's
+> key on purpose (see `reset-host-key` below).
 
 ### `stop` — take a node offline
 
