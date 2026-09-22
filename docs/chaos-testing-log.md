@@ -385,3 +385,12 @@ Chaos testing resumed.
 ```
 {'list_after_corruption_stderr': "Configuration error: the local registry database at /opt/soak-chaos/product/state/instances.db appears corrupted or unreadable (file is not a database). Recovering local records from Linode's own tags needs a working, even if empty, local database first -- move the corrupted file aside (e.g. `mv /opt/soak-chaos/product/state/instances.db /opt/soak-chaos/product/state/instances.db.corrupted`) and re-run this command; a fresh, empty database will be created automatically, and `rebuild` can then re", 'rebuild_stdout_tail': ".\n  restored 'r2-os-almalinux8''s membership in group 'dev-fleet-b' from tags.\n  restored 'r2-os-almalinux10''s membership in group 'dev-fleet-b' from tags.\n  restored 'r2-os-rocky9''s membership in group 'dev-fleet-b' from tags.\n  restored 'r2-os-centos-stream9''s membership in group 'dev-fleet-b' from tags.\n  restored schedule for 'r2-grp-01' from tags.\nScanned tags: 12 name(s) found.\n  fully recovered: r2-node-1, r2-node-2, r2-os-ubuntu2204, r2-os-ubuntu2004, r2-os-almalinux9, r2-os-debian13, r2-os-almalinux8, r2-os-almalinux10, r2-os-rocky9, r2-os-centos-stream9, r2-os-fedora43, r2-grp-01\n"}
 ```
+
+## Chaos round — 2026-09-22T02:02:03.061709+00:00
+
+**Scenario**: `object_storage_outage` — target: `r2-os-almalinux9`
+**Result**: Confirmed working as documented — outcome: `stop_succeeded_despite_outage_then_self_healed`
+
+```
+{'stop_during_outage_returncode': 0, 'warned_during_outage': True, 'recovery_backup_returncode': 0, 'resynced': True}
+```
