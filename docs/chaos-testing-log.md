@@ -394,3 +394,12 @@ Chaos testing resumed.
 ```
 {'stop_during_outage_returncode': 0, 'warned_during_outage': True, 'recovery_backup_returncode': 0, 'resynced': True}
 ```
+
+## Chaos round — 2026-09-22T03:33:13.134035+00:00
+
+**Scenario**: `object_storage_outage` — target: `r2-node-1`
+**Result**: Confirmed working as documented — outcome: `stop_succeeded_despite_outage_then_self_healed`
+
+```
+{'stop_during_outage_returncode': 0, 'warned_during_outage': True, 'recovery_backup_returncode': 0, 'resynced': True}
+```
