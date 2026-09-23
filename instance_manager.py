@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from datetime import time as dtime
 from pathlib import Path
 from typing import Literal, TypeGuard
@@ -31,6 +31,9 @@ from linode_api4.errors import ApiError
 import linode_engine as engine
 import object_storage_backup as osb
 from linode_engine import validate_instance_name
+
+
+UTC = timezone.utc
 
 REGISTRY_PATH = engine.BASE_DIR / "state" / "instances.db"
 MIGRATIONS_PATH = engine.BASE_DIR / "state" / "migrations.json"

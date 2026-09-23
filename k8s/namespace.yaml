@@ -1,0 +1,17 @@
+# namespace.yaml
+#
+# Dedicated namespace for this deployment. Kept separate from whatever else runs on the
+# cluster deliberately -- see k8s/deploy-lke.sh, which is the thing that actually decides
+# (interactively, or via its own flags) whether THIS namespace gets labeled
+# kyverno-mutation-exempt=true. Deploying into an existing, shared namespace would make that
+# decision apply to every other workload already in it too, which is never what's intended.
+#
+# The kyverno-mutation-exempt=true label, if this project's own Kyverno-based VLAN gating
+# (github.com/sandipgangdhar/Linode-LKE-Private-Network) is present on the cluster and you
+# choose not to run under it, is applied to this object by deploy-lke.sh at deploy time --
+# it is NOT hardcoded here, since whether it's needed depends entirely on what deploy-lke.sh
+# detects on your specific cluster. See the LKE deployment guide for the full explanation.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: linode-instance-scheduler

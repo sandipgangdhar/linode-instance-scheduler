@@ -180,6 +180,11 @@ expects.
 
 ## 4. Installing and configuring the automation
 
+This section covers the default deployment: a single, persistent VM. If you already run a
+Linode Kubernetes Engine (LKE) cluster and would rather run this tool there instead, see
+`DEPLOYMENT-LKE.md` instead of this section — same tool, same commands, just packaged as a
+container.
+
 **Run this from a centralized server, not your local laptop.** This tool keeps track of every
 node it manages in a local registry file on whatever machine you run it from (see §8's `rebuild`
 section for the full reasoning). If you run it from your own laptop, that registry only exists

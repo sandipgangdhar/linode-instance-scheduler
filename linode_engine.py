@@ -112,8 +112,10 @@ def load_token() -> str:
     token = os.environ.get("LINODE_API_TOKEN")
     if not token:
         raise ConfigError(
-            "LINODE_API_TOKEN is not set. Copy .env.example to .env "
-            "and fill in a real Linode Personal Access Token."
+            "LINODE_API_TOKEN is not set. Set it as an environment variable directly "
+            "(e.g. a Kubernetes Secret), or, if you're running from a local checkout, "
+            "copy .env.example to .env and fill in a real Linode Personal "
+            "Access Token."
         )
     return token
 
@@ -159,7 +161,7 @@ def auth_check(client: LinodeClient) -> None:
         if e.status in (401, 403):
             raise ConfigError(
                 f"Linode API authentication failed (HTTP {e.status}). "
-                "Check that LINODE_API_TOKEN in .env is valid and has "
+                "Check that the configured LINODE_API_TOKEN is valid and has "
                 "the required scopes."
             ) from e
         raise

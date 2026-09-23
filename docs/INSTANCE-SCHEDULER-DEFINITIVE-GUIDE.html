@@ -742,6 +742,14 @@ pre.code .m{color:var(--code-mut)}
         <p>Once <code>.env</code> has a real token in it, <code>python instance_manager.py list</code> confirms the install itself is working (it prints cleanly whether or not anything is onboarded yet), and a real command against the API &mdash; <code>status</code>, or onboarding a first instance &mdash; confirms the token is valid. From there, running the scheduler and, if you want it, the API server and dashboard as supervised background processes is the last step before this is a genuinely running deployment &mdash; see the Operations Guide for the exact process-supervisor configuration.</p>
       </section>
 
+      <section class="chapter" id="c9-4">
+        <h2><span class="chno">9.4</span> Deploying on Kubernetes Instead of a VM</h2>
+        <p class="lede">The same application, packaged as a container, for customers who already run a Linode Kubernetes Engine (LKE) cluster and would rather run this tool there than provision a separate host.</p>
+        <p>Nothing about the tool itself changes between the two deployment models &mdash; the same SQLite registry, the same single-scheduler-process guarantee from 9.2, the same CLI, REST API, and dashboard. What differs is only how it's packaged and supervised: one Kubernetes Deployment, pinned to exactly one replica, runs the scheduler and the API server as two containers inside a single pod, sharing one persistent volume for the registry, lock files, and SSH host-key trust store. Running two containers in one pod, rather than two separate Deployments, is what lets both processes safely share that state &mdash; Kubernetes guarantees they land on the same node, the same trust boundary the VM model already relies on between two sibling processes on one host. A <code>Recreate</code> deployment strategy (the old pod fully stops before a new one starts) preserves the single-writer guarantee from 9.2 through an upgrade or a config change, the same way a plain process restart does on a VM.</p>
+        <p>Everything downstream of installation &mdash; scheduling, groups, manual override, disaster recovery, the security model &mdash; is identical to the rest of this guide regardless of which deployment model is in use. The Operations Guide's DEPLOYMENT-LKE.md covers the actual commands (building the image, the manifests, exposing the API/dashboard, backups, upgrades).</p>
+        <p>One optional integration point exists for customers whose cluster already runs the separate, sibling <a href="https://github.com/sandipgangdhar/Linode-LKE-Private-Network">Linode-LKE-Private-Network</a> project &mdash; automation many LKE customers already deploy to give cluster nodes a private VLAN/VPC network interface. That project installs an admission-time policy that automatically requires every new pod on the cluster to land on a specially-labeled node, unless its namespace opts out. This tool's own deployment tooling detects whether that policy is present and asks, once, whether to run under it or opt out &mdash; a single namespace label is the entire integration surface. The two projects never share code, a database, or an API with each other; this tool's own job (calling the public Linode API to manage other instances) never requires a private network interface for itself, so opting out is the recommended default for most deployments.</p>
+      </section>
+
       <!-- ============ APPENDIX ============ -->
       <div class="part-open" id="part-A">
         <div class="part-num">Appendix</div>
@@ -810,7 +818,7 @@ pre.code .m{color:var(--code-mut)}
     ]},
     {label:"Part IX", title:"Deployment Model", chapters:[
       ["c9-1","9.1 Self-Hosted"],["c9-2","9.2 High Availability"],
-      ["c9-3","9.3 Installing and Configuring"]
+      ["c9-3","9.3 Installing and Configuring"],["c9-4","9.4 Deploying on Kubernetes"]
     ]},
     {label:"Appendix", title:"Glossary", chapters:[
       ["cA-1","A.1 Terms of Art"]

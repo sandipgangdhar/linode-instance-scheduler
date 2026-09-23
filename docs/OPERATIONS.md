@@ -5,7 +5,12 @@ Day-2 operations reference for this Instance Scheduler deployment:
 running the poller, backup & recovery, security operations, upgrading,
 and troubleshooting. Read the project README first for what this is and
 how to deploy it, and INSTANCE-SCHEDULER-DEFINITIVE-GUIDE.html for the
-full architectural reference.
+full architectural reference. Written for the default single-VM
+deployment (DEPLOYMENT.md); if you're running this on Kubernetes/LKE
+instead (DEPLOYMENT-LKE.md), the same day-2 concepts apply -- only
+"Installing and configuring" and the two systemd sections below are
+VM-specific, everything else (backup & recovery, security operations,
+troubleshooting) is identical either way.
 
 (c) Linode Instance Scheduler | Developed by Sandip Gangdhar | 2026
 -->
@@ -13,6 +18,11 @@ full architectural reference.
 # Operations Guide
 
 ## Installing and configuring
+
+This section covers the default VM deployment. Running this on an existing Kubernetes/LKE
+cluster instead is a separate path with its own guide, DEPLOYMENT-LKE.md -- skip ahead to
+"What you're running" below if that's what you're on; everything from there onward applies
+regardless of which deployment model you chose.
 
 The tool is a plain Python program with no database server or other infrastructure of its own
 to stand up — cloning the repository, creating a virtual environment, and installing its
@@ -109,6 +119,10 @@ tag-based and Object Storage-backed recovery path, and the Definitive Guide's ow
 Model chapter for the fuller comparison against active-active/active-passive designs.
 
 ### Running the scheduler under systemd
+
+VM deployment only. On Kubernetes/LKE, the Deployment in DEPLOYMENT-LKE.md already supervises
+both processes the same way systemd does here (automatic restart on crash, automatic start on
+node reboot) -- there's nothing further to set up; skip to "Backup & recovery" below.
 
 ```ini
 # /etc/systemd/system/instance-scheduler-poll.service
@@ -400,6 +414,11 @@ changes nothing until the process restarts).
 
 The database schema is migrated automatically and idempotently on first connection after an
 upgrade — no separate migration step to run by hand.
+
+On Kubernetes/LKE, the equivalent of steps 3–5 above is rebuilding and pushing a new image tag,
+then re-running `deploy-lke.sh --image <new-tag>` — see DEPLOYMENT-LKE.md's own Upgrading
+section for the exact commands. Step 2 (back up first) and the schema-migration note both still
+apply unchanged.
 
 ## Monitoring & health checks
 

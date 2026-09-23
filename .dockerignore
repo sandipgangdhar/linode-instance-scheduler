@@ -1,0 +1,33 @@
+# Keeps the build context small and avoids ever copying real local secrets/state into an
+# image layer (a real .env or state/ directory, wherever it lives in this checkout, can
+# both contain real Linode resource IDs and credentials -- see the repo's own .gitignore
+# for the identical concern). `**/` prefixes match this regardless of whether these live
+# directly at the repo root (the customer-facing repo's own layout) or under spike/ (this
+# dev repo's own layout) -- deliberately layout-agnostic so this file needs no changes
+# either way.
+.git
+.github
+.claude
+.idea
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.venv*
+**/__pycache__
+**/*.pyc
+
+**/.env
+**/state/
+**/*.egg-info
+
+web/node_modules
+web/dist
+web/coverage
+web/playwright-report
+web/test-results
+web/.vite
+
+testing/
+docs/
+scripts/
+*.md

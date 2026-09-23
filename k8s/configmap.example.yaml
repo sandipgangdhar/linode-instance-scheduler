@@ -1,0 +1,29 @@
+# configmap.example.yaml
+#
+# Non-secret, tunable settings for the scheduler and API containers. Copy this file to
+# configmap.yaml (gitignored is NOT required here -- nothing in this file is sensitive --
+# but it's still kept separate from this example so `deploy-lke.sh` can tell "a real,
+# reviewed file exists" apart from "the placeholder was applied as-is", matching every real
+# secret template in this repo). Applied with `kubectl apply -f`, then
+# `kubectl rollout restart deployment/linode-instance-scheduler -n <namespace>` to pick up a
+# change -- env vars from a ConfigMap don't reach an already-running pod on their own.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: linode-instance-scheduler-config
+  namespace: linode-instance-scheduler
+data:
+  # Seconds between scheduler ticks. 300 (5 min) matches this project's own documented
+  # "runs every 1-5 min" design and is a sensible default for most fleets -- see
+  # the customer guide's `poll` section before lowering this.
+  POLL_INTERVAL_SECONDS: "300"
+  # How long after a schedule rule's start_time/stop_time the poller still considers it
+  # due -- tolerates ordinary tick-to-tick drift. Must be >= POLL_INTERVAL_SECONDS above
+  # (the CLI itself refuses to start otherwise) or a real window can be missed between two
+  # ticks. 300 is this tool's own built-in default.
+  POLL_WINDOW_SECONDS: "300"
+  # Optional -- comma-separated browser origins allowed to call the REST API (CORS). Leave
+  # commented out / remove the key entirely to disable CORS (the default -- appropriate
+  # unless a separately-hosted browser dashboard needs to call this API cross-origin; the
+  # dashboard this deployment serves itself, under /ui/*, never needs this).
+  # API_ALLOWED_ORIGINS: "https://dashboard.example.com"

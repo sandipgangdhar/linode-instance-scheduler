@@ -16,7 +16,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, NoReturn, TypeVar
 
@@ -31,6 +31,9 @@ from pydantic import BaseModel
 
 import linode_engine as engine
 import instance_manager as im
+
+
+UTC = timezone.utc
 
 LINODE_OAUTH_AUTHORIZE_URL = "https://login.linode.com/oauth/authorize"
 LINODE_OAUTH_TOKEN_URL = "https://login.linode.com/oauth/token"

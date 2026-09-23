@@ -11,6 +11,12 @@ migrating your first node) and have at least one node ready to manage. If you ha
 yet, start there — this guide is about running the tool itself, not about the Linode instances it
 manages.
 
+This guide covers the **default deployment model: a single VM**. If you already run a Linode
+Kubernetes Engine (LKE) cluster and would rather run this tool there instead of provisioning a
+separate host, see `DEPLOYMENT-LKE.md` instead — same application, same data model,
+just packaged as a container. Nothing below changes if you're on LKE; the two guides are
+alternatives, not sequential reading.
+
 ---
 
 ## 1. Deployment model — what you're actually setting up
