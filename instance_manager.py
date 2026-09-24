@@ -2003,7 +2003,7 @@ def onboard_instance(
                 if on_warning is not None:
                     on_warning(
                         f"  WARNING: could not sync group membership tags for '{name}' onto its "
-                        f"reserved IP ({e}) -- group membership itself is preserved locally and "
+                        f"OS volume ({e}) -- group membership itself is preserved locally and "
                         "fully in effect, but won't be recoverable via `rebuild` if the local "
                         "database is lost before this is retried (safe to retry: re-run "
                         "`group-add` for this instance)."
@@ -2018,8 +2018,8 @@ def onboard_instance(
 
                 if on_warning is not None:
                     on_warning(
-                        f"  WARNING: could not sync schedule tags for '{name}' onto its reserved "
-                        f"IP ({e}) -- the schedule itself is preserved locally and fully in "
+                        f"  WARNING: could not sync schedule tags for '{name}' onto its OS "
+                        f"volume ({e}) -- the schedule itself is preserved locally and fully in "
                         "effect, but won't be recoverable via `rebuild` if the local database is "
                         "lost before this is retried (safe to retry: re-run `schedule-set` for "
                         "this instance)."
@@ -2036,8 +2036,8 @@ def onboard_instance(
             if on_warning is not None:
                 on_warning(
                     f"  WARNING: could not sync network-config/SSH-key recovery tags for "
-                    f"'{name}' onto its reserved IP ({e}) -- onboarding still succeeded and "
-                    "'{name}' is fully correct locally; this only affects recovery after a "
+                    f"'{name}' onto its OS volume ({e}) -- onboarding still succeeded and "
+                    f"'{name}' is fully correct locally; this only affects recovery after a "
                     "total local database loss (safe to retry: `onboard --force`)."
                 )
         osb.sync_object_storage_backup(name, record, on_warning=on_warning)
@@ -2734,7 +2734,7 @@ def _stop_instance_locked(
             if on_warning is not None:
                 on_warning(
                     f"  WARNING: could not sync network-config/SSH-key recovery tags for "
-                    f"'{name}' onto its reserved IP ({e}) -- '{name}' is fully stopped and "
+                    f"'{name}' onto its OS volume ({e}) -- '{name}' is fully stopped and "
                     "correct locally; this only affects recovery after a total local database "
                     "loss (safe to retry: just run `stop`/`start` again)."
                 )
@@ -3160,12 +3160,12 @@ def _decode_schedule_from_tags(
     return {"timezone": timezone, "rules": rules, "enabled": enabled}
 
 
-def _verify_reserved_ip_tag_write(client, reserved_ip: str, expected_tags: list[str]) -> None:
+def _verify_os_volume_tag_write(client, os_volume_id: int, expected_tags: list[str]) -> None:
 
-    fresh = engine.retry_transient(lambda: client.load(engine.ReservedIPAddress, reserved_ip))
+    fresh = engine.retry_transient(lambda: client.load(Volume, os_volume_id))
     if set(fresh.tags or []) != set(expected_tags):
         raise engine.TagVerificationError(
-            f"tag write for reserved IP {reserved_ip} did not take effect as expected -- a "
+            f"tag write for OS volume {os_volume_id} did not take effect as expected -- a "
             "fresh read shows different tags than what was just saved."
         )
 
@@ -3175,15 +3175,15 @@ def _sync_schedule_tags_locked(client, name: str, record: dict, schedule: dict |
 
     if get_instance_schedule(name) != schedule:
         return
-    ip = engine.retry_transient(
-        lambda: client.load(engine.ReservedIPAddress, record["reserved_ip"])
+    os_volume = engine.retry_transient(
+        lambda: client.load(Volume, record["os_volume_id"])
     )
-    kept = [t for t in (ip.tags or []) if not _is_schedule_tag(t)]
+    kept = [t for t in (os_volume.tags or []) if not _is_schedule_tag(t)]
     new_tags = kept + (_encode_schedule_as_tags(schedule) if schedule else [])
-    if new_tags != (ip.tags or []):
-        ip.tags = new_tags
-        ip.save()
-        _verify_reserved_ip_tag_write(client, record["reserved_ip"], new_tags)
+    if new_tags != (os_volume.tags or []):
+        os_volume.tags = new_tags
+        os_volume.save()
+        _verify_os_volume_tag_write(client, record["os_volume_id"], new_tags)
 
 
 def _sync_schedule_tags(
@@ -3198,13 +3198,13 @@ def _sync_schedule_tags(
 
             registry = load_registry()
             record = registry.get(name)
-            if record is None or not record.get("reserved_ip"):
+            if record is None or not record.get("os_volume_id"):
                 return
             _sync_schedule_tags_locked(client, name, record, schedule)
     except Exception as e:
         if on_warning is not None:
             on_warning(
-                f"  WARNING: could not sync schedule tags for '{name}' onto its reserved IP "
+                f"  WARNING: could not sync schedule tags for '{name}' onto its OS volume "
                 f"({e}) -- the schedule itself was saved locally and is fully in effect, but "
                 "won't be recoverable via `rebuild` if the local database is lost before this "
                 "is retried (safe to retry: just run schedule-set again)."
@@ -3542,11 +3542,11 @@ def _sync_group_membership_tags_locked(client, name: str, record: dict, group: d
             return
     elif record.get("group_id") is not None:
         return
-    ip = engine.retry_transient(
-        lambda ip_addr=record["reserved_ip"]: client.load(engine.ReservedIPAddress, ip_addr)
+    os_volume = engine.retry_transient(
+        lambda vol_id=record["os_volume_id"]: client.load(Volume, vol_id)
     )
     kept = [
-        t for t in (ip.tags or [])
+        t for t in (os_volume.tags or [])
         if not t.startswith(_GROUP_NAME_TAG_PREFIX)
         and not _is_schedule_tag(t, prefix=_GROUP_SCHEDULE_TAG_PREFIX)
     ]
@@ -3554,10 +3554,10 @@ def _sync_group_membership_tags_locked(client, name: str, record: dict, group: d
     if group is not None:
         new_tags = new_tags + [f"{_GROUP_NAME_TAG_PREFIX}{group['name']}"] + \
             _encode_schedule_as_tags(group, prefix=_GROUP_SCHEDULE_TAG_PREFIX)
-    if new_tags != (ip.tags or []):
-        ip.tags = new_tags
-        ip.save()
-        _verify_reserved_ip_tag_write(client, record["reserved_ip"], new_tags)
+    if new_tags != (os_volume.tags or []):
+        os_volume.tags = new_tags
+        os_volume.save()
+        _verify_os_volume_tag_write(client, record["os_volume_id"], new_tags)
 
 
 def _sync_group_membership_tags(
@@ -3572,14 +3572,14 @@ def _sync_group_membership_tags(
 
             registry = load_registry()
             record = registry.get(name)
-            if record is None or not record.get("reserved_ip"):
+            if record is None or not record.get("os_volume_id"):
                 return
             _sync_group_membership_tags_locked(client, name, record, group)
     except Exception as e:
         if on_warning is not None:
             on_warning(
                 f"  WARNING: could not sync group membership tags for '{name}' onto its "
-                f"reserved IP ({e}) -- group membership itself is saved locally and fully in "
+                f"OS volume ({e}) -- group membership itself is saved locally and fully in "
                 "effect, but won't be recoverable via `rebuild` if the local database is lost "
                 "before this is retried (safe to retry: re-run group-add for this instance)."
             )
@@ -3717,10 +3717,10 @@ def _resolve_ssh_key_ids_to_content(client, key_ids: list[int]) -> list[str]:
 
 def _sync_extra_recovery_tags_locked(client, name: str, record: dict, ssh_key_ids: list[int]) -> None:
 
-    ip = engine.retry_transient(
-        lambda: client.load(engine.ReservedIPAddress, record["reserved_ip"])
+    os_volume = engine.retry_transient(
+        lambda: client.load(Volume, record["os_volume_id"])
     )
-    kept = [t for t in (ip.tags or []) if not _is_extra_recovery_tag(t)]
+    kept = [t for t in (os_volume.tags or []) if not _is_extra_recovery_tag(t)]
     new_extra = (
         _encode_simple_network_config_as_tags(
             record.get("network_interface_model"), record.get("network_config"),
@@ -3729,10 +3729,10 @@ def _sync_extra_recovery_tags_locked(client, name: str, record: dict, ssh_key_id
         + _encode_ssh_key_ids_as_tags(ssh_key_ids)
     )
     new_tags = kept + new_extra
-    if new_tags != (ip.tags or []):
-        ip.tags = new_tags
-        ip.save()
-        _verify_reserved_ip_tag_write(client, record["reserved_ip"], new_tags)
+    if new_tags != (os_volume.tags or []):
+        os_volume.tags = new_tags
+        os_volume.save()
+        _verify_os_volume_tag_write(client, record["os_volume_id"], new_tags)
 
 
 @dataclass
@@ -4945,23 +4945,21 @@ def rebuild_instances(
 
 
                 try:
-                    ip = engine.retry_transient(
-                        lambda ip_addr=resources["reserved_ip"]: client.load(
-                            engine.ReservedIPAddress, ip_addr
-                        )
+                    os_volume = engine.retry_transient(
+                        lambda vol_id=record["os_volume_id"]: client.load(Volume, vol_id)
                     )
                 except Exception as e:
-                    ip = None
+                    os_volume = None
                     if on_warning is not None:
                         on_warning(
-                            f"  WARNING: '{name}' recovered, but its reserved IP's tags could "
+                            f"  WARNING: '{name}' recovered, but its OS volume's tags could "
                             f"not be read to check for a schedule or group membership ({e}) -- "
                             "re-run schedule-set/group-add for it manually if it had either."
                         )
 
-                if ip is not None:
+                if os_volume is not None:
                     try:
-                        decoded = _decode_schedule_from_tags(ip.tags)
+                        decoded = _decode_schedule_from_tags(os_volume.tags)
                         if decoded is not None:
 
 
@@ -4984,7 +4982,7 @@ def rebuild_instances(
                     try:
                         group_name = next(
                             (
-                                t[len(_GROUP_NAME_TAG_PREFIX):] for t in (ip.tags or [])
+                                t[len(_GROUP_NAME_TAG_PREFIX):] for t in (os_volume.tags or [])
                                 if t.startswith(_GROUP_NAME_TAG_PREFIX)
                             ),
                             None,
@@ -4997,7 +4995,7 @@ def rebuild_instances(
 
 
                                 snapshot = _decode_schedule_from_tags(
-                                    ip.tags, prefix=_GROUP_SCHEDULE_TAG_PREFIX
+                                    os_volume.tags, prefix=_GROUP_SCHEDULE_TAG_PREFIX
                                 )
                                 if snapshot is None:
                                     raise engine.ConfigError(
@@ -5266,20 +5264,20 @@ def _rebuild_one_record(
 
 
     try:
-        ip = engine.retry_transient(
-            lambda: client.load(engine.ReservedIPAddress, resources["reserved_ip"])
+        os_volume = engine.retry_transient(
+            lambda: client.load(Volume, resources["os_volume_id"])
         )
 
 
-        ip_tags = ip.tags if isinstance(ip.tags, list) else []
+        os_volume_tags = os_volume.tags if isinstance(os_volume.tags, list) else []
     except Exception:
-        ip_tags = []
+        os_volume_tags = []
 
-    simple_network = _decode_simple_network_config_from_tags(ip_tags)
+    simple_network = _decode_simple_network_config_from_tags(os_volume_tags)
     if simple_network is not None:
         record.update(simple_network)
 
-    tag_ssh_key_ids = _decode_ssh_key_ids_from_tags(ip_tags)
+    tag_ssh_key_ids = _decode_ssh_key_ids_from_tags(os_volume_tags)
     tag_authorized_keys = (
         _resolve_ssh_key_ids_to_content(client, tag_ssh_key_ids) if tag_ssh_key_ids else []
     )

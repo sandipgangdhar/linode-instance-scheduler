@@ -754,7 +754,7 @@ should happen in normal use), that node is skipped and reported rather than gues
 warning tells you exactly what to check in Cloud Manager before re-running.
 
 **If the node had a schedule set (§8.5), or belonged to a group (§8.6), `rebuild` recovers those
-too** — not just the node itself. Both are mirrored onto the node's reserved IP as tags the same
+too** — not just the node itself. Both are mirrored onto the node's OS volume as tags the same
 way its identity is, specifically so they survive this exact scenario; nothing extra to do, they
 come back automatically alongside the node in the same `rebuild` run. If the group itself was
 lost too (not just this one node's own record), it's recreated from this node's own tags —
