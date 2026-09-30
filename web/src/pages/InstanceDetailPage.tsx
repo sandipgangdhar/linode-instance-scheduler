@@ -44,7 +44,10 @@ export function InstanceDetailPage() {
   const [securityWarning, setSecurityWarning] = useState<string | null>(null)
   const [actionWarnings, setActionWarnings] = useState<string[]>([])
   const [busy, setBusy] = useState<string | null>(null)
-  const runningRef = useRef(false)
+  const runningRef = useRef<{
+    label: string
+    until: number
+  } | null>(null)
   const [confirmName, setConfirmName] = useState('')
   const [deleteVolumes, setDeleteVolumes] = useState(false)
   const [offboardError, setOffboardError] = useState<string | null>(null)
@@ -116,8 +119,8 @@ export function InstanceDetailPage() {
       onWarning: (warnings: string[]) => void,
     ) => Promise<unknown>,
   ) => {
-    if (runningRef.current) return
-    runningRef.current = true
+    if (runningRef.current?.label === label && Date.now() < runningRef.current.until) return
+    runningRef.current = { label, until: Number.POSITIVE_INFINITY }
     const guardStartedAt = Date.now()
     const requestedName = name
     setBusy(label)
@@ -146,13 +149,7 @@ export function InstanceDetailPage() {
     } finally {
       if (requestedName === currentNameRef.current) setBusy(null)
       const remainingMs = MIN_ACTION_GUARD_MS - (Date.now() - guardStartedAt)
-      if (remainingMs > 0) {
-        setTimeout(() => {
-          runningRef.current = false
-        }, remainingMs)
-      } else {
-        runningRef.current = false
-      }
+      runningRef.current = remainingMs > 0 ? { label, until: Date.now() + remainingMs } : null
     }
   }
   function assertStartSucceeded(result: Awaited<ReturnType<typeof api.startInstance>>) {
