@@ -287,6 +287,60 @@ def capture_network_config(instance, *, configs: list | None = None) -> dict:
     }
 
 
+def instance_has_vpc_or_vlan_interface(instance, configs: list) -> bool:
+
+    model = instance.interface_generation
+    if model == INTERFACE_MODEL_LEGACY:
+        return any(iface.purpose in ("vpc", "vlan") for iface in configs[0].interfaces)
+    interfaces = instance.linode_interfaces
+    if interfaces is None:
+        return False
+    return any(iface.vpc is not None or iface.vlan is not None for iface in interfaces)
+
+
+def instance_has_public_interface(instance, configs: list) -> bool:
+
+    model = instance.interface_generation
+    if model == INTERFACE_MODEL_LEGACY:
+        return any(iface.purpose == "public" for iface in configs[0].interfaces)
+    interfaces = instance.linode_interfaces
+    if interfaces is None:
+        return False
+    return any(iface.public is not None for iface in interfaces)
+
+
+def vpc_or_vlan_address(network_config: list[dict] | None, model: str | None) -> str | None:
+
+    if not network_config:
+        return None
+    vlan_address: str | None = None
+    if model == INTERFACE_MODEL_LEGACY:
+        for iface in network_config:
+            purpose = iface.get("purpose")
+            if purpose == "vpc":
+                vpc_ip = (iface.get("ipv4") or {}).get("vpc")
+                if vpc_ip:
+                    return vpc_ip
+            elif purpose == "vlan" and vlan_address is None:
+                ipam_address = iface.get("ipam_address")
+                if ipam_address:
+                    vlan_address = ipam_address.split("/")[0]
+    else:
+        for iface in network_config:
+            if iface.get("vpc"):
+                addresses = ((iface["vpc"].get("ipv4") or {}).get("addresses")) or []
+                if addresses:
+                    return next(
+                        (a["address"] for a in addresses if a.get("primary")),
+                        addresses[0]["address"],
+                    )
+            elif iface.get("vlan") and vlan_address is None:
+                ipam_address = iface["vlan"].get("ipam_address")
+                if ipam_address:
+                    vlan_address = ipam_address.split("/")[0]
+    return vlan_address
+
+
 def build_create_kwargs(captured: dict) -> dict:
 
     model = captured["network_interface_model"]
@@ -595,7 +649,7 @@ def poll_until_status(
         try:
             resource = load_fn()
         except ApiError as e:
-            if e.status >= 500:
+            if e.status >= 500 or e.status == 429:
                 time.sleep(interval_s)
                 continue
             raise
@@ -656,7 +710,7 @@ def create_and_boot_instance(
     region: str,
     label: str,
     golden_volume,
-    reserved_ip: str,
+    reserved_ip: str | None,
     captured_network: dict,
     authorized_keys: list[str],
     root_pass: str,
@@ -670,14 +724,21 @@ def create_and_boot_instance(
     on_created=None,
 ):
 
-    ip_info = get_ip_details(client, reserved_ip)
+
+    if reserved_ip is not None:
+        ip_info = get_ip_details(client, reserved_ip)
+        public_gateway = ip_info["gateway"]
+        public_prefix = ip_info["prefix"]
+    else:
+        public_gateway = None
+        public_prefix = 24
     kwargs = build_create_kwargs(captured_network)
     user_data = build_user_data(
         captured_network["network_config"],
         captured_network["network_interface_model"],
         public_ip=reserved_ip,
-        public_gateway=ip_info["gateway"],
-        public_prefix=ip_info["prefix"],
+        public_gateway=public_gateway,
+        public_prefix=public_prefix,
         vpc_prefix=vpc_prefix,
         dns_servers=dns_servers,
         preserve_host_keys=preserve_host_keys,
@@ -708,7 +769,9 @@ def create_and_boot_instance(
                     "NAT config. Not supported for now; investigate manually before "
                     "recreating this instance."
                 )
-        extra_create_kwargs = {"ipv4": [reserved_ip]}
+
+
+        extra_create_kwargs = {"ipv4": [reserved_ip]} if reserved_ip is not None else {}
     else:
         extra_create_kwargs = {}
     plan_type = (instance_attrs or {}).get("plan_type", "g6-nanode-1")
@@ -791,7 +854,7 @@ CREATE_RETRY_BACKOFF_S = (30, 60, 120)
 
 def _is_transient_create_error(exc: ApiError) -> bool:
 
-    if exc.status >= 500:
+    if exc.status >= 500 or exc.status == 429:
         return True
 
 
@@ -901,7 +964,7 @@ def delete_instance_and_detach_volumes(client: LinodeClient, instance, volumes: 
         except ApiError as e:
             if e.status == 404:
                 return
-            if e.status >= 500 and time.monotonic() < deadline:
+            if (e.status >= 500 or e.status == 429) and time.monotonic() < deadline:
                 time.sleep(5)
                 continue
             raise
@@ -1918,7 +1981,7 @@ def tag_managed_resources(
     *,
     os_volume_id: int,
     data_volume_ids: list[int],
-    reserved_ip: str,
+    reserved_ip: str | None,
 ) -> None:
 
     name_tag = f"{REGISTRY_NAME_TAG_PREFIX}:{name}"
@@ -1949,8 +2012,10 @@ def tag_managed_resources(
     ]
     for _vol_id, vol in data_volumes:
         _check_not_owned_by_another_name(vol)
-    ip = retry_transient(lambda: client.load(ReservedIPAddress, reserved_ip))
-    _check_not_owned_by_another_name(ip)
+    ip = None
+    if reserved_ip is not None:
+        ip = retry_transient(lambda: client.load(ReservedIPAddress, reserved_ip))
+        _check_not_owned_by_another_name(ip)
 
 
     def _tag_and_verify(resource, resource_cls, resource_id, *tags, remove: tuple = ()) -> None:
@@ -1990,7 +2055,9 @@ def tag_managed_resources(
             vol, Volume, vol_id, name_tag, REGISTRY_ROLE_TAG_DATA,
             remove=(REGISTRY_ROLE_TAG_ACTIVE_MIGRATION, REGISTRY_ROLE_TAG_ORPHANED_MIGRATION),
         )
-    _tag_and_verify(ip, ReservedIPAddress, reserved_ip, name_tag, REGISTRY_ROLE_TAG_IP)
+    if reserved_ip is not None:
+        assert ip is not None
+        _tag_and_verify(ip, ReservedIPAddress, reserved_ip, name_tag, REGISTRY_ROLE_TAG_IP)
 
 
     for old_os_id in current.get("os_volume_ids", []):
@@ -2318,7 +2385,7 @@ def retry_transient(fn, attempts=5, delay_s=5):
         try:
             return fn()
         except ApiError as e:
-            if e.status < 500 or attempt == attempts - 1:
+            if (e.status < 500 and e.status != 429) or attempt == attempts - 1:
                 raise
         except requests.exceptions.RequestException:
             if attempt == attempts - 1:
@@ -2355,7 +2422,11 @@ def retry_transient_or_already_done(
                         return None
                 except Exception:
                     pass
-            is_retryable = e.status >= 500 or (is_transient is not None and is_transient(e))
+            is_retryable = (
+                e.status >= 500
+                or e.status == 429
+                or (is_transient is not None and is_transient(e))
+            )
             if not is_retryable or attempt == attempts - 1:
                 raise
         except requests.exceptions.RequestException:

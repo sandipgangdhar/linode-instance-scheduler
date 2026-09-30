@@ -45,10 +45,12 @@ Configuration is one flat file, `.env`, read once at process startup:
 cp .env.example .env
 ```
 
-Open `.env` and fill in `LINODE_API_TOKEN` — a full-access Linode Personal Access Token, the
-only setting required to run anything at all. Every other variable is optional and only matters
-if you're using the specific feature it enables — see "Environment configuration reference"
-below for the full list.
+Open `.env` and fill in `LINODE_API_TOKEN` — a Linode Personal Access Token scoped read/write to
+**Linodes**, **Volumes**, and **IPs** (add **VPCs** (Read) too if any managed instance uses a VPC
+interface), the only setting required to run anything at all. **Account** (Read Only) is enough
+to satisfy the tool's own startup check. Every other variable is optional and only matters if
+you're using the specific feature it enables — see "Environment configuration reference" below
+for the full list.
 
 Confirm the install itself is working (a purely local check, no token required yet):
 
@@ -186,7 +188,7 @@ in real values — never commit the real file).
 
 | Variable | Required | What it does |
 |---|---|---|
-| `LINODE_API_TOKEN` | Yes | A full-access Linode Personal Access Token — the one credential that actually performs every create/delete/tag/volume operation. Used by the CLI, the scheduler, and the API server alike. |
+| `LINODE_API_TOKEN` | Yes | A Linode Personal Access Token scoped read/write to Linodes, Volumes, and IPs (add VPCs (Read) too if any managed instance uses a VPC interface); Account (Read Only) is enough to satisfy the tool's own startup check. The one credential that actually performs every create/delete/tag/volume operation. Used by the CLI, the scheduler, and the API server alike. |
 | `LINODE_SSH_KEY_PATH` | No (has a default) | Path to this deployment's own SSH private key, used for every reachability check and `authorized_keys` capture. See the Definitive Guide's Security section for why this is one deployment-wide key, never a per-instance stored credential. |
 | `LINODE_OAUTH_CLIENT_ID` / `LINODE_OAUTH_CLIENT_SECRET` | Only if using the dashboard's "Login with Linode" | Register your own OAuth Client in your own Linode account (Cloud Manager → Profile → OAuth Apps) — see "Setting up dashboard login" below. |
 | `LINODE_OAUTH_REDIRECT_URI` | Only if using dashboard login | Must exactly match the redirect URI configured on the OAuth App above. |
@@ -391,10 +393,11 @@ deliberately trigger) is refused outright as a `SECURITY WARNING` — see Troubl
 
 ### Rotating the Linode API token
 
-Generate a new full-access Personal Access Token in Cloud Manager, update
-`LINODE_API_TOKEN` in `.env`, and restart both the scheduler and API server processes so they
-pick up the new value (this token is read once, at process startup — editing `.env` alone
-changes nothing until the process restarts).
+Generate a new Personal Access Token in Cloud Manager with the same scopes as the one being
+replaced (see "Environment configuration reference" above), update `LINODE_API_TOKEN` in `.env`,
+and restart both the scheduler and API server processes so they pick up the new value (this
+token is read once, at process startup — editing `.env` alone changes nothing until the process
+restarts).
 
 ## Upgrading
 

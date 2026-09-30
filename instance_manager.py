@@ -1815,19 +1815,28 @@ def onboard_instance(
             raise engine.NotMigratedError(instance_id)
         os_volume_id = sda["id"]
 
-        if not instance.ipv4:
-            raise engine.ConfigError("instance has no public IPv4 address.")
-        reserved_ip = instance.ipv4[0]
-        try:
-            ip_info = engine.get_ip_details(client, reserved_ip)
-        except (ApiError, requests.exceptions.RequestException) as e:
+
+        if engine.instance_has_public_interface(instance, configs):
+            reserved_ip = instance.ipv4[0]
+            try:
+                ip_info = engine.get_ip_details(client, reserved_ip)
+            except (ApiError, requests.exceptions.RequestException) as e:
 
 
-            raise engine.ConfigError(
-                f"could not check whether {reserved_ip} is reserved: {e}"
-            ) from e
-        if not ip_info.get("reserved"):
-            raise engine.IPNotReservedError(reserved_ip)
+                raise engine.ConfigError(
+                    f"could not check whether {reserved_ip} is reserved: {e}"
+                ) from e
+            if not ip_info.get("reserved"):
+                raise engine.IPNotReservedError(reserved_ip)
+        else:
+
+
+            if not engine.instance_has_vpc_or_vlan_interface(instance, configs):
+                raise engine.ConfigError(
+                    "instance has no public IPv4 address and no VPC/VLAN interface -- "
+                    "nothing to reach it by."
+                )
+            reserved_ip = None
 
 
         old_record = registry.get(name)
@@ -1863,6 +1872,17 @@ def onboard_instance(
 
             captured = engine.capture_network_config(instance, configs=configs)
 
+
+            ssh_target = reserved_ip or engine.vpc_or_vlan_address(
+                captured["network_config"], captured["network_interface_model"]
+            )
+            if not ssh_target:
+                raise _OnboardRefusal(
+                    "could not determine an address to reach this instance over SSH -- "
+                    "the onboarding gate confirmed a VPC/VLAN interface exists, but no "
+                    "explicit static IPv4 address was captured for it."
+                )
+
             vpc_prefix = _derive_vpc_prefix(
                 client, captured["network_config"], captured["network_interface_model"],
                 vpc_id=vpc_id,
@@ -1876,7 +1896,7 @@ def onboard_instance(
 
 
             authorized_keys_raw = engine.ssh_run(
-                reserved_ip, ssh_key, "cat /root/.ssh/authorized_keys 2>/dev/null",
+                ssh_target, ssh_key, "cat /root/.ssh/authorized_keys 2>/dev/null",
                 trust_new=True, password=ssh_password,
             )
             authorized_keys = [
@@ -1978,7 +1998,7 @@ def onboard_instance(
                 )
             try:
                 engine.ssh_run(
-                    reserved_ip, ssh_key, _append_authorized_key_command(install_public_key),
+                    ssh_target, ssh_key, _append_authorized_key_command(install_public_key),
                     trust_new=True, password=ssh_password,
                 )
             except (ApiError, RuntimeError, requests.exceptions.RequestException) as e:
@@ -2160,6 +2180,33 @@ class StartResult:
     manual_override_expires_at: str | None = None
 
 
+def _resolve_ssh_target(
+    reserved_ip: str | None, network_config: list | None, network_interface_model: str | None, *,
+    subject: str,
+) -> str:
+
+    if reserved_ip:
+        return reserved_ip
+    address = engine.vpc_or_vlan_address(network_config, network_interface_model)
+    if not address:
+        raise engine.ConfigError(
+            f"'{subject}' has no reserved IP and no VPC/VLAN interface address to reach "
+            "it by -- this should be impossible for an onboarded instance; the local "
+            "record may be corrupted."
+        )
+    return address
+
+
+def _ssh_target(record: dict, name: str) -> str:
+
+    reserved_ip = record.get("reserved_ip")
+    if reserved_ip:
+        return reserved_ip
+    return _resolve_ssh_target(
+        None, record["network_config"], record["network_interface_model"], subject=name,
+    )
+
+
 def start_instance(
     client, name: str, ssh_key: str, *,
     triggered_by: Literal["schedule", "manual", "api"] = "manual",
@@ -2302,7 +2349,7 @@ def _start_instance_locked(
                 )
                 if on_progress is not None:
                     on_progress("  running -- verifying real network reachability...")
-                engine.ssh_run(record["reserved_ip"], ssh_key, "echo ok", retries=12, retry_delay_s=10)
+                engine.ssh_run(_ssh_target(record, name), ssh_key, "echo ok", retries=12, retry_delay_s=10)
             except ApiError as e:
                 if e.status == 404:
 
@@ -2387,7 +2434,7 @@ def _start_instance_locked(
                 on_progress("  running -- verifying real network reachability...")
 
 
-            engine.ssh_run(record["reserved_ip"], ssh_key, "echo ok", retries=12, retry_delay_s=10)
+            engine.ssh_run(_ssh_target(record, name), ssh_key, "echo ok", retries=12, retry_delay_s=10)
         except (
             ApiError, RuntimeError, TimeoutError, requests.exceptions.RequestException,
         ) as e:
@@ -2438,8 +2485,8 @@ def cmd_start(client, args) -> int:
 def _print_start_result(name: str, result: StartResult) -> int:
 
     if result.outcome == "already_running":
-        print(f"'{name}' is already running (instance {result.instance_id}, "
-              f"IP {result.reserved_ip}).")
+        ip_note = f"IP {result.reserved_ip}" if result.reserved_ip else "no public IP (VPC/VLAN-only)"
+        print(f"'{name}' is already running (instance {result.instance_id}, {ip_note}).")
         return 0
     if result.outcome == "confirmed_gone_reset_to_stopped":
         print(
@@ -2471,7 +2518,12 @@ def _print_start_result(name: str, result: StartResult) -> int:
         print(f"Configuration error: failed to start '{name}': {result.detail}", file=sys.stderr)
         return 1
 
-    print(f"'{name}' is up at {result.reserved_ip}.")
+    if result.reserved_ip:
+        print(f"'{name}' is up at {result.reserved_ip}.")
+    else:
+
+
+        print(f"'{name}' is up (reachable over its VPC/VLAN interface, no public IP).")
     if result.manual_override_expires_at is not None:
         print(f"  manually started outside its scheduled hours -- auto-stops at "
               f"{_format_override_expiry(result.manual_override_expires_at)} unless extended "
@@ -2630,7 +2682,11 @@ def _stop_instance_locked(
 
 
                 authorized_keys_raw = engine.ssh_run(
-                    record["reserved_ip"], ssh_key, "cat /root/.ssh/authorized_keys 2>/dev/null",
+                    _resolve_ssh_target(
+                        record.get("reserved_ip"), fresh_network["network_config"],
+                        fresh_network["network_interface_model"], subject=name,
+                    ),
+                    ssh_key, "cat /root/.ssh/authorized_keys 2>/dev/null",
                 )
                 fresh_authorized_keys = [
                     line.strip() for line in authorized_keys_raw.splitlines() if line.strip()
@@ -4771,11 +4827,14 @@ def reset_host_key(
                     f"'{name}' is not onboarded. Use --ip instead for a node that isn't "
                     "onboarded yet."
                 )
-            reserved_ip = record.get("reserved_ip")
-            if not reserved_ip:
-                raise engine.ConfigError(f"'{name}' has no reserved_ip on record.")
+
+
+            ssh_target = _resolve_ssh_target(
+                record.get("reserved_ip"), record["network_config"],
+                record["network_interface_model"], subject=name,
+            )
             return _reset_host_key_confirm_and_apply(
-                confirm_label=name, reserved_ip=reserved_ip, ssh_key=ssh_key,
+                confirm_label=name, reserved_ip=ssh_target, ssh_key=ssh_key,
                 confirm=confirm, on_progress=on_progress,
             )
     assert ip is not None
@@ -4903,7 +4962,9 @@ def rebuild_instances(
                 len(resources.get("region_candidates", [])) > 1:
             ambiguous.append((name, resources))
             continue
-        if resources.get("os_volume_id") is None or resources.get("reserved_ip") is None:
+
+
+        if resources.get("os_volume_id") is None:
             incomplete.append((name, resources))
             continue
 
@@ -5150,10 +5211,19 @@ def _rebuild_one_record(
 ) -> dict:
 
 
-    ip_info = engine.retry_transient(
-        lambda: engine.get_ip_details(client, resources["reserved_ip"])
-    )
-    linode_id = ip_info.get("linode_id")
+    reserved_ip = resources.get("reserved_ip")
+    if reserved_ip is not None:
+        ip_info = engine.retry_transient(
+            lambda: engine.get_ip_details(client, reserved_ip)
+        )
+        linode_id = ip_info.get("linode_id")
+    else:
+
+
+        os_volume = engine.retry_transient(
+            lambda: client.load(Volume, resources["os_volume_id"])
+        )
+        linode_id = os_volume.linode_id
 
     if linode_id:
         instance = engine.retry_transient(lambda: client.load(Instance, linode_id))
@@ -5195,7 +5265,11 @@ def _rebuild_one_record(
 
 
         authorized_keys_raw = engine.ssh_run(
-            resources["reserved_ip"], ssh_key,
+            _resolve_ssh_target(
+                reserved_ip, captured_network["network_config"],
+                captured_network["network_interface_model"], subject=name,
+            ),
+            ssh_key,
             "cat /root/.ssh/authorized_keys 2>/dev/null",
             trust_new=True,
         )

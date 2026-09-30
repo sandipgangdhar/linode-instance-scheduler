@@ -17,6 +17,7 @@ import { usePolling } from '../hooks/usePolling'
 import { useStatusBar } from '../status/StatusBarContext'
 import { PageHeader } from './DashboardLayout'
 const POLL_INTERVAL_MS = 8000
+const MIN_ACTION_GUARD_MS = 600
 export function GroupDetailPage() {
   const { name = '' } = useParams()
   const navigate = useNavigate()
@@ -38,6 +39,9 @@ export function GroupDetailPage() {
   const [selectedToAdd, setSelectedToAdd] = useState<Set<string>>(new Set())
   const [adding, setAdding] = useState(false)
   const currentNameRef = useRef<string | null>(name)
+  const savingScheduleRef = useRef(false)
+  const deletingRef = useRef(false)
+  const addingRef = useRef(false)
   useEffect(() => {
     currentNameRef.current = name
     setSelectedToAdd(new Set())
@@ -94,6 +98,9 @@ export function GroupDetailPage() {
     rules: ScheduleGroup['rules']
     enabled: boolean
   }) => {
+    if (savingScheduleRef.current) return
+    savingScheduleRef.current = true
+    const savingScheduleGuardStartedAt = Date.now()
     const requestedName = name
     setBusy(true)
     setScheduleError(null)
@@ -111,15 +118,25 @@ export function GroupDetailPage() {
       setScheduleError(e instanceof ApiError ? e.message : 'Could not save the group schedule.')
     } finally {
       if (requestedName === currentNameRef.current) setBusy(false)
+      const remainingMs = MIN_ACTION_GUARD_MS - (Date.now() - savingScheduleGuardStartedAt)
+      if (remainingMs > 0)
+        setTimeout(() => {
+          savingScheduleRef.current = false
+        }, remainingMs)
+      else savingScheduleRef.current = false
     }
   }
   const deleteGroup = async () => {
+    if (deletingRef.current) return
+    deletingRef.current = true
+    const deletingGuardStartedAt = Date.now()
     const requestedName = name
     if (group && group.members.length > 0) {
       setDeleteError(
         `'${requestedName}' now has ${group.members.length} member(s) -- remove them first before deleting the group.`,
       )
       setDeleteConfirming(false)
+      deletingRef.current = false
       return
     }
     setDeleting(true)
@@ -130,6 +147,13 @@ export function GroupDetailPage() {
       if (requestedName !== currentNameRef.current) return
       setDeleteError(e instanceof ApiError ? e.message : 'Could not delete this group.')
       setDeleting(false)
+    } finally {
+      const remainingMs = MIN_ACTION_GUARD_MS - (Date.now() - deletingGuardStartedAt)
+      if (remainingMs > 0)
+        setTimeout(() => {
+          deletingRef.current = false
+        }, remainingMs)
+      else deletingRef.current = false
     }
   }
   const groupNameById = useMemo(() => new Map((allGroups ?? []).map((g) => [g.id, g.name])), [allGroups])
@@ -153,6 +177,9 @@ export function GroupDetailPage() {
   }
   const addSelected = async () => {
     if (selectedToAdd.size === 0) return
+    if (addingRef.current) return
+    addingRef.current = true
+    const addingGuardStartedAt = Date.now()
     const targets = Array.from(selectedToAdd)
     const requestedName = name
     setAdding(true)
@@ -207,6 +234,12 @@ export function GroupDetailPage() {
       }
       loadPickerData()
       if (requestedName === currentNameRef.current) setAdding(false)
+      const remainingMs = MIN_ACTION_GUARD_MS - (Date.now() - addingGuardStartedAt)
+      if (remainingMs > 0)
+        setTimeout(() => {
+          addingRef.current = false
+        }, remainingMs)
+      else addingRef.current = false
     }
   }
   if (error) {

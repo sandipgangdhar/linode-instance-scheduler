@@ -62,8 +62,8 @@ Before you start, make sure you have:
 - **A Linode account** with permission to create instances, volumes, and reserved IPs.
 - **A Linode Personal Access Token** — Cloud Manager → Profile (top right) → API Tokens →
   "Create a Personal Access Token." Scopes needed: **Linodes** (Read/Write), **Volumes**
-  (Read/Write), **IPs** (Read/Write). Account (Read Only) is enough to satisfy the tool's own
-  startup check.
+  (Read/Write), **IPs** (Read/Write). Add **VPCs** (Read) too if any of your instances use a VPC
+  interface. Account (Read Only) is enough to satisfy the tool's own startup check.
 - **Access to this GitHub repository** (you should already have this).
 - **A dedicated SSH key pair** for this automation to use. Don't reuse a personal key you use for
   other things — generate one specifically for this tool, so its access is clearly scoped and

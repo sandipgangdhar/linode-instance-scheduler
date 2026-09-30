@@ -16,6 +16,7 @@ import { useSshCredentials } from '../hooks/useSshCredentials'
 import { useStatusBar } from '../status/StatusBarContext'
 import { PageHeader } from './DashboardLayout'
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,27}$/
+const MIN_ACTION_GUARD_MS = 600
 type OnboardBlocker =
   | {
       kind: 'error'
@@ -57,6 +58,8 @@ export function OnboardPage() {
   const ssh = useSshCredentials(selected?.ipv4[0])
   const lastForceRef = useRef(false)
   const currentAttemptKeyRef = useRef<string | null>(`${name}:${selected?.id ?? ''}`)
+  const onboardingRef = useRef(false)
+  const reservingRef = useRef(false)
   useEffect(() => {
     currentAttemptKeyRef.current = `${name}:${selected?.id ?? ''}`
     return () => {
@@ -100,6 +103,9 @@ export function OnboardPage() {
       : null
   const onboard = async (force = false) => {
     if (!selected) return
+    if (onboardingRef.current) return
+    onboardingRef.current = true
+    const onboardingGuardStartedAt = Date.now()
     const requestedKey = `${name}:${selected.id}`
     lastForceRef.current = force
     setOnboarding(true)
@@ -147,10 +153,19 @@ export function OnboardPage() {
       }
     } finally {
       if (requestedKey === currentAttemptKeyRef.current) setOnboarding(false)
+      const remainingMs = MIN_ACTION_GUARD_MS - (Date.now() - onboardingGuardStartedAt)
+      if (remainingMs > 0)
+        setTimeout(() => {
+          onboardingRef.current = false
+        }, remainingMs)
+      else onboardingRef.current = false
     }
   }
   const reserveIpAndRetry = async () => {
     if (blocker?.kind !== 'unreserved_ip') return
+    if (reservingRef.current) return
+    reservingRef.current = true
+    const reservingGuardStartedAt = Date.now()
     const address = blocker.address
     const requestedKey = currentAttemptKeyRef.current
     setReserving(true)
@@ -166,6 +181,12 @@ export function OnboardPage() {
       })
     } finally {
       if (requestedKey === currentAttemptKeyRef.current) setReserving(false)
+      const remainingMs = MIN_ACTION_GUARD_MS - (Date.now() - reservingGuardStartedAt)
+      if (remainingMs > 0)
+        setTimeout(() => {
+          reservingRef.current = false
+        }, remainingMs)
+      else reservingRef.current = false
     }
   }
   return (

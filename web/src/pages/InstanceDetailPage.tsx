@@ -28,6 +28,7 @@ import { usePolling } from '../hooks/usePolling'
 import { useStatusBar } from '../status/StatusBarContext'
 import { PageHeader } from './DashboardLayout'
 const POLL_INTERVAL_MS = 8000
+const MIN_ACTION_GUARD_MS = 600
 class SecurityWarningError extends Error {}
 export function InstanceDetailPage() {
   const { name = '' } = useParams()
@@ -43,6 +44,7 @@ export function InstanceDetailPage() {
   const [securityWarning, setSecurityWarning] = useState<string | null>(null)
   const [actionWarnings, setActionWarnings] = useState<string[]>([])
   const [busy, setBusy] = useState<string | null>(null)
+  const runningRef = useRef(false)
   const [confirmName, setConfirmName] = useState('')
   const [deleteVolumes, setDeleteVolumes] = useState(false)
   const [offboardError, setOffboardError] = useState<string | null>(null)
@@ -114,6 +116,9 @@ export function InstanceDetailPage() {
       onWarning: (warnings: string[]) => void,
     ) => Promise<unknown>,
   ) => {
+    if (runningRef.current) return
+    runningRef.current = true
+    const guardStartedAt = Date.now()
     const requestedName = name
     setBusy(label)
     setActionError(null)
@@ -140,6 +145,14 @@ export function InstanceDetailPage() {
       reload()
     } finally {
       if (requestedName === currentNameRef.current) setBusy(null)
+      const remainingMs = MIN_ACTION_GUARD_MS - (Date.now() - guardStartedAt)
+      if (remainingMs > 0) {
+        setTimeout(() => {
+          runningRef.current = false
+        }, remainingMs)
+      } else {
+        runningRef.current = false
+      }
     }
   }
   function assertStartSucceeded(result: Awaited<ReturnType<typeof api.startInstance>>) {

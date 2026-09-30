@@ -101,10 +101,10 @@ already gitignored; never commit it, and never paste its contents anywhere outsi
 Fill in:
 
 - **`LINODE_API_TOKEN`** — a Personal Access Token scoped to **Linodes** (Read/Write), **Volumes**
-  (Read/Write), and **IPs** (Read/Write); **Account** (Read Only) is enough to satisfy the tool's
-  own startup check. Create one at Cloud Manager → Profile → API Tokens. This is the one
-  credential every part of the tool uses to actually talk to Linode — the CLI, the poller, and the
-  API server alike.
+  (Read/Write), and **IPs** (Read/Write); add **VPCs** (Read) too if any managed instance uses a
+  VPC interface. **Account** (Read Only) is enough to satisfy the tool's own startup check. Create
+  one at Cloud Manager → Profile → API Tokens. This is the one credential every part of the tool
+  uses to actually talk to Linode — the CLI, the poller, and the API server alike.
 - **`LINODE_OAUTH_CLIENT_ID`/`LINODE_OAUTH_CLIENT_SECRET`/`LINODE_OAUTH_REDIRECT_URI`** — only
   needed if you're running the REST API/dashboard with "Login with Linode" (§6). Leave blank if
   you're only ever using the CLI and/or poller.
