@@ -626,8 +626,23 @@ def _rebuild_vpc(vpc: dict) -> dict:
     return result
 
 
+def _vpc_subnet_gateway(address: str, prefix: int) -> str:
+
+    network = ipaddress.ip_network(f"{address}/{prefix}", strict=False)
+    return str(network.network_address + 1)
+
+
+def _private_default_route_lines(address: str, prefix: int, dns_servers) -> list[str]:
+
+    lines = [f"Gateway={_vpc_subnet_gateway(address, prefix)}"]
+    if dns_servers:
+        lines.append(f"DNS={' '.join(dns_servers)}")
+    return lines
+
+
 def _legacy_interface_lines(
-    idx: int, iface: dict, *, public_ip, public_gateway, public_prefix, vpc_prefix, dns_servers
+    idx: int, iface: dict, *, public_ip, public_gateway, public_prefix, vpc_prefix, dns_servers,
+    carries_default_route: bool = False,
 ) -> list[str]:
 
     purpose = iface.get("purpose")
@@ -656,10 +671,13 @@ def _legacy_interface_lines(
             raise ConfigError(
                 "vpc_prefix is required to build user_data for a 'vpc' interface"
             )
-        return [
+        lines = [
             "[Match]", f"Name=eth{idx}", "", "[Network]", "DHCP=no",
             f"Address={vpc_ip}/{vpc_prefix}",
         ]
+        if carries_default_route:
+            lines += _private_default_route_lines(vpc_ip, vpc_prefix, dns_servers)
+        return lines
     if purpose == "vlan":
         ipam_address = iface.get("ipam_address")
         if not ipam_address:
@@ -685,7 +703,8 @@ def _linode_interface_address(addresses: list[dict], idx: int, kind: str) -> str
 
 
 def _linode_interface_lines(
-    idx: int, iface: dict, *, public_ip, public_gateway, public_prefix, vpc_prefix, dns_servers
+    idx: int, iface: dict, *, public_ip, public_gateway, public_prefix, vpc_prefix, dns_servers,
+    carries_default_route: bool = False,
 ) -> list[str]:
 
     default_route = iface.get("default_route") or {}
@@ -710,20 +729,24 @@ def _linode_interface_lines(
         return lines
 
     if iface.get("vpc"):
-        if carries_default_route:
-            raise ConfigError(
-                f"VPC interface at index {idx} carries the default route (VPC 1:1 NAT mode) -- "
-                "not supported yet. Only a dedicated public interface carrying the default "
-                "route is supported for this network model so far."
-            )
         addresses = ((iface["vpc"].get("ipv4") or {}).get("addresses")) or []
+
+
+        if carries_default_route and any(a.get("nat_1_1_address") for a in addresses):
+            raise ConfigError(
+                f"VPC interface at index {idx} uses VPC 1:1 NAT -- not supported yet. Use a "
+                "dedicated public interface, or a VPC interface without 1:1 NAT."
+            )
         address = _linode_interface_address(addresses, idx, "VPC")
         if not vpc_prefix:
             raise ConfigError("vpc_prefix is required to build user_data for a 'vpc' interface")
-        return [
+        lines = [
             "[Match]", f"Name=eth{idx}", "", "[Network]", "DHCP=no",
             f"Address={address}/{vpc_prefix}",
         ]
+        if carries_default_route:
+            lines += _private_default_route_lines(address, vpc_prefix, dns_servers)
+        return lines
 
     if iface.get("vlan"):
         ipam_address = iface["vlan"].get("ipam_address")
@@ -773,12 +796,22 @@ def build_user_data(
     if not network_config:
         raise ConfigError("build_user_data() requires at least one interface")
 
+
+    private_route_idx = None
+    if network_interface_model == INTERFACE_MODEL_LEGACY and not any(
+        i.get("purpose") == "public" for i in network_config
+    ):
+        private_route_idx = next(
+            (n for n, i in enumerate(network_config) if i.get("purpose") == "vpc"), None
+        )
+
     file_blocks = []
     for idx, iface in enumerate(network_config):
+        extra = {"carries_default_route": True} if idx == private_route_idx else {}
         lines = line_builder(
             idx, iface,
             public_ip=public_ip, public_gateway=public_gateway, public_prefix=public_prefix,
-            vpc_prefix=vpc_prefix, dns_servers=dns_servers,
+            vpc_prefix=vpc_prefix, dns_servers=dns_servers, **extra,
         )
         indented = "\n".join(f"      {line}" if line else "" for line in lines)
         file_blocks.append(

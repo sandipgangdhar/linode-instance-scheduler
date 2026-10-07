@@ -36,7 +36,7 @@ export function ScheduleEditor({
   const removeRule = (index: number) => setRules((prev) => prev.filter((_, i) => i !== index))
   const addRule = () => setRules((prev) => [...prev, { ...EMPTY_RULE }])
   const hasValidTimeOrder = rules.every(
-    (r) => r.start_time !== '' && r.stop_time !== '' && r.start_time < r.stop_time,
+    (r) => r.start_time !== '' && r.stop_time !== '' && r.start_time !== r.stop_time,
   )
   const canSave = rules.length > 0 && rules.every((r) => r.days_of_week.length > 0) && hasValidTimeOrder
   return (
@@ -95,6 +95,11 @@ export function ScheduleEditor({
                   onChange={(e) => updateRule(i, { stop_time: e.target.value })}
                 />
               </label>
+              {rule.start_time !== '' && rule.stop_time !== '' && rule.stop_time < rule.start_time && (
+                <span className="mb-2 text-xs text-slate-500" data-testid="overnight-hint">
+                  stops the next day
+                </span>
+              )}
               {rules.length > 1 && (
                 <Button variant="ghost" type="button" onClick={() => removeRule(i)} className="mb-0.5">
                   Remove
@@ -121,7 +126,7 @@ export function ScheduleEditor({
       {!canSave && (
         <p className="text-xs text-amber-600">
           {!hasValidTimeOrder
-            ? 'Start time must be before stop time -- overnight schedules are not supported yet.'
+            ? 'Start and stop times must both be set, and different. (A stop time earlier than the start time stops the next day.)'
             : 'Every rule needs at least one day selected.'}
         </p>
       )}

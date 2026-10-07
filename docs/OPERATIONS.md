@@ -467,6 +467,90 @@ There's no separate metrics pipeline — the signal to watch is the tool's own s
 - **Any instance stuck `needs_manual_recovery`?** `list` shows this status plainly — see
   "Recovering from a lost or corrupted registry" above for the fix.
 
+## Rolling out to production — best practices checklist
+
+The same practices the Definitive Guide explains in Part IX.5, as a checklist with the commands
+for each step. Work through it top to bottom: plan, deploy, pilot on non-production instances for
+a week, rehearse at your real scale, then onboard production in waves.
+
+### 1. Before you deploy
+
+- [ ] **Inventory the fleet** — region, plan, networking (public / VPC / VLAN), local disk or
+      Block Storage boot volume, data volumes. Plan maintenance windows for every instance on
+      local disk: it needs a one-time migration with downtime (`migrate-start` / `migrate-resume`)
+      before it can be onboarded.
+- [ ] **cloud-init 23.3.1+ with the Akamai datasource** on every instance's image. `migrate-start`
+      checks this automatically for instances being migrated.
+- [ ] **Schedules agreed with application owners**, including each group's timezone. Prefer one
+      group per schedule; keep individual schedules for genuine exceptions.
+- [ ] **Hooks decided** — which instances need a pre-stop hook (clean shutdown of a database or
+      queue) or a post-start check (application readiness).
+- [ ] **Account limits checked** with Linode support against your peak: every managed instance
+      running at once, plus every OS/data volume and reserved IP, which exist permanently.
+- [ ] **Regional capacity** for your plans at your peak start time, for fleets of 100+.
+- [ ] **Instances with only VPC/VLAN interfaces**: the scheduler host must reach them over SSH
+      at their private address — run it inside the same VPC (or on the same VLAN). VPC 1:1 NAT
+      isn't supported yet.
+
+### 2. Deploy
+
+- [ ] **One deployment per Linode account**, on a small dedicated VM in the same region as the
+      fleet (or one LKE deployment — DEPLOYMENT-LKE.md). Exactly one scheduler process.
+- [ ] **Dedicated API token** with only the scopes in the Environment configuration reference
+      above, used by nothing else.
+- [ ] **One deployment SSH keypair**, private key only on the scheduler host
+      (`LINODE_SSH_KEY_PATH`), public key added to each instance. Never hand the tool root
+      passwords.
+- [ ] **SSH allowed** from the scheduler host to every managed instance (Cloud Firewall rules,
+      VPC routing).
+- [ ] **Scheduler and API server under systemd** (sections above), both enabled to start at boot:
+      `systemctl enable --now instance-scheduler-poll instance-scheduler-api`.
+- [ ] **Dashboard behind HTTPS** (reverse proxy) with "Login with Linode" configured — never
+      exposed on plain HTTP.
+- [ ] **Object Storage backup configured** (bucket-scoped key) and a scheduled whole-system
+      `backup` (see "Scheduling whole-system backups" above). Confirm one run:
+      `python instance_manager.py backup --backup-dir /var/backups/instance-scheduler`.
+
+### 3. Onboard and schedule
+
+- [ ] **Non-production first, in waves.** For each instance:
+      `onboard --name <name> --instance-id <id>`, then one manual cycle —
+      `stop --name <name>` and `start --name <name>` — and confirm the application is healthy
+      before adding a schedule.
+- [ ] **Groups**: `group-create`, `group-schedule-set --group-name <group> --timezone <tz> ...`,
+      `group-add --name <name> --group-name <group>`. A window crossing midnight is one
+      overnight rule (a stop time earlier than the start time stops the next morning).
+- [ ] **Hooks**: `hooks-set --name <name>` (or `--group-name <group>`) with `--pre-stop` /
+      `--post-start` commands or `--pre-stop-script` / `--post-start-script` uploads. Verify with
+      `hooks-run`.
+- [ ] **Large fleets (100+)**: keep `poll --max-parallel` at its default of 10 to start with, and
+      stagger group start times by 5–10 minutes.
+- [ ] **Re-key monitoring and billing reports** off the Linode instance ID (it changes on every
+      start) onto the instance label, tags, or IP address (these stay the same).
+- [ ] **Maintenance windows**: disable a group's schedule rather than working around it —
+      `group-schedule-set ... --disabled`, then re-run without `--disabled` afterwards.
+
+### 4. Monitor (daily during the pilot, weekly after)
+
+- [ ] `systemctl is-active instance-scheduler-poll instance-scheduler-api`.
+- [ ] `python instance_manager.py list` — every instance in the state its schedule says.
+- [ ] `history --name <name>` for any instance that surprised you; failed starts/stops are
+      retried for an hour automatically, but a persistent one needs a person.
+- [ ] Scheduler output for "insufficient capacity" or 429 (rate limit) messages — see
+      Troubleshooting.
+- [ ] Instances shown as `stopped` are really gone in Cloud Manager (billing actually stopped).
+- [ ] Each group's configured versus actual savings on the dashboard — a widening gap means the
+      schedule is being routinely overridden.
+
+### 5. Go / no-go for production
+
+| Stage | Do | Move on when |
+|---|---|---|
+| Pilot, one week | Non-production instances on their real schedules, with hooks where needed. One recovery drill on a copy of the deployment: restore from a `backup` snapshot, or `rebuild` from scratch. | Seven days with no unexplained failed start/stop; the drill recovers every instance, schedule, group, and hook; application owners confirm their services come back after each daily cycle. |
+| Scale rehearsal | A real start and stop of as many instances as production will have, in the production region and plans, timed. | The morning start finishes within your tolerance, with nothing still failing after the retry window. |
+| Production, in waves | Onboard 20–30 production instances per wave, a few days apart, watching each wave's first cycles. | Each wave runs cleanly before the next. |
+| Steady state | Upgrade only to tagged releases, non-production deployment first, `backup` immediately before (see Upgrading). | — |
+
 ## Troubleshooting
 
 | Symptom | Most likely cause | What to check / do |

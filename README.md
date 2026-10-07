@@ -499,7 +499,9 @@ If you just did a migration in §6, use the same `--name` you used there. If you
   - The node is currently **running** (needed to inspect it over SSH).
   - Its OS is genuinely on a Block Storage volume, not local disk.
   - Its public IP is **reserved**. (If you did §6, this is already true. If not, and this
-    refuses, reserve the IP yourself first via Cloud Manager or the API, then re-run.)
+    refuses, reserve the IP yourself first via Cloud Manager or the API, then re-run.) A node
+    with **no public interface at all** — only VPC and/or VLAN interfaces — has no public IP to
+    reserve and is onboarded without one; see "VPC-only and VLAN-only nodes" below.
 - Reads and records: its network configuration, every attached data volume (including yours from
   §3.4, with its actual mount point and filesystem), the real contents of
   `/root/.ssh/authorized_keys`, its label and tags, its plan/size, any attached firewall, and its
@@ -510,6 +512,26 @@ looks right (in particular, that `data_volumes` shows at least 1 entry if you ex
 there).
 
 From this point on, the node is under this tool's management by the name you gave it.
+
+**VPC-only and VLAN-only nodes.** A node whose only interfaces are VPC and/or VLAN (no public
+interface) is fully supported — onboard, stop, start, schedules, groups, hooks, `rebuild`, and
+`offboard` all work the same way. What's different:
+
+- **Your scheduler host must be able to reach the node's private address over SSH** (port 22):
+  every start ends with a real SSH reachability check, and every stop reads the node's current
+  SSH keys first. In practice that means running the scheduler inside the same VPC (or a VPC/
+  network routed to it), or on the same VLAN for a VLAN-only node. When a node has both, the VPC
+  address is used.
+- **Its network identity is preserved exactly**: the same VPC/VLAN address on every cycle. On
+  every recreate, a VPC-only node gets its default route via the VPC subnet's gateway (the
+  subnet's first address) and the region's DNS servers, the same as Linode's own network
+  configuration gives it. Whether it can reach the internet through that route depends on your
+  VPC setup (for example a NAT gateway), exactly as before it was onboarded.
+- **There's no reserved IP**, so `status` shows none and `offboard` has nothing to release.
+- **VPC 1:1 NAT** (a public address mapped onto the VPC interface instead of a separate public
+  interface) isn't supported yet — such a node is refused with a clear message.
+- A **VLAN-only** node gets no default route or DNS from the tool — a VLAN has no gateway — so
+  anything it needs beyond its own VLAN must come from its own configuration.
 
 **If the node has a VPC interface, you may need `--vpc-id`.** For the newer `linode` interface
 model, the VPC's ID is already part of what's captured — nothing extra needed. For the older
@@ -875,9 +897,10 @@ python instance_manager.py schedule-set --name redis-standby-1 --timezone Asia/K
 
 `--timezone` is any IANA name (`Asia/Kolkata`, `US/Pacific`, `UTC`, ...) — the schedule's own
 day/time rules are resolved in that timezone, DST included, not UTC. `--days` is comma-separated
-3-letter days (`mon`..`sun`). **Overnight schedules aren't supported yet** — `--start-time` must
-be earlier than `--stop-time` on the same day; a schedule that runs past midnight will be
-rejected with a clear error, not silently mishandled.
+3-letter days (`mon`..`sun`). **Overnight windows work too**: a `--stop-time` earlier than
+`--start-time` stops the *next* day — `--days mon,tue,wed,thu,fri --start-time 22:00
+--stop-time 06:00` runs each weeknight from 22:00 until 06:00 the following morning (`--days`
+names the day each window *starts*). Start and stop must differ.
 
 Need more than one rule (e.g. different hours on weekends)? Pass a full JSON array instead:
 
@@ -945,7 +968,6 @@ failure and tried again on the next check within the catch-up window. Seeing man
 `poll` output? Lower `--max-parallel` or the request cap.
 
 **Known limitations, for now:**
-- Overnight schedules (a single on-window crossing midnight) aren't supported.
 - If `poll` is down for longer than the catch-up window (default one hour), a scheduled action
   from before the outage is missed, not caught up — acceptable for a cost-scheduling tool (a late
   start/stop costs at most a little extra compute), by deliberate design choice.

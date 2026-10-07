@@ -126,6 +126,14 @@ this deployment's namespace carries a `kyverno-mutation-exempt=true` label:
   scheduler's own pod reachable over your existing private VLAN/NAT path, or your own
   cluster convention requires every workload to be gated the same way.
 
+**One exception to "exempt is the default": managing VPC-only or VLAN-only instances.** The
+scheduler reaches every managed instance over SSH (a reachability check after every start, a
+key capture before every stop). An instance with no public interface can only be reached at its
+private VPC/VLAN address, so the scheduler's pod must run on a node that is on that same VPC or
+VLAN — with `Linode-LKE-Private-Network`, that means choosing **not exempt**, so the pod lands on
+a `vlan-ready=true` node. If all your managed instances have public interfaces, exempt remains the
+right choice.
+
 If nothing is detected, this question is skipped entirely and the pod deploys normally —
 there's nothing to opt in or out of.
 

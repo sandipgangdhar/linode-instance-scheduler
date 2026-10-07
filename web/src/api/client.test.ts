@@ -255,6 +255,20 @@ describe('background polling cancellation (logout leak fix)', () => {
     await expect(api.startInstance('redis-1')).rejects.toThrow(PollingCancelledError)
     expect(f).toHaveBeenCalledTimes(1)
   })
+  it('a loop from a previous session stays stopped after a fresh login re-arms polling', async () => {
+    const f = vi.mocked(fetch)
+    f.mockResolvedValueOnce(jsonResponse(200, { operation_id: 'op-1' }))
+    f.mockResolvedValueOnce(
+      jsonResponse(200, { status: 'running', percent: 30, current_step: 'creating', warnings: [] }),
+    )
+    const progressCalls: Array<[number, string | null]> = []
+    const promise = api.startInstance('redis-1', undefined, (p, s) => progressCalls.push([p, s]))
+    await vi.waitFor(() => expect(progressCalls).toEqual([[30, 'creating']]))
+    cancelBackgroundPolling()
+    resetBackgroundPollingCancellation()
+    await expect(promise).rejects.toThrow(PollingCancelledError)
+    expect(f).toHaveBeenCalledTimes(2)
+  })
   it('resetBackgroundPollingCancellation() re-arms polling for a fresh session', async () => {
     cancelBackgroundPolling()
     resetBackgroundPollingCancellation()

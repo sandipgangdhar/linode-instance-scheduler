@@ -52,6 +52,10 @@ you want schedules to actually enforce themselves unattended.
 - **Outbound HTTPS access** to `api.linode.com` (every real operation) and, if you use the REST
   API with "Login with Linode," `login.linode.com` too. No inbound access is required unless
   you're exposing the REST API/dashboard to other people (§6).
+- **SSH access (TCP 22) to every managed instance** — every start ends with a real SSH
+  reachability check, and every stop reads the instance's current SSH keys. For an instance
+  with only VPC/VLAN interfaces (no public IP), that means this host must sit inside the same
+  VPC (or on the same VLAN), since the tool reaches it at its private address.
 - **Node.js 18+**, only if you're building the web dashboard (§7) — not needed for the CLI or
   poller alone.
 - A **persistent, centralized machine** — not a laptop that sleeps or gets reimaged. A small,

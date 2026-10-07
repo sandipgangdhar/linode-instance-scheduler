@@ -3650,11 +3650,23 @@ def _validate_schedule_rules(rules: list) -> None:
             if not isinstance(value, str) or not _TIME_RE.fullmatch(value):
                 raise engine.ConfigError(f"rule {i}: {label} must be HH:MM 24-hour, got {value!r}.")
         assert isinstance(start_time, str) and isinstance(stop_time, str)
-        if start_time >= stop_time:
+        if start_time == stop_time:
             raise engine.ConfigError(
-                f"rule {i}: start_time ({start_time}) must be before stop_time ({stop_time}) -- "
-                "overnight schedules (stop_time on the next day) are not supported yet."
+                f"rule {i}: start_time and stop_time are both {start_time} -- they must differ "
+                "(a stop time earlier than the start time means the stop is on the next day)."
             )
+
+
+def _rule_stop_day_offset(rule: dict) -> int:
+
+    return 1 if rule["stop_time"] < rule["start_time"] else 0
+
+
+def _rule_on_minutes(rule: dict) -> int:
+
+    start_h, start_m = (int(p) for p in rule["start_time"].split(":"))
+    stop_h, stop_m = (int(p) for p in rule["stop_time"].split(":"))
+    return (stop_h * 60 + stop_m - (start_h * 60 + start_m)) % (24 * 60)
 
 
 def _validate_schedule_timezone(timezone: str) -> None:
@@ -5319,16 +5331,19 @@ def resolve_due_boundary(
     now_utc = now.astimezone(UTC)
     local_today = now.astimezone(zone).date()
     best: tuple[datetime, Literal["create", "delete"]] | None = None
-    for day in (local_today - timedelta(days=1), local_today):
+
+
+    for day in (local_today - timedelta(days=2), local_today - timedelta(days=1), local_today):
         weekday = VALID_SCHEDULE_DAYS[day.weekday()]
         for rule in schedule.get("rules", []):
             if weekday not in rule["days_of_week"]:
                 continue
-            candidates: list[tuple[str, Literal["create", "delete"]]] = [
-                (rule["start_time"], "create"), (rule["stop_time"], "delete"),
+            candidates: list[tuple[date, str, Literal["create", "delete"]]] = [
+                (day, rule["start_time"], "create"),
+                (day + timedelta(days=_rule_stop_day_offset(rule)), rule["stop_time"], "delete"),
             ]
-            for time_str, action in candidates:
-                boundary = _local_time_to_utc(zone, day, time_str)
+            for boundary_day, time_str, action in candidates:
+                boundary = _local_time_to_utc(zone, boundary_day, time_str)
                 if not boundary <= now_utc < boundary + timedelta(seconds=window_seconds):
                     continue
                 if (best is None or boundary > best[0]
@@ -5348,16 +5363,19 @@ def is_within_scheduled_on_window(schedule: dict, now: datetime) -> bool:
         return False
     zone = ZoneInfo(schedule["timezone"])
     local_now = now.astimezone(zone)
-    weekday = VALID_SCHEDULE_DAYS[local_now.weekday()]
     today = local_now.date()
     now_utc = now.astimezone(UTC)
-    for rule in schedule.get("rules", []):
-        if weekday not in rule["days_of_week"]:
-            continue
-        start_utc = _local_time_to_utc(zone, today, rule["start_time"])
-        stop_utc = _local_time_to_utc(zone, today, rule["stop_time"])
-        if start_utc <= now_utc < stop_utc:
-            return True
+
+    for day in (today - timedelta(days=1), today):
+        weekday = VALID_SCHEDULE_DAYS[day.weekday()]
+        for rule in schedule.get("rules", []):
+            if weekday not in rule["days_of_week"]:
+                continue
+            start_utc = _local_time_to_utc(zone, day, rule["start_time"])
+            stop_day = day + timedelta(days=_rule_stop_day_offset(rule))
+            stop_utc = _local_time_to_utc(zone, stop_day, rule["stop_time"])
+            if start_utc <= now_utc < stop_utc:
+                return True
     return False
 
 
@@ -5388,9 +5406,7 @@ def compute_scheduled_savings_percent(schedule: dict) -> float | None:
         return None
     total_hours_per_week = 0.0
     for rule in rules:
-        start_h, start_m = (int(p) for p in rule["start_time"].split(":"))
-        stop_h, stop_m = (int(p) for p in rule["stop_time"].split(":"))
-        hours_per_occurrence = (stop_h * 60 + stop_m - (start_h * 60 + start_m)) / 60
+        hours_per_occurrence = _rule_on_minutes(rule) / 60
         total_hours_per_week += hours_per_occurrence * len(rule["days_of_week"])
     return round(max(0.0, (1 - total_hours_per_week / 168) * 100), 1)
 
