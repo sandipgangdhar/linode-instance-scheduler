@@ -913,11 +913,42 @@ interval you'd otherwise poll on.
 Every schedule edit takes effect on the *next* tick automatically — there's no separate "reload"
 step, and nothing to restart.
 
+**Large fleets and catching up.** `poll` runs due starts and stops in parallel — up to 10 at a
+time by default (`--max-parallel`, up to 50) — so a whole fleet due at 09:00 is started together
+rather than one after another. A start or stop stays due for an hour after its scheduled time
+(`--window-seconds`, default 3600) for as long as nothing has happened to that node since then.
+That means:
+
+- if `poll` was briefly down or a check ran long, the action still happens when it's back;
+- if a start fails (for example, the region is temporarily out of capacity for that plan), it's
+  tried again on every following check until it succeeds or the hour is up — and each failure
+  shows up in `history` and makes `poll --once` exit non-zero, so your monitoring sees it;
+- a deliberate manual action after the scheduled time is always respected: stop a node by hand
+  at 09:30 and the scheduler won't start it again until its next scheduled start.
+
+A node that's already in the scheduled state (already running at its start time, say) is simply
+left alone. When two scheduled times fall within the same hour, the more recent one wins.
+
+How many to run at once is a balance: higher finishes sooner, but every start/stop makes Linode
+API calls and needs capacity in the region at the same moment. For very large fleets, spreading
+start times a few minutes apart across groups also helps.
+
+**Linode API rate limits.** All parallel workers share one request budget, 10 requests per second
+by default (`LINODE_API_MAX_REQUESTS_PER_SECOND`; `0` removes the cap). If Linode does answer
+"too many requests" (HTTP 429), every worker pauses for as long as the API asks (its
+`Retry-After`), then carries on; other temporary errors are retried with increasing, randomized
+delays so workers don't all retry at the same instant. A request that creates something (such as
+a new instance) is only ever re-sent after a 429 — never after a gateway error or a dropped
+connection, where it might already have gone through — so a retry can't create a duplicate. If
+rate limiting persists long enough that a start or stop still fails, it's recorded like any other
+failure and tried again on the next check within the catch-up window. Seeing many 429s in the
+`poll` output? Lower `--max-parallel` or the request cap.
+
 **Known limitations, for now:**
-- Overnight schedules (crossing midnight) aren't supported.
-- If `poll` is down/delayed longer than the match window (default 5 minutes), that day's
-  transition is genuinely missed, not caught up later — acceptable for a cost-scheduling tool (a
-  late start/stop costs at most a little extra compute), by deliberate design choice.
+- Overnight schedules (a single on-window crossing midnight) aren't supported.
+- If `poll` is down for longer than the catch-up window (default one hour), a scheduled action
+  from before the outage is missed, not caught up — acceptable for a cost-scheduling tool (a late
+  start/stop costs at most a little extra compute), by deliberate design choice.
 
 ### 8.6 Groups — one schedule for several nodes at once
 
@@ -1178,10 +1209,10 @@ Run exactly **one** `poll` process at a time, on one machine — never two runni
 and never a hot standby waiting in the wings. That's not a corner cut; it's the right fit for
 what `poll` actually does.
 
-`poll` doesn't serve live requests — it checks every schedule on a short, fixed interval with a
-tolerant matching window (typically a few minutes either side), and fires the due action. If
-that process is briefly down (a crash, a host reboot, a deploy), the worst case is a due action
-firing a few seconds late once your process supervisor brings it back up — nothing waits on it
+`poll` doesn't serve live requests — it checks every schedule on a short, fixed interval, and a due
+action stays due for up to an hour (§8.5). If that process is briefly down (a crash, a host
+reboot, a deploy), the worst case is a due action firing a little late once your process
+supervisor brings it back up — nothing waits on it
 in real time, so nothing downstream notices. Manual `start`/`stop` keeps working the entire time
 regardless, since it never depends on `poll` being up.
 

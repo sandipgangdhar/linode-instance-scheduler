@@ -152,7 +152,7 @@ done
 # configmap.yaml has no secrets in it -- auto-provision it from the example on first run
 # instead of forcing an extra manual copy step for a file that's safe to apply as-is.
 if [[ ! -f configmap.yaml ]]; then
-  log "configmap.yaml not found -- using configmap.example.yaml's defaults as-is (copy it to configmap.yaml first if you want to customize POLL_INTERVAL_SECONDS/POLL_WINDOW_SECONDS/API_ALLOWED_ORIGINS)."
+  log "configmap.yaml not found -- using configmap.example.yaml's defaults as-is (copy it to configmap.yaml first if you want to customize POLL_INTERVAL_SECONDS/POLL_WINDOW_SECONDS/POLL_MAX_PARALLEL/API_ALLOWED_ORIGINS)."
   cp configmap.example.yaml configmap.yaml
 fi
 

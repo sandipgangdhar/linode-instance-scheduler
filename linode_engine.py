@@ -8,18 +8,23 @@ import ipaddress
 import json
 import math
 import os
+import random
 import re
 import secrets
 import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from datetime import datetime as _datetime
+from datetime import timezone as _timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import requests.exceptions
@@ -150,8 +155,203 @@ def save_json_file(path: Path, data: dict, *, tmp_prefix: str) -> None:
         raise
 
 
+RATE_LIMIT_ENV = "LINODE_API_MAX_REQUESTS_PER_SECOND"
+DEFAULT_MAX_REQUESTS_PER_SECOND = 10.0
+RATE_LIMIT_BURST_SECONDS = 2.0
+MAX_RETRY_AFTER_S = 120.0
+HTTP_RETRY_STATUSES = (408, 429, 502)
+HTTP_RETRY_TOTAL = 5
+HTTP_BACKOFF_BASE_S = 1.0
+HTTP_BACKOFF_MAX_S = 30.0
+APP_BACKOFF_MAX_S = 60.0
+
+
+class RequestLimiter:
+
+
+    def __init__(self, rate_per_s: float, burst: float | None = None, *,
+                 clock=time.monotonic, sleep=time.sleep):
+        self.rate = float(rate_per_s)
+        self.capacity = max(1.0, float(burst if burst is not None else self.rate * RATE_LIMIT_BURST_SECONDS))
+        self._tokens = self.capacity
+        self._clock = clock
+        self._sleep = sleep
+        self._last = clock()
+        self._cooldown_until = 0.0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = self._clock()
+                if now < self._cooldown_until:
+                    wait = self._cooldown_until - now
+                elif self.rate <= 0:
+                    return
+                else:
+                    self._tokens = min(self.capacity, self._tokens + (now - self._last) * self.rate)
+                    self._last = now
+                    if self._tokens >= 1:
+                        self._tokens -= 1
+                        return
+                    wait = (1 - self._tokens) / self.rate
+            self._sleep(wait)
+
+    def pause_for(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        with self._lock:
+            self._cooldown_until = max(self._cooldown_until, self._clock() + seconds)
+
+
+_request_limiter: RequestLimiter | None = None
+
+
+def _configured_rate() -> float:
+    raw = os.environ.get(RATE_LIMIT_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_MAX_REQUESTS_PER_SECOND
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError(
+            f"{RATE_LIMIT_ENV} must be a number (requests per second, 0 to disable), got {raw!r}"
+        ) from None
+    if not math.isfinite(value) or value < 0:
+        raise ConfigError(f"{RATE_LIMIT_ENV} must be a non-negative number, got {raw!r}")
+    return value
+
+
+def get_request_limiter() -> RequestLimiter:
+
+    global _request_limiter
+    if _request_limiter is None:
+        _request_limiter = RequestLimiter(_configured_rate())
+    return _request_limiter
+
+
+_jitter = random.Random()
+
+
+def parse_retry_after(value) -> float | None:
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+        if when is None:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=_timezone.utc)
+        seconds = (when - _datetime.now(_timezone.utc)).total_seconds()
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, min(seconds, MAX_RETRY_AFTER_S))
+
+
+def retry_after_from_error(exc) -> float | None:
+
+    if not isinstance(exc, ApiError) or exc.status != 429:
+        return None
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    try:
+        return parse_retry_after(headers.get("Retry-After"))
+    except Exception:
+        return None
+
+
+def backoff_delay(attempt: int, base_s: float, *, cap_s: float = APP_BACKOFF_MAX_S,
+                  exc=None) -> float:
+
+    if base_s <= 0:
+        return 0.0
+    exponential = min(cap_s, base_s * (2 ** attempt))
+    delay = _jitter.uniform(exponential / 2, exponential)
+    retry_after = retry_after_from_error(exc)
+    if retry_after is not None:
+        get_request_limiter().pause_for(retry_after)
+        delay = max(delay, retry_after)
+    elif isinstance(exc, ApiError) and exc.status == 429:
+        get_request_limiter().pause_for(delay)
+    return delay
+
+
+try:
+    from requests.adapters import HTTPAdapter as _HTTPAdapter
+    from urllib3.util.retry import Retry as _Retry
+except ImportError:
+    _HTTPAdapter = None
+    _Retry = None
+
+
+class PacedRetry(_Retry):
+
+
+    def is_retry(self, method, status_code, has_retry_after=False):
+        if method and method.upper() == "POST":
+            return status_code == 429
+        return super().is_retry(method, status_code, has_retry_after)
+
+    def get_backoff_time(self):
+        errors = len(self.history)
+        if errors <= 0:
+            return 0.0
+        exponential = min(HTTP_BACKOFF_MAX_S, self.backoff_factor * (2 ** (errors - 1)))
+        return _jitter.uniform(exponential / 2, exponential)
+
+    def sleep(self, response=None):
+        limiter = get_request_limiter()
+        status = getattr(response, "status", None)
+        retry_after = None
+        if response is not None and self.respect_retry_after_header:
+            retry_after = parse_retry_after(response.headers.get("Retry-After"))
+        wait = retry_after if retry_after is not None else self.get_backoff_time()
+        if status == 429:
+            limiter.pause_for(wait)
+        elif wait > 0:
+            time.sleep(wait)
+        limiter.acquire()
+
+
+class RateLimitedAdapter(_HTTPAdapter):
+
+
+    def send(self, request, *args, **kwargs):
+        get_request_limiter().acquire()
+        return super().send(request, *args, **kwargs)
+
+
+def install_request_pacing(client: LinodeClient) -> LinodeClient:
+
+    retry = PacedRetry(
+        total=HTTP_RETRY_TOTAL,
+        status_forcelist=HTTP_RETRY_STATUSES,
+        respect_retry_after_header=True,
+        backoff_factor=HTTP_BACKOFF_BASE_S,
+        raise_on_status=False,
+
+
+        allowed_methods=frozenset({"DELETE", "GET", "PUT"}),
+    )
+    adapter = RateLimitedAdapter(max_retries=retry)
+    client.session.mount("https://", adapter)
+    client.session.mount("http://", adapter)
+    return client
+
+
 def build_client(token: str) -> LinodeClient:
-    return LinodeClient(token)
+    return install_request_pacing(LinodeClient(token))
 
 
 def auth_check(client: LinodeClient) -> None:
@@ -884,8 +1084,16 @@ def create_and_boot_instance_with_retry(
 ):
 
     last_exc = None
-    for attempt, delay in enumerate((0, *backoff_s)):
+    for attempt, base_delay in enumerate((0, *backoff_s)):
+        delay: float = base_delay
         if delay:
+
+
+            delay = delay * _jitter.uniform(0.8, 1.2)
+            retry_after = retry_after_from_error(last_exc)
+            if retry_after is not None:
+                get_request_limiter().pause_for(retry_after)
+                delay = max(delay, retry_after)
             if on_retry:
                 on_retry(attempt, delay, last_exc)
             time.sleep(delay)
@@ -2457,15 +2665,19 @@ _SECRET_STATE_FIELDS = ("root_pass",)
 def retry_transient(fn, attempts=5, delay_s=5):
 
     for attempt in range(attempts):
+        last_exc: Exception | None = None
         try:
             return fn()
         except ApiError as e:
             if (e.status < 500 and e.status != 429) or attempt == attempts - 1:
                 raise
+            last_exc = e
         except requests.exceptions.RequestException:
             if attempt == attempts - 1:
                 raise
-        time.sleep(delay_s)
+
+
+        time.sleep(backoff_delay(attempt, delay_s, exc=last_exc))
 
 
 def _resource_confirmed_gone(client, resource) -> bool:
@@ -2488,6 +2700,7 @@ def retry_transient_or_already_done(
 ):
 
     for attempt in range(attempts):
+        last_exc: Exception | None = None
         try:
             return fn()
         except ApiError as e:
@@ -2504,6 +2717,7 @@ def retry_transient_or_already_done(
             )
             if not is_retryable or attempt == attempts - 1:
                 raise
+            last_exc = e
         except requests.exceptions.RequestException:
             if attempt > 0:
                 try:
@@ -2513,6 +2727,6 @@ def retry_transient_or_already_done(
                     pass
             if attempt == attempts - 1:
                 raise
-        time.sleep(delay_s)
+        time.sleep(backoff_delay(attempt, delay_s, exc=last_exc))
 
 

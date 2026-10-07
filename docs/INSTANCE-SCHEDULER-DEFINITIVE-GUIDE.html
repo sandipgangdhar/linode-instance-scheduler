@@ -451,7 +451,8 @@ pre.code .m{color:var(--code-mut)}
 
       <section class="chapter" id="c3-3">
         <h2><span class="chno">3.3</span> The Poller</h2>
-        <p>A single long-running process evaluates every managed instance's effective schedule on a short, fixed interval &mdash; every 300 seconds by default &mdash; and fires a start or stop the moment a configured boundary is crossed. It matches against a small tolerance window (also 300 seconds by default) rather than an exact instant, so ordinary timing drift between poll cycles never causes a scheduled action to be silently missed. Both numbers are configurable per deployment (<code>poll --interval-seconds</code> / <code>--window-seconds</code>), with the window required to be at least as large as the interval, so no gap can open up between one tick and the next that a boundary could fall through unnoticed. Each action is recorded, so the same boundary is never fired twice in one day even if the poller restarts in between.</p>
+        <p>A single long-running process evaluates every managed instance's effective schedule on a short, fixed interval &mdash; every 300 seconds by default &mdash; and judges the whole fleet against one reading of the clock per cycle. A start or stop becomes due at its scheduled time and stays due for a catch-up window (one hour by default) for as long as nothing has happened to that instance since that time: the poller acts on it unless a start or stop of the instance &mdash; scheduled, manual, or through the API &mdash; has already been recorded since. That single rule is what makes the poller robust at fleet scale. A slow cycle, a brief outage of the poller itself, or a failed start (a region temporarily out of capacity for a plan) is simply picked up again on the next cycle, while a deliberate manual action taken after the scheduled time is never overridden. An instance already in the scheduled state is left alone, and when two scheduled times fall inside the window the more recent one wins.</p>
+        <p>Due starts and stops run in parallel &mdash; up to ten at once by default (<code>poll --max-parallel</code>) &mdash; so a large fleet due at the same minute is brought up together rather than one instance after another; each still takes its own per-instance lock and records its own audit entry. All workers share one request budget against the Linode API (10 requests per second by default, <code>LINODE_API_MAX_REQUESTS_PER_SECOND</code>); a rate-limited (HTTP 429) response pauses every worker for as long as the API asks, other temporary errors are retried with randomized, increasing delays, and a request that creates something is re-sent only after a 429 &mdash; never after a gateway error or lost connection, where it may already have succeeded &mdash; so retries can't create duplicates. The interval and window are configurable per deployment (<code>poll --interval-seconds</code> / <code>--window-seconds</code>), with the window required to be at least as large as the interval.</p>
         <p>The poller is meant to run continuously under your own process supervisor (see Part IX.3 for a systemd example) &mdash; it doesn't need to be running for a manual start/stop to work, only for schedules and group memberships to actually be enforced automatically.</p>
       </section>
 
@@ -828,7 +829,8 @@ pre.code .m{color:var(--code-mut)}
       ["c3-1","3.1 Individual &amp; Group"],["c3-2","3.2 Timezones"],["c3-3","3.3 The Poller"]
     ]},
     {label:"Part IV", title:"Manual Control &amp; Savings", chapters:[
-      ["c4-1","4.1 Override &amp; Auto-Revert"],["c4-2","4.2 Savings as a Percentage"]
+      ["c4-1","4.1 Override &amp; Auto-Revert"],["c4-2","4.2 Savings as a Percentage"],
+      ["c4-3","4.3 Hooks"]
     ]},
     {label:"Part V", title:"Disaster Recovery", chapters:[
       ["c5-1","5.1 The Registry"],["c5-2","5.2 What's Stored Where"],

@@ -76,7 +76,8 @@ spec:
             - >-
               exec python3 instance_manager.py poll
               --interval-seconds "${POLL_INTERVAL_SECONDS:-300}"
-              --window-seconds "${POLL_WINDOW_SECONDS:-300}"
+              --window-seconds "${POLL_WINDOW_SECONDS:-3600}"
+              --max-parallel "${POLL_MAX_PARALLEL:-10}"
           envFrom:
             - secretRef:
                 name: linode-instance-scheduler-secrets

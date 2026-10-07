@@ -17,11 +17,19 @@ data:
   # "runs every 1-5 min" design and is a sensible default for most fleets -- see
   # the customer guide's `poll` section before lowering this.
   POLL_INTERVAL_SECONDS: "300"
-  # How long after a schedule rule's start_time/stop_time the poller still considers it
-  # due -- tolerates ordinary tick-to-tick drift. Must be >= POLL_INTERVAL_SECONDS above
-  # (the CLI itself refuses to start otherwise) or a real window can be missed between two
-  # ticks. 300 is this tool's own built-in default.
-  POLL_WINDOW_SECONDS: "300"
+  # How long after a schedule rule's start_time/stop_time the action stays due. Within this
+  # window a missed or failed start/stop (a slow tick, a brief outage, no capacity in the
+  # region) is retried on every tick, unless something already started/stopped the instance
+  # since. Must be >= POLL_INTERVAL_SECONDS above (the CLI refuses to start otherwise).
+  # 3600 (one hour) is the `poll` command's own default.
+  POLL_WINDOW_SECONDS: "3600"
+  # How many due starts/stops run at the same time. Higher finishes a large fleet sooner but
+  # makes more Linode API calls at once. 10 is the default; the maximum is 50.
+  POLL_MAX_PARALLEL: "10"
+  # Optional -- cap on Linode API requests per second for this process (all workers share it).
+  # A rate-limited (429) response also pauses every worker for the time the API asks. Default
+  # 10; 0 removes the cap (the shared pause on 429 still applies).
+  # LINODE_API_MAX_REQUESTS_PER_SECOND: "10"
   # Optional -- comma-separated browser origins allowed to call the REST API (CORS). Leave
   # commented out / remove the key entirely to disable CORS (the default -- appropriate
   # unless a separately-hosted browser dashboard needs to call this API cross-origin; the
