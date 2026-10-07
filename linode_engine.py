@@ -775,7 +775,10 @@ def region_dns_servers(client: LinodeClient, region: str) -> list[str]:
     raw = getattr(resolvers, "ipv4", None)
     if not isinstance(raw, str):
         return []
-    return [addr.strip() for addr in raw.split(",") if addr.strip()]
+    return [addr.strip() for addr in raw.split(",") if addr.strip()][:MAX_DNS_SERVERS]
+
+
+MAX_DNS_SERVERS = 3
 
 
 def build_user_data(
@@ -806,6 +809,7 @@ def build_user_data(
         )
 
     file_blocks = []
+    per_iface: list[tuple[int, list[str]]] = []
     for idx, iface in enumerate(network_config):
         extra = {"carries_default_route": True} if idx == private_route_idx else {}
         lines = line_builder(
@@ -813,6 +817,7 @@ def build_user_data(
             public_ip=public_ip, public_gateway=public_gateway, public_prefix=public_prefix,
             vpc_prefix=vpc_prefix, dns_servers=dns_servers, **extra,
         )
+        per_iface.append((idx, lines))
         indented = "\n".join(f"      {line}" if line else "" for line in lines)
         file_blocks.append(
             f"  - path: /etc/systemd/network/05-eth{idx}.network\n"
@@ -821,6 +826,13 @@ def build_user_data(
             f"{indented}\n"
         )
 
+    script = _network_apply_script(per_iface)
+    script_block = (
+        f"  - path: {NETWORK_APPLY_SCRIPT_PATH}\n"
+        f"    permissions: '0755'\n"
+        f"    content: |\n"
+        + "".join(f"      {line}\n" if line else "\n" for line in script.splitlines())
+    )
     header = "#cloud-config\n"
     if preserve_host_keys:
         header += "ssh_deletekeys: false\n"
@@ -828,8 +840,140 @@ def build_user_data(
         header
         + "write_files:\n"
         + "".join(file_blocks)
-        + "runcmd:\n  - systemctl restart systemd-networkd\n"
+        + script_block
+        + f"runcmd:\n  - [sh, {NETWORK_APPLY_SCRIPT_PATH}]\n"
     )
+
+
+NETWORK_APPLY_SCRIPT_PATH = "/var/lib/linode-instance-scheduler/apply-network.sh"
+
+
+def _iface_settings(lines: list[str]) -> dict:
+
+    out: dict = {"address": None, "gateway": None, "dns": []}
+    for line in lines:
+        if line.startswith("Address="):
+            out["address"] = line.split("=", 1)[1]
+        elif line.startswith("Gateway="):
+            out["gateway"] = line.split("=", 1)[1]
+        elif line.startswith("DNS="):
+            out["dns"] = line.split("=", 1)[1].split()
+    return out
+
+
+def _network_apply_script(per_iface: list[tuple[int, list[str]]]) -> str:
+
+    names, assigns = [], []
+    for idx, lines in per_iface:
+        cfg = _iface_settings(lines)
+        if not cfg["address"]:
+            continue
+        name = f"eth{idx}"
+        network = ipaddress.ip_interface(cfg["address"])
+        names.append(name)
+        assigns += [
+            f"ADDR_{name}={shlex.quote(str(network))}",
+            f"IP_{name}={shlex.quote(str(network.ip))}",
+            f"MASK_{name}={shlex.quote(str(network.netmask))}",
+            f"GW_{name}={shlex.quote(cfg['gateway'] or '')}",
+            f"DNS_{name}={shlex.quote(' '.join(cfg['dns']))}",
+        ]
+    all_dns = []
+    for _, lines in per_iface:
+        for d in _iface_settings(lines)["dns"]:
+            if d not in all_dns:
+                all_dns.append(d)
+    return "\n".join([
+        "#!/bin/sh",
+        "# Written by linode-instance-scheduler on every recreate: apply this instance's static",
+        "# network settings to whichever network stack this OS runs. Never fails the boot.",
+        "set +e",
+        "R=${LINODE_SCHEDULER_TEST_ROOT:-}  # empty on a real boot; a scratch dir in tests",
+        f"IFACES={shlex.quote(' '.join(names))}",
+        *assigns,
+        f"ALL_DNS={shlex.quote(' '.join(all_dns))}",
+        "LOG=$R/var/log/linode-instance-scheduler-network.log",
+        'log() { echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }',
+        "has() { command -v \"$1\" >/dev/null 2>&1; }",
+        "svc_active() { has systemctl && systemctl is-active --quiet \"$1\"; }",
+        "svc_enabled() { has systemctl && systemctl is-enabled --quiet \"$1\" 2>/dev/null; }",
+        "",
+        "apply_nm() {",
+        "  log 'stack: NetworkManager'",
+        "  for u in $(nmcli -g UUID,TYPE connection show | awk -F: '$2 ~ /ethernet/ {print $1}'); do",
+        "    nmcli connection delete \"$u\" >/dev/null 2>&1",
+        "  done",
+        "  for i in $IFACES; do",
+        "    rm -f $R/etc/sysconfig/network-scripts/ifcfg-$i $R/etc/NetworkManager/system-connections/$i.nmconnection",
+        "  done",
+        "  nmcli connection reload >/dev/null 2>&1",
+        "  for i in $IFACES; do",
+        '    eval "a=\\$ADDR_$i g=\\$GW_$i d=\\$DNS_$i"',
+        '    set -- ipv4.method manual ipv4.addresses "$a" ipv6.method auto connection.autoconnect yes',
+        '    if [ -n "$g" ]; then set -- "$@" ipv4.gateway "$g" ipv4.never-default no; else set -- "$@" ipv4.never-default yes; fi',
+        '    if [ -n "$d" ]; then set -- "$@" ipv4.dns "$d" ipv4.ignore-auto-dns yes; fi',
+        '    nmcli connection add type ethernet con-name "$i" ifname "$i" "$@" >> "$LOG" 2>&1',
+        '    nmcli connection up "$i" >> "$LOG" 2>&1',
+        "  done",
+        "}",
+        "",
+        "apply_ifupdown() {",
+        "  log 'stack: ifupdown (/etc/network/interfaces)'",
+        "  f=$R/etc/network/interfaces",
+        "  [ -f \"$f\" ] && cp \"$f\" \"$f.before-linode-instance-scheduler\"",
+        "  { echo 'auto lo'; echo 'iface lo inet loopback'",
+        "    for i in $IFACES; do",
+        '      eval "ip=\\$IP_$i m=\\$MASK_$i g=\\$GW_$i"',
+        '      echo; echo "auto $i"; echo "iface $i inet static"; echo "    address $ip"; echo "    netmask $m"',
+        '      [ -n "$g" ] && echo "    gateway $g"',
+        "    done",
+        "  } > \"$f\"",
+        "  if [ -n \"$ALL_DNS\" ]; then : > $R/etc/resolv.conf.new; for d in $ALL_DNS; do echo \"nameserver $d\" >> $R/etc/resolv.conf.new; done; mv $R/etc/resolv.conf.new $R/etc/resolv.conf; fi",
+        "  if has rc-service; then rc-service networking restart >> \"$LOG\" 2>&1",
+        "  elif has systemctl; then systemctl restart networking >> \"$LOG\" 2>&1",
+        "  else for i in $IFACES; do ifdown \"$i\"; ifup \"$i\"; done >> \"$LOG\" 2>&1; fi",
+        "}",
+        "",
+        "apply_wicked() {",
+        "  log 'stack: wicked (/etc/sysconfig/network)'",
+        "  d=$R/etc/sysconfig/network",
+        "  : > $d/routes.new",
+        "  for i in $IFACES; do",
+        '    eval "a=\\$ADDR_$i g=\\$GW_$i"',
+        "    [ -f $d/ifcfg-$i ] && cp $d/ifcfg-$i $d/ifcfg-$i.before-linode-instance-scheduler",
+        "    printf \"BOOTPROTO='static'\\nSTARTMODE='auto'\\nIPADDR='%s'\\n\" \"$a\" > $d/ifcfg-$i",
+        "    : > $d/ifroute-$i",
+        '    [ -n "$g" ] && echo "default $g - $i" >> $d/routes.new',
+        "  done",
+        "  mv $d/routes.new $d/routes",
+        "  if [ -n \"$ALL_DNS\" ]; then : > $R/etc/resolv.conf.new; for x in $ALL_DNS; do echo \"nameserver $x\" >> $R/etc/resolv.conf.new; done; mv $R/etc/resolv.conf.new $R/etc/resolv.conf; fi",
+        "  systemctl restart wicked >> \"$LOG\" 2>&1",
+        "}",
+        "",
+        "apply_netifrc() {",
+        "  log 'stack: netifrc (/etc/conf.d/net)'",
+        "  f=$R/etc/conf.d/net",
+        "  [ -f \"$f\" ] && cp \"$f\" \"$f.before-linode-instance-scheduler\"",
+        "  { for i in $IFACES; do",
+        '      eval "a=\\$ADDR_$i g=\\$GW_$i d=\\$DNS_$i"',
+        '      echo "config_$i=\\"$a\\""',
+        '      [ -n "$g" ] && echo "routes_$i=\\"default via $g\\""',
+        '      [ -n "$d" ] && echo "dns_servers_$i=\\"$d\\""',
+        "    done",
+        "  } > \"$f\"",
+        "  for i in $IFACES; do [ -e $R/etc/init.d/net.$i ] || ln -s net.lo $R/etc/init.d/net.$i; rc-service net.$i restart >> \"$LOG\" 2>&1; done",
+        "}",
+        "",
+        "if svc_active NetworkManager && has nmcli; then apply_nm",
+        "elif svc_active systemd-networkd || svc_enabled systemd-networkd; then log 'stack: systemd-networkd'; systemctl restart systemd-networkd",
+        "elif svc_active wicked && [ -d $R/etc/sysconfig/network ]; then apply_wicked",
+        "elif [ -f $R/etc/conf.d/net ] && [ -e $R/etc/init.d/net.lo ]; then apply_netifrc",
+        "elif [ -f $R/etc/network/interfaces ]; then apply_ifupdown",
+        "else log 'stack: unrecognized -- left unchanged'",
+        "fi",
+        "exit 0",
+        "",
+    ])
 
 
 def reserve_ip(client: LinodeClient, region: str) -> str:
@@ -1276,10 +1420,13 @@ def ssh_run(
     if password is None and ssh_key_path is None:
         raise ConfigError("ssh_run() needs either ssh_key_path or password.")
 
+
+    remote_command = "sh -c " + shlex.quote(command)
+
     def _run_once():
         if password is not None:
             return _ssh_exec_with_password(
-                host, password, command, timeout_s=timeout_s,
+                host, password, remote_command, timeout_s=timeout_s,
                 known_hosts_path=known_hosts_path, trust_new=trust_new,
             )
         assert ssh_key_path is not None
@@ -1295,7 +1442,7 @@ def ssh_run(
                 "-o", "HashKnownHosts=no",
                 "-i", ssh_key_path,
                 f"root@{host}",
-                command,
+                remote_command,
             ],
             capture_output=True,
             text=True,
@@ -1683,6 +1830,13 @@ CLOUD_INIT_UPGRADE_INSTRUCTIONS = (
 )
 
 
+CLOUD_INIT_NOT_INSTALLED = "CLOUD_INIT_NOT_INSTALLED"
+_CLOUD_INIT_VERSION_COMMAND = (
+    "if command -v cloud-init >/dev/null 2>&1; then cloud-init --version; "
+    f"else echo {CLOUD_INIT_NOT_INSTALLED}; fi"
+)
+
+
 def _parse_cloud_init_version(raw: str) -> tuple[int, int, int]:
 
     try:
@@ -1702,16 +1856,29 @@ def check_path_b_preflight(
 ) -> dict:
 
     raw_version = ssh_run(
-        host, ssh_key_path, "cloud-init --version", trust_new=trust_new, password=password,
+        host, ssh_key_path, _CLOUD_INIT_VERSION_COMMAND, trust_new=trust_new, password=password,
     ).strip()
+    if raw_version == CLOUD_INIT_NOT_INSTALLED:
+
+        return {
+            "cloud_init_version": "not installed",
+            "cloud_init_installed": False,
+            "cloud_init_ok": False,
+            "datasource": "",
+            "datasource_ok": False,
+            "hand_configured_networking": [],
+        }
     cloud_init_version = _parse_cloud_init_version(raw_version)
     datasource = ssh_run(
         host, ssh_key_path, "cloud-init query cloud_name 2>/dev/null",
         trust_new=trust_new, password=password,
     ).strip()
+
+
     return {
         "cloud_init_version": raw_version,
-        "cloud_init_ok": cloud_init_version >= MIN_CLOUD_INIT_VERSION,
+        "cloud_init_installed": True,
+        "cloud_init_ok": cloud_init_version >= MIN_CLOUD_INIT_VERSION or datasource == "akamai",
         "datasource": datasource,
         "datasource_ok": datasource == "akamai",
         "hand_configured_networking": check_hand_configured_networking(
@@ -1796,6 +1963,7 @@ def start_path_b_migration(
         "local_disk_id": disk_id,
         "local_disk_size_mb": disk.size,
         "dest_volume_id": dest_volume.id,
+        "dest_volume_label": dest_volume.label,
         "dest_volume_size_gb": dest_size,
         "phase": "volume_created",
     }
@@ -1840,12 +2008,29 @@ def start_path_b_migration(
     return state
 
 
+def rescue_copy_command(dest_volume_label: str, local_disk_size_mb: int) -> str:
+
+    src_bytes = int(local_disk_size_mb) * 1024 * 1024
+    by_id = shlex.quote(f"/dev/disk/by-id/scsi-0Linode_Volume_{dest_volume_label}")
+    return (
+        f"DST=$(readlink -f {by_id}); "
+        f"SRC=$(lsblk -bdnpo NAME,SIZE | awk -v s={src_bytes} "
+        "'{d=$2-s; if (d<0) d=-d; if ($2>0 && d<268435456) print $1}' | grep -vx \"$DST\"); "
+        'if [ -b "$DST" ] && [ -b "$SRC" ] && [ "$(echo "$SRC" | wc -l)" -eq 1 ]; then '
+        'echo "Copying $SRC -> $DST"; dd if="$SRC" of="$DST" bs=4M conv=fsync status=progress && sync && echo COPY_DONE || echo COPY_FAILED; '
+        'else echo "Could not identify the disks unambiguously -- nothing copied:"; lsblk -bdnpo NAME,SIZE; fi'
+    )
+
+
 def _root_device_matches_volume_command(filesystem_path: str) -> str:
 
     target = shlex.quote(filesystem_path)
+
+
     return (
-        f"target=$(readlink -f {target}); "
-        "node=$(findmnt -no SOURCE /); root=$node; hops=0; result=UNKNOWN; "
+        f"target=$(readlink -f {target}); hops=0; result=UNKNOWN; "
+        "if command -v findmnt >/dev/null 2>&1 && command -v lsblk >/dev/null 2>&1; then "
+        "node=$(findmnt -no SOURCE /); root=$node; "
         "while [ $hops -lt 6 ]; do "
         '  parent=$(lsblk -no pkname "$node" 2>/dev/null); '
         "  parent_count=$(printf '%s\\n' \"$parent\" | grep -c .); "
@@ -1853,6 +2038,21 @@ def _root_device_matches_volume_command(filesystem_path: str) -> str:
         '  if [ -z "$parent" ]; then result=RESOLVED; break; fi; '
         '  node="/dev/$parent"; hops=$((hops+1)); '
         "done; "
+        "else "
+        'sys=${ROOTDEV_SYSFS:-/sys}; mi=${ROOTDEV_MOUNTINFO:-/proc/self/mountinfo}; '
+        """mm=$(awk '$5=="/" {print $3}' "$mi" | tail -1); """
+        'dev=$(basename "$(readlink -f "$sys/dev/block/$mm")"); root="/dev/$dev"; '
+        "while [ $hops -lt 6 ]; do "
+        '  if [ -e "$sys/class/block/$dev/partition" ]; then '
+        '    dev=$(basename "$(dirname "$(readlink -f "$sys/class/block/$dev")")"); hops=$((hops+1)); continue; fi; '
+        '  slaves=$(ls "$sys/class/block/$dev/slaves" 2>/dev/null); '
+        "  slave_count=$(printf '%s\\n' \"$slaves\" | grep -c .); "
+        '  if [ "$slave_count" -gt 1 ]; then result=MULTI_PARENT; break; fi; '
+        '  if [ -z "$slaves" ]; then result=RESOLVED; break; fi; '
+        '  dev=$slaves; hops=$((hops+1)); '
+        "done; "
+        'node="/dev/$dev"; '
+        "fi; "
         'if [ "$result" = "MULTI_PARENT" ]; then '
         '  echo "MIGRATED_VOLUME_UNRESOLVABLE root=$root -- device $node has multiple parent '
         'block devices (unsupported topology, e.g. multi-disk LVM/mdraid), investigate '
@@ -2182,14 +2382,11 @@ def resume_path_b_migration(
         instance = client.load(Instance, instance.id)
 
 
-        def _is_busy_400(e: ApiError) -> bool:
-            return e.status == 400 and "busy" in str(e).lower()
-
         def _delete_with_busy_retry(resource, attempts=8, delay_s=5):
             retry_transient_or_already_done(
                 resource.delete,
                 lambda: _resource_confirmed_gone(client, resource),
-                attempts=attempts, delay_s=delay_s, is_transient=_is_busy_400,
+                attempts=attempts, delay_s=delay_s,
             )
 
         for c in instance.configs:
@@ -2695,6 +2892,11 @@ SIMPLE_PUBLIC_ONLY_NETWORK = {
 _SECRET_STATE_FIELDS = ("root_pass",)
 
 
+def is_linode_busy(e: ApiError) -> bool:
+
+    return e.status == 400 and "busy" in str(e).lower()
+
+
 def retry_transient(fn, attempts=5, delay_s=5):
 
     for attempt in range(attempts):
@@ -2702,7 +2904,8 @@ def retry_transient(fn, attempts=5, delay_s=5):
         try:
             return fn()
         except ApiError as e:
-            if (e.status < 500 and e.status != 429) or attempt == attempts - 1:
+            if (e.status < 500 and e.status != 429 and not is_linode_busy(e)) \
+                    or attempt == attempts - 1:
                 raise
             last_exc = e
         except requests.exceptions.RequestException:
@@ -2746,6 +2949,7 @@ def retry_transient_or_already_done(
             is_retryable = (
                 e.status >= 500
                 or e.status == 429
+                or is_linode_busy(e)
                 or (is_transient is not None and is_transient(e))
             )
             if not is_retryable or attempt == attempts - 1:

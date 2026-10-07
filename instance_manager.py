@@ -788,6 +788,7 @@ class MigrateStartResult:
     dest_volume_id: int | None = None
     dest_volume_size_gb: int | None = None
     local_disk_size_mb: int | None = None
+    dest_volume_label: str | None = None
 
 
 def _append_authorized_key_command(public_key: str) -> str:
@@ -885,21 +886,31 @@ def migrate_start_instance(
         except (engine.ConfigError, ApiError, RuntimeError) as e:
             raise engine.ConfigError(f"pre-flight checks failed: {e}") from e
         if on_progress is not None:
-            on_progress(f"  cloud-init: {preflight['cloud_init_version']} "
-                        f"({'OK' if preflight['cloud_init_ok'] else 'TOO OLD, need >= 23.3.1'})")
-            on_progress(f"  datasource: {preflight['datasource']} "
-                        f"({'OK' if preflight['datasource_ok'] else 'NOT akamai'})")
+            if not preflight.get("cloud_init_installed", True):
+                on_progress("  cloud-init: NOT INSTALLED")
+            else:
+                on_progress(f"  cloud-init: {preflight['cloud_init_version']} "
+                            f"({'OK' if preflight['cloud_init_ok'] else 'TOO OLD, need >= 23.3.1'})")
+                on_progress(f"  datasource: {preflight['datasource']} "
+                            f"({'OK' if preflight['datasource_ok'] else 'NOT akamai'})")
         if not preflight["cloud_init_ok"] or not preflight["datasource_ok"]:
 
 
             reasons = []
-            if not preflight["cloud_init_ok"]:
+            if not preflight.get("cloud_init_installed", True):
+                reasons.append(
+                    "cloud-init is not installed on this instance. This tool needs cloud-init "
+                    "(>= 23.3.1, or a build with the Akamai datasource) to re-apply the network "
+                    "configuration every time the instance is recreated. Install it, then retry; "
+                    "images that cannot run cloud-init are not supported"
+                )
+            elif not preflight["cloud_init_ok"]:
                 reasons.append(
                     f"cloud-init is {preflight['cloud_init_version']!r} (need >= 23.3.1) -- "
                     f"upgrade cloud-init on this instance, then retry. "
                     f"{engine.CLOUD_INIT_UPGRADE_INSTRUCTIONS}"
                 )
-            if not preflight["datasource_ok"]:
+            if preflight.get("cloud_init_installed", True) and not preflight["datasource_ok"]:
                 reasons.append(
                     f"the datasource is {preflight['datasource']!r}, not 'akamai' -- this is "
                     "not a Linode/Akamai-managed cloud-init datasource, and there's no proven "
@@ -1063,12 +1074,21 @@ def migrate_start_instance(
                        "discoverable by tag if that local state is lost before this migration "
                        "completes.")
 
+        dest_label = migration_state.get("dest_volume_label")
+        if not dest_label:
+
+
+            try:
+                dest_label = client.load(Volume, migration_state["dest_volume_id"]).label
+            except (ApiError, requests.exceptions.RequestException):
+                dest_label = None
         return MigrateStartResult(
             outcome="started",
             instance_id=instance.id,
             dest_volume_id=migration_state["dest_volume_id"],
             dest_volume_size_gb=migration_state["dest_volume_size_gb"],
             local_disk_size_mb=migration_state["local_disk_size_mb"],
+            dest_volume_label=dest_label,
         )
 
 
@@ -1098,27 +1118,30 @@ def cmd_migrate_start(client, args) -> int:
     print("=" * 70)
     print(f"Destination volume created: {result.dest_volume_id} "
           f"({result.dest_volume_size_gb}GB)")
-    print(f"Instance {result.instance_id} is now booted into Rescue Mode:")
-    print("  /dev/sda = the original local disk (source)")
-    print("  /dev/sdb = the new destination volume")
+    print(f"Instance {result.instance_id} is now booted into Rescue Mode.")
     print()
     print("YOUR TURN -- this is the one manual step in the whole process:")
     print(f"  1. In Cloud Manager, open instance {result.instance_id} and click "
           "\"Launch LISH Console\".")
-    print("  2. Log in as root.")
-
-
-    print("  3. Run `lsblk` FIRST and match devices by size -- do NOT trust /dev/sda/sdb below "
-          "blindly:")
-    print(f"       source (original disk) should be ~{result.local_disk_size_mb}MB")
-    print(f"       destination (new volume) should be ~{result.dest_volume_size_gb}GB")
-    print("     If lsblk shows a different device for either size, substitute the correct "
-          "device names into the command below instead of running it as printed.")
-    print("  4. Once confirmed, run:")
+    print("  2. At the rescue shell (root@finnix), paste and run this one command. It finds the")
+    print("     disks itself -- the new volume by its own ID, the original disk by its size")
+    print(f"     (~{result.local_disk_size_mb}MB) -- and refuses, copying nothing, if either is")
+    print("     ambiguous. (Rescue Mode's device letters vary between systems, so don't type a")
+    print("     dd command with fixed device names.)")
     print()
-    print("       dd if=/dev/sda of=/dev/sdb bs=4M status=progress && sync")
+    if result.dest_volume_label:
+        print("       " + engine.rescue_copy_command(result.dest_volume_label, result.local_disk_size_mb or 0))
+    else:
+        print("       (the volume's label couldn't be looked up just now -- run `lsblk`, then")
+        print(f"        dd if=<the ~{result.local_disk_size_mb}MB disk> of=<the {result.dest_volume_size_gb}GB volume> "
+              "bs=4M conv=fsync status=progress && sync && echo COPY_DONE)")
     print()
-    print("  5. Once it finishes cleanly (no I/O errors), run:")
+    print("  3. Wait for COPY_DONE (this takes a few minutes). COPY_FAILED means the copy did not")
+    print("     complete -- don't continue; run migrate-start --force to start over.")
+    print("  4. If it printed 'Could not identify the disks', stop and check `lsblk`: the")
+    print(f"     original disk is ~{result.local_disk_size_mb}MB, the new volume "
+          f"~{result.dest_volume_size_gb}GB.")
+    print("  5. Once it prints COPY_DONE, run:")
     print(f"       instance_manager.py migrate-resume --name {args.name}")
     print("=" * 70)
     return 0
@@ -3253,6 +3276,28 @@ class OffboardResult:
     detail: str | None = None
 
 
+def _is_recovery_metadata_tag(tag: str) -> bool:
+
+    return (_is_schedule_tag(tag)
+            or _is_schedule_tag(tag, prefix=_GROUP_SCHEDULE_TAG_PREFIX)
+            or tag.startswith(_GROUP_NAME_TAG_PREFIX)
+            or _is_hook_tag(tag)
+            or _is_extra_recovery_tag(tag))
+
+
+def _strip_recovery_metadata_tags(client, os_volume_id: int | None) -> None:
+    if not os_volume_id:
+        return
+    vol = engine.retry_transient(lambda: client.load(Volume, os_volume_id))
+    tags = list(vol.tags or [])
+    kept = [t for t in tags if not _is_recovery_metadata_tag(t)]
+    if kept == tags:
+        return
+    vol.tags = kept
+    engine.retry_transient(vol.save)
+    _verify_os_volume_tag_write(client, os_volume_id, kept)
+
+
 def offboard_instance(
     client, name: str, *,
     delete_volumes: bool = False,
@@ -3317,6 +3362,15 @@ def offboard_instance(
                     f"INCOMPLETE -- nothing else was changed. Re-run `offboard --name {name}` "
                     "to retry; already-completed steps are safe to repeat.",
                 )
+
+
+            try:
+                _strip_recovery_metadata_tags(client, os_volume_id)
+            except Exception as e:
+                if on_warning is not None:
+                    on_warning(f"WARNING: could not remove schedule/group/hook recovery tags from "
+                               f"kept OS volume {os_volume_id} ({e}); remove tags starting with "
+                               "sched-, grp-, hk-, hkg-, net- or sshkeys by hand if you reuse it.")
 
 
         deleted_so_far: list[int | str] = []

@@ -479,8 +479,10 @@ a week, rehearse at your real scale, then onboard production in waves.
       Block Storage boot volume, data volumes. Plan maintenance windows for every instance on
       local disk: it needs a one-time migration with downtime (`migrate-start` / `migrate-resume`)
       before it can be onboarded.
-- [ ] **cloud-init 23.3.1+ with the Akamai datasource** on every instance's image. `migrate-start`
-      checks this automatically for instances being migrated.
+- [ ] **cloud-init with the Akamai datasource** on every instance's image (23.3.1+, or an older
+      build with the datasource backported). `migrate-start` checks this automatically for
+      instances being migrated; images with no cloud-init at all aren't supported.
+- [ ] **A supported OS image** — see the Definitive Guide's list of tested distributions.
 - [ ] **Schedules agreed with application owners**, including each group's timezone. Prefer one
       group per schedule; keep individual schedules for genuine exceptions.
 - [ ] **Hooks decided** — which instances need a pre-stop hook (clean shutdown of a database or
@@ -560,6 +562,8 @@ a week, rehearse at your real scale, then onboard production in waves.
 | A scheduled start keeps failing (e.g. "insufficient capacity") | The region is temporarily short of that plan | Nothing to do while it's inside the catch-up window — `poll` retries it every cycle, and each failure is in `history` and makes `poll --once` exit non-zero. If it persists, start it on another plan or spread the fleet's start times |
 | `poll` output shows many "429 Too Many Requests" responses, or a large fleet's starts run slower than expected | Parallel workers are hitting the Linode API rate limit; every worker is pausing for the time the API asks | Usually nothing — requests resume on their own and anything that still fails is retried within the catch-up window. If it's persistent, lower `poll --max-parallel` (default 10) or `LINODE_API_MAX_REQUESTS_PER_SECOND` (default 10), and check nothing else is using the same API token heavily |
 | `SECURITY WARNING` on `start` | The instance is presenting a different SSH host key than the one on record — could be a genuine security event, or simply an infrastructure change you made yourself (a rebuild via Cloud Manager, a disk swap) | Independently confirm the new key is legitimate (Lish console) before running `reset-host-key` — never bypass this check casually |
+| `migrate-start`'s copy command prints `Could not identify the disks unambiguously` | Two devices match the original disk's size, or the new volume isn't attached in Rescue Mode | Nothing was copied. Check the listed devices (`lsblk`): the original disk is the size `migrate-start` reported, the new volume is the new size. If the volume is missing, run `migrate-start --force` |
+| The copy ends with `COPY_FAILED` | The block copy hit an error | Don't run `migrate-resume`. Run `migrate-start --force` to start over with a fresh volume |
 | `onboard` refuses with "still on local disk" | The instance hasn't been migrated onto a Block Storage volume yet | Run the Path B migration (`migrate-start` / `migrate-resume`) first — see the Definitive Guide, Part II.2 |
 | `onboard` refuses with "IP not reserved" | The instance's public IP is still an ordinary, ephemeral one | Reserve it first via Cloud Manager, or use the one-time in-flow "reserve and retry" option on the dashboard's onboarding screen |
 | A stop/start command refuses with "already operating on" | A per-instance lock is held — normally released automatically when the holding process exits | Confirm nothing is actually mid-operation on that instance, then `clear-lock --name <name>` |

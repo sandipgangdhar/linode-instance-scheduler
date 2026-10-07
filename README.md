@@ -77,6 +77,12 @@ Before you start, make sure you have:
   ```
   You'll add the **public** half (`~/.ssh/linode_spike_key.pub`) to every node you want this
   tool to manage.
+- **Nodes on a supported OS image.** Every Linode distribution image with `cloud-init` and
+  Akamai's datasource works: Ubuntu 22.04/24.04/26.04, Debian 12/13, Kali, Rocky Linux 8/9/10,
+  AlmaLinux 8/9/10, CentOS Stream 9/10, Fedora 43/44, openSUSE Leap 16.0, Alpine 3.21/3.24, Arch
+  and Gentoo. Slackware isn't supported (its image has no `cloud-init`). The tool re-applies each
+  node's network settings in whatever format that OS uses (systemd-networkd, NetworkManager,
+  wicked, `/etc/network/interfaces` or netifrc) every time it recreates the node.
 - **Python 3.10 or newer** and **git** installed on the machine you'll run this from — this
   should be a **centralized, persistent server** (a dedicated admin box or bastion host), not
   someone's personal laptop. See §4 for why.
@@ -323,8 +329,9 @@ python instance_manager.py migrate-start --name redis-standby-1 --instance-id <y
 
 **What this actually does:**
 
-1. Runs two hard pre-flight checks over SSH: your node's `cloud-init` version (needs to be
-   23.3.1 or newer) and its metadata datasource (needs to be Akamai's). Both are required for a
+1. Runs two hard pre-flight checks over SSH: that `cloud-init` is installed and new enough
+   (23.3.1 or newer, or an older build that already reports Akamai's datasource, as some
+   Linode images ship), and that its metadata datasource is Akamai's. Both are required for a
    later step in this tool to work correctly; it refuses to proceed if either is missing. It also
    refuses outright if your instance somehow has more than one boot config — Linode's API has no
    "which one is active" field, so this tool won't guess which one to read the current disk from
@@ -334,55 +341,52 @@ python instance_manager.py migrate-start --name redis-standby-1 --instance-id <y
    proceed past, just be aware it'll be overwritten by this tool's own network handling on the
    next recreate.
 3. Creates a new, appropriately-sized Block Storage volume to hold the migrated OS.
-4. Boots your instance into Rescue Mode, with the original disk and the new volume attached at
-   fixed device paths.
-5. Prints a `dd` command using those fixed device paths, along with the source disk size and
-   destination volume size — **do not run it verbatim without the check in §6.2 below.**
+4. Boots your instance into Rescue Mode, with the original disk and the new volume attached.
+5. Prints a single copy command for you to paste into the rescue console. The command finds the
+   two disks itself — the new volume by its own Linode volume ID, the original disk by its
+   size — so you never type device names.
 
-**Output looks like this** (matches the tool's actual printed output exactly — this used to be a
-fabricated example showing a step the tool didn't really print; fixed alongside the tool itself,
-see §6.2):
+**Output looks like this** (the copy command is shortened here; the real one is one long line):
 
 ```
 YOUR TURN -- this is the one manual step in the whole process:
   1. In Cloud Manager, open instance <id> and click "Launch LISH Console".
-  2. Log in as root.
-  3. Run `lsblk` FIRST and match devices by size -- do NOT trust /dev/sda/sdb below blindly:
-       source (original disk) should be ~20480MB
-       destination (new volume) should be ~25GB
-     If lsblk shows a different device for either size, substitute the correct device names into
-     the command below instead of running it as printed.
-  4. Once confirmed, run:
+  2. At the rescue shell (root@finnix), paste and run this one command. It finds the
+     disks itself -- the new volume by its own ID, the original disk by its size
+     (~20480MB) -- and refuses, copying nothing, if either is
+     ambiguous. (Rescue Mode's device letters vary between systems, so don't type a
+     dd command with fixed device names.)
 
-       dd if=/dev/sda of=/dev/sdb bs=4M status=progress && sync
+       DST=$(readlink -f /dev/disk/by-id/scsi-0Linode_Volume_redis-standby-1-os-vol-1a2b3c4d); ... COPY_DONE ...
 
-  5. Once it finishes cleanly (no I/O errors), run:
+  3. Wait for COPY_DONE (this takes a few minutes). COPY_FAILED means the copy did not
+     complete -- don't continue; run migrate-start --force to start over.
+  4. If it printed 'Could not identify the disks', stop and check `lsblk`: the
+     original disk is ~20480MB, the new volume ~25GB.
+  5. Once it prints COPY_DONE, run:
        instance_manager.py migrate-resume --name redis-standby-1
 ```
 
 ### 6.2 The one manual step
 
-**Important — verify device letters before running `dd`.** Rescue Mode's device assignment
-(which of `/dev/sda`–`/dev/sdh` ends up as your original disk vs. the new volume) is not
-guaranteed to match the fixed device paths printed above — this has been observed live: the
-destination volume landed at `/dev/sda` and the source disk at `/dev/sdg`, not the printed
-`/dev/sda`/`/dev/sdb`. Running the printed command blindly in that situation would copy in the
-wrong direction (destroying your original disk's data) or against an empty device. **Before
-running `dd`, run `lsblk` in the Lish console and match devices by size**: the source device
-should match your original disk's size (shown earlier in `migrate-start`'s output as
-`local_disk_size_mb`), and the destination should match the newly-created volume's size
-(`dest_volume_size_gb`). Only run the printed `dd` command once you've confirmed by size which
-device is which — if the printed `/dev/sda`/`/dev/sdb` don't match what `lsblk` shows, substitute
-the correct device names into the command yourself instead of running it as printed.
+In Cloud Manager, open the instance and click **"Launch LISH Console."** You land at the rescue
+shell (`root@finnix`). Paste the copy command `migrate-start` printed, exactly as printed.
 
-In Cloud Manager, open the instance and click **"Launch LISH Console."** Log in as `root`.
+**Why it doesn't use fixed device names.** Inside Rescue Mode, which `/dev/sdX` letter the
+original disk and the new volume get varies between systems — the original disk can appear as
+`/dev/sdg` rather than `/dev/sda`. A `dd` with the wrong letters copies in the wrong direction and
+destroys the original disk. So the printed command identifies the disks itself: the new volume
+through its `/dev/disk/by-id/scsi-0Linode_Volume_<label>` link, which names that exact volume,
+and the original disk as the only other device matching its known size. If it can't identify
+exactly one of each, it prints `Could not identify the disks unambiguously -- nothing copied`
+plus the device list, and copies nothing.
 
-Once you've confirmed the device letters as described above, `dd` copies the entire original disk onto the new volume,
-block by block — `bs=4M` is just a chunk size for reasonable throughput, `status=progress` shows
-you it's actually moving. Wait for it to print a final "records in/out" summary with **no I/O
-errors** before doing anything else. Then run `sync`, which flushes anything still sitting in a
-write cache to the actual volume — skipping this can mean the copy isn't fully durable yet when
-you move on to the next step.
+The copy itself is `dd` with `conv=fsync` (data is flushed to the volume before it reports done)
+followed by `sync`. `status=progress` shows it moving. It ends with one line:
+
+- `COPY_DONE` — the copy finished; run `migrate-resume`.
+- `COPY_FAILED` — the copy did not complete (an I/O error, for example). Don't continue; run
+  `migrate-start --force` to start over with a fresh volume.
 
 For a typical node this takes a few minutes, roughly proportional to how much data is actually
 on the disk.
@@ -1169,7 +1173,7 @@ Linode instance from your account and brings it under management (including a on
 password/key field for a node that doesn't yet trust this deployment's own key — it's used only
 for that one attempt and never stored, see §3 above) — and, if that instance still
 needs Path B migration (§6) first, a guided, three-step wizard for it, deliberately never printing
-a guessed `dd` command up front the way the CLI's own §6.2 output does: (1) you run `lsblk` in
+a `dd` command up front: (1) you run `lsblk` in
 Lish and paste the output back — the page identifies which device is your original disk and which
 is the new, empty volume purely by matching sizes against the real source-disk and
 destination-volume sizes it already knows from the Linode API (entirely in your own browser — no
@@ -1181,9 +1185,8 @@ you paste `dd`'s own summary output back, and the page checks it for a clean com
 doesn't look like it finished cleanly blocks the next step outright, with the reason shown. This
 is an early, best-effort check on top of the real safety net, not a replacement for it — the
 actual proof that the migration worked is still the root-device identity check performed over SSH
-once you click "finish migration" (§6.2's own device-mismatch warning still applies if you're
-using the CLI directly, which has no equivalent wizard: verify with `lsblk` before running `dd`,
-don't rely on the printed device letters alone). A list of every onboarded
+once you click "finish migration" (the CLI takes a different route to the same safety: its
+printed copy command identifies the two disks itself and refuses if it can't, §6.2). A list of every onboarded
 instance with its current status; a per-instance detail page for start/stop/extend, viewing and
 editing its individual schedule, its scheduled-vs-actual savings percentages, its recent event
 history, and two distinct one-way actions in its own separate cards — **Offboard** (permanently
