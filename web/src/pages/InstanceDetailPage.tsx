@@ -10,6 +10,7 @@ import {
   type ScheduleEvent,
   type ScheduleGroupSummary,
 } from '../api/types'
+import { HooksCard } from '../components/HooksCard'
 import { SavingsCard } from '../components/SavingsCard'
 import { ScheduleEditor } from '../components/ScheduleEditor'
 import { StatusBadge } from '../components/StatusBadge'
@@ -30,6 +31,10 @@ import { PageHeader } from './DashboardLayout'
 const POLL_INTERVAL_MS = 8000
 const MIN_ACTION_GUARD_MS = 600
 class SecurityWarningError extends Error {}
+class PreStopHookFailedError extends Error {}
+function withHookOutput(detail: string, output: string | null | undefined): string {
+  return output ? `${detail}\n\nHook output:\n${output}` : detail
+}
 export function InstanceDetailPage() {
   const { name = '' } = useParams()
   const navigate = useNavigate()
@@ -42,6 +47,7 @@ export function InstanceDetailPage() {
   const [error, setError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [securityWarning, setSecurityWarning] = useState<string | null>(null)
+  const [preStopHookFailed, setPreStopHookFailed] = useState(false)
   const [actionWarnings, setActionWarnings] = useState<string[]>([])
   const [busy, setBusy] = useState<string | null>(null)
   const runningRef = useRef<{
@@ -74,6 +80,7 @@ export function InstanceDetailPage() {
     setBusy(null)
     setActionError(null)
     setSecurityWarning(null)
+    setPreStopHookFailed(false)
     setActionWarnings([])
     setOffboardError(null)
     setOffboardErrorWarnings(null)
@@ -126,6 +133,7 @@ export function InstanceDetailPage() {
     setBusy(label)
     setActionError(null)
     setSecurityWarning(null)
+    setPreStopHookFailed(false)
     setActionWarnings([])
     try {
       await statusBar.run(`${capitalize(label)} “${requestedName}”`, (report) =>
@@ -138,6 +146,7 @@ export function InstanceDetailPage() {
       if (requestedName !== currentNameRef.current) return
       const carried = errorWarnings(e)
       if (carried) setActionWarnings((prev) => [...prev, ...carried])
+      if (e instanceof PreStopHookFailedError) setPreStopHookFailed(true)
       if (e instanceof SecurityWarningError) {
         setSecurityWarning(e.message)
       } else {
@@ -163,13 +172,20 @@ export function InstanceDetailPage() {
             'confirm out-of-band first, then reset the trusted host key before retrying.',
         )
       }
-      throw new Error(result.detail ?? `Start did not succeed (${result.outcome}).`)
+      throw new Error(
+        withHookOutput(result.detail ?? `Start did not succeed (${result.outcome}).`, result.hook_output),
+      )
     }
     return result
   }
   function assertStopSucceeded(result: Awaited<ReturnType<typeof api.stopInstance>>) {
     if (!STOP_SUCCESS_OUTCOMES.has(result.outcome)) {
-      throw new Error(result.detail ?? `Stop did not succeed (${result.outcome}).`)
+      const message = withHookOutput(
+        result.detail ?? `Stop did not succeed (${result.outcome}).`,
+        result.hook_output,
+      )
+      if (result.outcome === 'pre_stop_hook_failed') throw new PreStopHookFailedError(message)
+      throw new Error(message)
     }
     return result
   }
@@ -278,8 +294,23 @@ export function InstanceDetailPage() {
               </div>
             )}
             {actionError && (
-              <div className="px-5 pb-4">
+              <div className="space-y-2 px-5 pb-4">
                 <ErrorBanner message={actionError} />
+                {preStopHookFailed && record.current_status === 'running' && (
+                  <Button
+                    variant="danger"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      run('stop without hook', (onProgress, onWarning) =>
+                        api
+                          .stopInstance(name, { skipHooks: true }, onProgress, onWarning)
+                          .then(assertStopSucceeded),
+                      )
+                    }
+                  >
+                    {busy === 'stop without hook' ? 'Stopping…' : 'Stop anyway, without the pre-stop hook'}
+                  </Button>
+                )}
               </div>
             )}
             {actionWarnings.length > 0 && (
@@ -450,6 +481,13 @@ export function InstanceDetailPage() {
             </div>
           </Card>
 
+          <HooksCard
+            key={name}
+            target={{ kind: 'instance', name }}
+            instanceRunning={record.current_status === 'running'}
+            refreshToken={`${record.current_status}:${record.current_linode_id ?? ''}:${record.group_id ?? ''}`}
+          />
+
           <Card>
             <CardHeader title="Recent activity" subtitle="Create/delete events for this instance." />
             {history.length === 0 ? (
@@ -494,6 +532,7 @@ export function InstanceDetailPage() {
             <CardHeader title="Group membership" />
             <div className="space-y-3 px-5 py-4">
               <select
+                aria-label="Group membership"
                 className="block w-full rounded-md border-0 py-1.5 px-3 text-sm text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-indigo-600"
                 value={currentGroup?.name ?? ''}
                 disabled={busy !== null}

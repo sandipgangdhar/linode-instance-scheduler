@@ -523,11 +523,23 @@ class ScheduleSetRequest(BaseModel):
 
 class StartRequest(BaseModel):
     override_window_hours: float | None = None
+    skip_hooks: bool = False
 
 
 class StopRequest(BaseModel):
     skip_precapture: bool = False
     force: bool = False
+    skip_hooks: bool = False
+
+
+class HookConfigRequest(BaseModel):
+
+    pre_stop: dict | None = None
+    post_start: dict | None = None
+
+
+class HookRunRequest(BaseModel):
+    hook: Literal["pre_stop", "post_start"]
 
 
 class ExtendRequest(BaseModel):
@@ -761,17 +773,19 @@ def api_start(
     name: str, body: StartRequest, request: Request, user: str = Depends(require_session),
 ) -> dict:
     client, ssh_key = _client(request), _ssh_key(request)
-    op_id = _start_operation("start")
+    total_steps = _TOTAL_STEPS["start"] + _hook_progress_steps(name, "post_start", body.skip_hooks)
+    op_id = _start_operation("start", total_steps=total_steps)
 
     def _do() -> im.StartResult:
         return im.start_instance(
             client, name, ssh_key, triggered_by="api",
             override_window_hours=body.override_window_hours, actor=user,
             on_progress=_make_progress_reporter(op_id), on_warning=_make_warning_reporter(op_id),
+            skip_hooks=body.skip_hooks,
         )
 
     threading.Thread(target=_run_job, args=(op_id, _do), daemon=True).start()
-    return {"operation_id": op_id, "total_steps": _TOTAL_STEPS["start"]}
+    return {"operation_id": op_id, "total_steps": total_steps}
 
 
 @app.post("/instances/{name}/stop")
@@ -779,17 +793,31 @@ def api_stop(
     name: str, body: StopRequest, request: Request, user: str = Depends(require_session),
 ) -> dict:
     client, ssh_key = _client(request), _ssh_key(request)
-    op_id = _start_operation("stop")
+    total_steps = _TOTAL_STEPS["stop"] + _hook_progress_steps(
+        name, "pre_stop", body.skip_hooks or body.skip_precapture,
+    )
+    op_id = _start_operation("stop", total_steps=total_steps)
 
     def _do() -> im.StopResult:
         return im.stop_instance(
             client, name, ssh_key,
-            skip_precapture=body.skip_precapture, force=body.force, triggered_by="api", actor=user,
+            skip_precapture=body.skip_precapture, force=body.force, skip_hooks=body.skip_hooks,
+            triggered_by="api", actor=user,
             on_progress=_make_progress_reporter(op_id), on_warning=_make_warning_reporter(op_id),
         )
 
     threading.Thread(target=_run_job, args=(op_id, _do), daemon=True).start()
-    return {"operation_id": op_id, "total_steps": _TOTAL_STEPS["stop"]}
+    return {"operation_id": op_id, "total_steps": total_steps}
+
+
+def _hook_progress_steps(name: str, hook_type: str, skipped: bool) -> int:
+
+    if skipped:
+        return 0
+    record = im.load_registry().get(name)
+    if record is None:
+        return 0
+    return 1 if im.resolve_effective_hooks(name, record)[hook_type] is not None else 0
 
 
 @app.post("/instances/{name}/migrate-start")
@@ -869,6 +897,75 @@ def api_migrate_resume(name: str, request: Request, user: str = Depends(require_
 def api_extend(name: str, body: ExtendRequest, user: str = Depends(require_session)) -> dict:
     new_expiry = im.extend_manual_override(name, body.hours)
     return {"manual_override_expires_at": new_expiry}
+
+
+@app.get("/instances/{name}/hooks")
+def api_get_instance_hooks(name: str, user: str = Depends(require_session)) -> dict:
+
+    record = im.load_registry().get(name)
+    if record is None:
+        raise im.NotOnboardedError(f"'{name}' is not onboarded.")
+    return {
+        "own": im.get_instance_hooks(name),
+        "effective": im.resolve_effective_hooks(name, record),
+        "last_post_start_failure": im.get_last_hook_failure(name, "post_start"),
+    }
+
+
+@app.put("/instances/{name}/hooks")
+def api_set_instance_hooks(
+    name: str, body: HookConfigRequest, user: str = Depends(require_session),
+) -> dict:
+    return {"own": im.set_instance_hooks(
+        name, body.model_dump(), triggered_by="api", actor=user,
+    )}
+
+
+@app.delete("/instances/{name}/hooks")
+def api_clear_instance_hooks(name: str, user: str = Depends(require_session)) -> dict:
+    if name not in im.load_registry():
+        raise im.NotOnboardedError(f"'{name}' is not onboarded.")
+    return {"cleared": im.clear_instance_hooks(name, triggered_by="api", actor=user)}
+
+
+@app.post("/instances/{name}/hooks/run")
+def api_run_instance_hook(
+    name: str, body: HookRunRequest, request: Request, user: str = Depends(require_session),
+) -> dict:
+
+    result = im.run_hook_now(
+        name, body.hook, _ssh_key(request), triggered_by="api", actor=user,
+    )
+    return {
+        "ok": result.ok, "summary": result.summary, "exit_code": result.exit_code,
+        "output_tail": result.output_tail, "attempts": result.attempts,
+    }
+
+
+@app.get("/instances/{name}/hook-events")
+def api_get_hook_events(
+    name: str, limit: int = 50, user: str = Depends(require_session),
+) -> list[dict]:
+    return im.get_hook_events(name, limit=limit)
+
+
+@app.get("/groups/{group_name}/hooks")
+def api_get_group_hooks(group_name: str, user: str = Depends(require_session)) -> dict:
+    return {"hooks": im.get_group_hooks(group_name)}
+
+
+@app.put("/groups/{group_name}/hooks")
+def api_set_group_hooks(
+    group_name: str, body: HookConfigRequest, user: str = Depends(require_session),
+) -> dict:
+    return {"hooks": im.set_group_hooks(
+        group_name, body.model_dump(), triggered_by="api", actor=user,
+    )}
+
+
+@app.delete("/groups/{group_name}/hooks")
+def api_clear_group_hooks(group_name: str, user: str = Depends(require_session)) -> dict:
+    return {"cleared": im.clear_group_hooks(group_name, triggered_by="api", actor=user)}
 
 
 @app.get("/instances/{name}/schedule")

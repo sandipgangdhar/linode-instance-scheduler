@@ -274,6 +274,10 @@ Every command below is run from the repository root, with the virtual environmen
 | `poll` | Runs the scheduler — checks every node's individual AND group schedule and starts/stops it if due, and auto-reverts any expired manual override. Run it continuously (the normal way), or `--once` from cron. See §8.5/§8.6/§8.7. |
 | `serve-api` | Runs the optional REST API server — the same capabilities as the CLI, over HTTP, with "Login with Linode" auth. See §8.8. |
 | `extend` | Pushes an active manual-override auto-stop timer further out. See §8.7. |
+| `hooks-set` | Sets a node's (or a group's) pre-stop hook and/or post-start check — your own commands, run on the node right before every stop and right after every start. See §8.12. |
+| `hooks-show` | Shows a node's own hooks and the ones that actually apply to it (its own, or inherited from its group), or a group's hooks. |
+| `hooks-clear` | Removes a node's own hooks (its group's then apply), or a group's hooks. |
+| `hooks-run` | Runs a node's hook right now, without starting or stopping it — to test a hook, or re-run a failed post-start check after fixing the cause. |
 | `clear-lock` | Admin escape hatch — forcibly clears a stuck in-progress operation. You should rarely need this. |
 | `reset-host-key` | Admin escape hatch — re-establishes SSH trust for a node after a genuine, confirmed key change. You should rarely need this either; see [§8](#8-day-to-day-usage) and the one-time migration note below. |
 | `rebuild` | Disaster recovery — reconstructs your local registry from tags on your own Linode account, in case the machine running this tool (and its local records) is ever lost. You should rarely need this either. |
@@ -1202,6 +1206,90 @@ backup (§8.10, above) recover it without needing a second live system standing 
 the Definitive Guide's Deployment Model chapter for the fuller comparison.
 
 ---
+
+### 8.12 Hooks — run your own commands before a stop and after a start
+
+Some services want a step of their own around a stop/start cycle. A database might need a clean,
+checked shutdown before its instance is deleted, and you may want to confirm it's actually
+accepting connections again after the instance comes back. Hooks let you attach your own commands
+to both moments:
+
+- **Pre-stop hook** — runs once on the node, right before it's shut down and deleted.
+- **Post-start check** — runs on the node after it's reachable again, as a readiness check.
+
+Both run as `root` over the same SSH connection this tool already uses, and apply to every stop
+and start: scheduled, manual, through the API or dashboard, and the automatic stop at the end of
+a manual-override window.
+
+**Every stop already shuts the operating system down gracefully** before deleting the instance,
+so services managed by systemd (PostgreSQL, Redis, and so on on a normal install) are stopped
+cleanly even without a hook. A pre-stop hook adds an explicit step whose result is checked, and
+the option to keep the node running if it fails.
+
+```
+python instance_manager.py hooks-set --name pg-1 \
+    --pre-stop "pg_ctlcluster 16 main stop -m fast" \
+    --post-start "pg_isready -q"
+```
+
+Options (only the ones you pass change; anything already set is kept):
+
+| Option | Meaning |
+|---|---|
+| `--pre-stop COMMAND` | The pre-stop hook. |
+| `--pre-stop-timeout SECONDS` | How long it may run (default 300, max 3600). |
+| `--pre-stop-on-failure abort\|continue` | What happens if it fails — see below (default `abort`). |
+| `--post-start COMMAND` | The post-start check. |
+| `--post-start-timeout SECONDS` | Total time allowed for the check to pass (default 600, max 3600). |
+| `--clear-pre-stop` / `--clear-post-start` | Remove just that one hook. |
+
+Hooks are configured per node or per group. `--group-name dbs` instead of `--name pg-1` sets them
+for every member of a group. A node's own hook overrides its group's **for that hook type only**,
+so a node can set its own post-start check and still use the group's pre-stop hook.
+`hooks-show --name pg-1` shows both its own hooks and the ones that actually apply, including
+which group each inherited one comes from.
+
+For anything longer than a one-liner, put a script on the node and call it
+(`--pre-stop /usr/local/bin/before-stop.sh`). A command can be up to 4096 characters.
+
+**What happens if a hook fails.** A hook fails when its command exits with a non-zero code, runs
+past its timeout, or the node can't be reached over SSH to run it at all.
+
+- **Pre-stop hook fails, policy `abort` (the default):** nothing is shut down or deleted. The node
+  keeps running (and billing), the stop is recorded as failed in `history`, the command exits
+  non-zero, and the end of the hook's own output is printed so you can see why. It's not retried
+  on its own: fix the cause and run `stop` again, or use `stop --skip-hooks` to stop without the
+  hook. If your hook does several things, note that it may have done some of them before
+  failing (for example, stopped the database but then exited non-zero) — this tool doesn't undo
+  that, so make your script restore what it changed if a partial run matters.
+- **Pre-stop hook fails, policy `continue`:** a warning is recorded and the stop goes ahead.
+- **Post-start check:** it's retried every 15 seconds until it succeeds or its timeout runs out,
+  so "not ready yet, 20 seconds after boot" is normal and simply retried. If it never succeeds,
+  the node is **left running** — it's never stopped or deleted automatically for this — and
+  the start is reported as failed so someone can look at it. `status` shows when the last check
+  failed. Once you've fixed the cause, re-run the check without restarting:
+
+```
+python instance_manager.py hooks-run --name pg-1 --post-start
+```
+
+`start --skip-hooks` starts a node without running its post-start check, and
+`stop --skip-precapture` (for a node that can't be reached over SSH) skips the pre-stop hook too,
+since there's no way to run it. Both are recorded in the node's hook history.
+
+`hooks-run --name pg-1 --pre-stop` runs the pre-stop hook on demand. It asks for confirmation
+first (`--yes` skips the prompt), because the node is **not** stopped afterward, so whatever the
+hook stops stays stopped until you restart it.
+
+**History.** Every hook run (result, exit code, the end of its output) and every hook change (who
+changed it, when, and what it was changed to) is recorded. The dashboard's Hooks card on each node
+shows this, and the API exposes it at `GET /instances/{name}/hook-events`.
+
+**Backups.** Hooks are stored in the local database alongside schedules and groups, so `backup`
+(§8.10) covers them. With Object Storage backups configured, each node's own hooks are also
+included in its per-node backup, and `rebuild` restores them. Hook commands are not stored in
+Linode tags (tags are limited to 50 characters), so after losing the local database with no
+backup of either kind, hooks need to be set again.
 
 ## 9. Costs
 

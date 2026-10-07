@@ -391,6 +391,19 @@ python instance_manager.py reset-host-key --ip <address>
 A steady-state `start` that encounters an *unexpected* host-key change (one you didn't just
 deliberately trigger) is refused outright as a `SECURITY WARNING` — see Troubleshooting below.
 
+### Reviewing hook changes
+
+Pre-stop hooks and post-start checks run as `root` on your instances, so anyone who can set one —
+from the CLI, the API, or the dashboard — can run a root command on that instance. Treat dashboard
+access accordingly. Every hook change is recorded with who made it, when, and the full new command:
+
+```bash
+python instance_manager.py hooks-show --name <name>      # what applies now, and where it comes from
+```
+
+The dashboard's Hooks card on each instance lists recent hook changes and runs; the API serves the
+same record at `GET /instances/{name}/hook-events`.
+
 ### Rotating the Linode API token
 
 Generate a new Personal Access Token in Cloud Manager with the same scopes as the one being
@@ -436,6 +449,10 @@ There's no separate metrics pipeline — the signal to watch is the tool's own s
 - **Did a scheduled action actually fire when it should have?** `python instance_manager.py
   history --name <name> --limit 10` shows the real recorded outcome, not just whether the
   poller is running.
+- **Did hooks run and pass?** `status --name <name>` names the instance's hooks and flags a
+  post-start check whose latest run failed; the dashboard's Hooks card shows each recent run's
+  result and output. A failed pre-stop hook or post-start check also makes `poll --once` exit
+  non-zero, the same as any other failed scheduled action.
 - **Any instance stuck `needs_manual_recovery`?** `list` shows this status plainly — see
   "Recovering from a lost or corrupted registry" above for the fix.
 
@@ -451,6 +468,8 @@ There's no separate metrics pipeline — the signal to watch is the tool's own s
 | A stop/start command refuses with "already operating on" | A per-instance lock is held — normally released automatically when the holding process exits | Confirm nothing is actually mid-operation on that instance, then `clear-lock --name <name>` |
 | `rebuild` recovered an instance as `needs_manual_recovery` instead of `stopped` | Neither tags nor Object Storage had a complete-enough record for it at the moment of loss — most commonly, Object Storage wasn't configured yet, or that specific instance hadn't been stopped/onboarded since it was | See "Recovering from a lost or corrupted registry" above for the manual-boot recovery steps, and Part 5.6 of the Definitive Guide for the full edge-case table |
 | Group's timezone or schedule doesn't seem to apply | An individual schedule exists and is silently overriding the group entirely (working as designed, not a bug) | `schedule-show --name <name>` to check for an individual schedule; clear it if the group should govern instead |
+| A stop fails with "pre-stop hook ... Stop aborted" and the instance stays running | The instance's pre-stop hook exited non-zero, timed out, or couldn't be reached over SSH, and its failure policy is `abort` (the default) — by design, nothing was shut down or deleted | Read the hook output printed with the error (also in the Hooks card and `hook-events`), fix the cause, and stop again. To stop without the hook, use `stop --skip-hooks` (dashboard: "Stop anyway, without the pre-stop hook"). A manual-override auto-stop retries the stop on every poll tick until it succeeds |
+| A start reports "post-start check still failing" | The instance started and is running, but its readiness check never passed within its timeout | The instance is deliberately left running. Check the service on the instance, then re-run the check with `hooks-run --name <name> --post-start`. If the check needs longer on a cold boot, raise `--post-start-timeout` |
 | A configured schedule's savings percentage looks wrong | The schedule is disabled, or a manual-override auto-revert cycle is skewing actual vs. scheduled uptime | Check `schedule-show`'s `enabled` field; compare scheduled vs. actual savings — a persistent gap usually means overrides are happening more than expected |
 
 ## Reference

@@ -19,11 +19,12 @@ import types
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 import requests.exceptions
 from dotenv import load_dotenv
-from linode_api4 import Instance, LinodeClient, Volume
+from linode_api4 import Instance, LinodeClient, Region, Volume
 from linode_api4.errors import ApiError
 from linode_api4.objects.linode import InstancePlacementGroupAssignment
 from linode_api4.objects.networking import IPAddress, ReservedIPAddress
@@ -545,6 +546,15 @@ _INTERFACE_LINE_BUILDERS = {
 }
 
 
+def region_dns_servers(client: LinodeClient, region: str) -> list[str]:
+
+    resolvers = retry_transient(lambda: client.load(Region, region).resolvers)
+    raw = getattr(resolvers, "ipv4", None)
+    if not isinstance(raw, str):
+        return []
+    return [addr.strip() for addr in raw.split(",") if addr.strip()]
+
+
 def build_user_data(
     network_config: list[dict],
     network_interface_model: str,
@@ -733,6 +743,10 @@ def create_and_boot_instance(
         public_gateway = None
         public_prefix = 24
     kwargs = build_create_kwargs(captured_network)
+
+
+    if dns_servers is None:
+        dns_servers = region_dns_servers(client, region)
     user_data = build_user_data(
         captured_network["network_config"],
         captured_network["network_interface_model"],
@@ -1064,6 +1078,65 @@ def ssh_run(
     raise RuntimeError(
         f"SSH to {host} failed after {retries} attempts: {last_error}"
     )
+
+
+@dataclass
+class SshExecResult:
+
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+    connection_error: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0
+
+
+_SSH_CONNECTION_FAILURE_EXIT = 255
+
+
+def ssh_exec(
+    host: str, ssh_key_path: str, command: str, *, timeout_s: int,
+    connect_timeout_s: int = 10, known_hosts_path: str | Path | None = None,
+) -> SshExecResult:
+
+    if known_hosts_path is None:
+        known_hosts_path = BASE_DIR / "state" / "known_hosts"
+    known_hosts_path = Path(known_hosts_path)
+    known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(
+            [
+                "ssh",
+                "-o", f"ConnectTimeout={connect_timeout_s}",
+                "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=yes",
+                "-o", f"UserKnownHostsFile={known_hosts_path}",
+                "-o", "HashKnownHosts=no",
+                "-i", ssh_key_path,
+                f"root@{host}",
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as e:
+        def _text(v) -> str:
+            if v is None:
+                return ""
+            return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
+        return SshExecResult(
+            exit_code=None, stdout=_text(e.stdout), stderr=_text(e.stderr), timed_out=True,
+        )
+    if result.returncode == _SSH_CONNECTION_FAILURE_EXIT:
+        return SshExecResult(
+            exit_code=None, stdout=result.stdout, stderr=result.stderr, connection_error=True,
+        )
+    return SshExecResult(exit_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
 
 
 def _ssh_exec_with_password(

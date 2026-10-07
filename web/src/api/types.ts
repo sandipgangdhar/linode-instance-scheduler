@@ -32,12 +32,14 @@ export interface StartResult {
     | 'transitioning'
     | 'reachability_check_failed'
     | 'create_failed'
+    | 'post_start_hook_failed'
   instance_id: number | null
   reserved_ip: string | null
   live_status: string | null
   security_warning: boolean
   detail: string | null
   manual_override_expires_at: string | null
+  hook_output?: string | null
 }
 export const START_SUCCESS_OUTCOMES: ReadonlySet<StartResult['outcome']> = new Set([
   'started',
@@ -50,9 +52,11 @@ export interface StopResult {
     | 'confirmed_gone_reset_to_stopped'
     | 'aborted_by_user'
     | 'prepare_failed'
+    | 'pre_stop_hook_failed'
     | 'delete_failed'
   instance_id: number | null
   detail: string | null
+  hook_output?: string | null
 }
 export const STOP_SUCCESS_OUTCOMES: ReadonlySet<StopResult['outcome']> = new Set([
   'stopped',
@@ -163,3 +167,51 @@ export interface Savings {
 }
 export const VALID_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const
 export type Weekday = (typeof VALID_DAYS)[number]
+export type HookFailurePolicy = 'abort' | 'continue'
+export interface PreStopHook {
+  command: string
+  timeout_s: number
+  on_failure: HookFailurePolicy
+}
+export interface PostStartHook {
+  command: string
+  timeout_s: number
+}
+export interface HookConfig {
+  pre_stop: PreStopHook | null
+  post_start: PostStartHook | null
+}
+export interface EffectiveHooks {
+  pre_stop:
+    | (PreStopHook & {
+        source: 'instance' | 'group'
+      })
+    | null
+  post_start:
+    | (PostStartHook & {
+        source: 'instance' | 'group'
+      })
+    | null
+}
+export interface HookEvent {
+  hook: 'pre_stop' | 'post_start' | 'config'
+  triggered_by: 'schedule' | 'manual' | 'api'
+  actor: string | null
+  timestamp: string
+  result: 'success' | 'failure' | 'skipped' | 'warning' | 'changed'
+  exit_code: number | null
+  output_tail: string | null
+  detail: string | null
+}
+export interface InstanceHooks {
+  own: HookConfig | null
+  effective: EffectiveHooks
+  last_post_start_failure: HookEvent | null
+}
+export interface HookRunResult {
+  ok: boolean
+  summary: string
+  exit_code: number | null
+  output_tail: string | null
+  attempts: number
+}

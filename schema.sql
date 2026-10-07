@@ -75,3 +75,28 @@ CREATE TABLE IF NOT EXISTS api_sessions (
     created_at TIMESTAMP NOT NULL,
     expires_at TIMESTAMP NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS instance_hooks (
+    instance_name TEXT PRIMARY KEY REFERENCES instances(name) ON DELETE CASCADE,
+    config TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_hooks (
+    group_id INTEGER PRIMARY KEY REFERENCES schedule_groups(id) ON DELETE CASCADE,
+    config TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hook_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target TEXT NOT NULL CHECK (target IN ('instance', 'group')),
+    instance_name TEXT NOT NULL,
+    hook TEXT NOT NULL CHECK (hook IN ('pre_stop', 'post_start', 'config')),
+    triggered_by TEXT NOT NULL CHECK (triggered_by IN ('schedule', 'manual', 'api')),
+    actor TEXT,
+    timestamp TIMESTAMP NOT NULL,
+    result TEXT NOT NULL CHECK (result IN ('success', 'failure', 'skipped', 'warning', 'changed')),
+    exit_code INTEGER,
+    output_tail TEXT,
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS hook_events_by_instance ON hook_events (instance_name, timestamp);

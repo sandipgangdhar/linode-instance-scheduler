@@ -56,6 +56,15 @@ export async function mockInstanceList(page: Page, records: Record<string, Insta
     await page.route(`**/instances/${encodeURIComponent(name)}/history*`, async (route: Route) => {
       await route.fulfill({ json: [] })
     })
+    await page.route(`**/instances/${encodeURIComponent(name)}/hooks`, async (route: Route) => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({
+        json: { own: null, effective: { pre_stop: null, post_start: null }, last_post_start_failure: null },
+      })
+    })
+    await page.route(`**/instances/${encodeURIComponent(name)}/hook-events*`, async (route: Route) => {
+      await route.fulfill({ json: [] })
+    })
   }
 }
 export async function mockGroupList(

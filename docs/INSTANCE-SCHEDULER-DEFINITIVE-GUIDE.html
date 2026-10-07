@@ -480,6 +480,24 @@ pre.code .m{color:var(--code-mut)}
         <p><strong>Scheduled savings</strong> is computed purely from the configured schedule's own hours &mdash; visible the moment a schedule is set up, before it has ever run even once. <strong>Actual savings</strong> is computed retrospectively from real recorded uptime over a trailing window &mdash; seven days by default, adjustable per request &mdash; and only becomes meaningful once a schedule has been in effect for at least that long. Shown together, the gap between the two is itself informative: a schedule configured for a high savings percentage that isn't being realized in practice is usually a sign that manual overrides are happening more often than the schedule intends.</p>
       </section>
 
+      <section class="chapter" id="c4-3">
+        <h2><span class="chno">4.3</span> Pre-Stop Hooks and Post-Start Checks</h2>
+        <p class="lede">Some workloads want a step of their own around every stop and start &mdash; a database shut down in a specific, checked way before its instance is deleted, or confirmed to be accepting connections again after it comes back.</p>
+        <p>A <strong>pre-stop hook</strong> is a command run once on the instance immediately before it is shut down and deleted; a <strong>post-start check</strong> is a command run on the instance once it is reachable again. Both run as <code>root</code> over the same SSH access the tool already uses, and both apply to every stop and start regardless of what triggered it &mdash; a schedule, a person, the API, or the automatic stop at the end of a manual-override window. They're configured per instance or per group; an instance's own hook overrides its group's for that hook type only, so an instance can set its own post-start check while still using its group's pre-stop hook.</p>
+        <p>Every stop already performs a graceful operating-system shutdown before deleting the instance, so services managed by the operating system's own service manager are stopped cleanly with or without a hook. What a pre-stop hook adds is an explicit step whose result is checked &mdash; and the option to refuse to delete an instance whose shutdown step didn't succeed.</p>
+        <div class="table-wrap"><table><thead><tr><th>Situation</th><th>What happens</th></tr></thead><tbody>
+          <tr><td>Pre-stop hook fails (non-zero exit, timeout, or the instance can't be reached to run it), policy <em>abort</em> &mdash; the default</td><td>Nothing is shut down or deleted; the instance keeps running. The stop is recorded as failed, with the hook's own output. It isn't retried on its own &mdash; an operator fixes the cause and stops again, or explicitly stops without the hook.</td></tr>
+          <tr><td>Pre-stop hook fails, policy <em>continue</em></td><td>A warning is recorded and the stop proceeds normally.</td></tr>
+          <tr><td>Post-start check doesn't pass yet</td><td>Retried every 15 seconds until it passes or its total timeout expires &mdash; it's a readiness check, so "not ready yet" right after boot is expected.</td></tr>
+          <tr><td>Post-start check never passes within its timeout</td><td>The instance is left running &mdash; it is never stopped or deleted for this. The start is reported as failed so someone can investigate, and the check can be re-run on demand once the cause is fixed.</td></tr>
+        </tbody></table></div>
+        <div class="callout">
+          <span class="co-label">A hook is never undone</span>
+          If a pre-stop hook performs several steps and fails partway, the tool doesn't attempt to reverse what it already did &mdash; a script that needs to leave its services running after a failure should restore them itself before exiting non-zero.
+        </div>
+        <p>Every hook run and every hook change &mdash; who made it, when, and the new command &mdash; is recorded in the instance's hook history. Hook configuration is stored in the local database alongside schedules and groups, and included in Object Storage backups; it is not encoded in resource tags, which are too short to hold a command.</p>
+      </section>
+
       <!-- ============ PART V ============ -->
       <div class="part-open" id="part-5">
         <div class="part-num">Part V</div>
@@ -603,6 +621,10 @@ pre.code .m{color:var(--code-mut)}
           <tr><td><code>schedule-clear</code></td><td>Removes an instance's individual schedule &mdash; it then falls back to its group's schedule, if it belongs to one.</td></tr>
           <tr><td><code>extend</code></td><td>Pushes an active manual-override countdown forward by another window.</td></tr>
           <tr><td><code>poll</code></td><td>Runs the scheduler loop &mdash; continuously by default, or a single evaluation pass with <code>--once</code>.</td></tr>
+          <tr><td><code>hooks-set</code></td><td>Sets an instance's or group's pre-stop hook and/or post-start check, with timeouts and the pre-stop failure policy (Part IV.3). Only the options given change.</td></tr>
+          <tr><td><code>hooks-show</code></td><td>Shows an instance's own hooks and the ones that actually apply to it, including which group an inherited one comes from &mdash; or a group's hooks.</td></tr>
+          <tr><td><code>hooks-clear</code></td><td>Removes an instance's own hooks (its group's then apply), or a group's hooks.</td></tr>
+          <tr><td><code>hooks-run</code></td><td>Runs an instance's hook immediately, without starting or stopping it &mdash; to test it, or to re-run a failed post-start check.</td></tr>
         </tbody></table></div>
       </section>
 
@@ -655,6 +677,9 @@ pre.code .m{color:var(--code-mut)}
           <tr><td><code>POST /groups</code> &middot; <code>GET /groups</code> &middot; <code>GET</code>/<code>DELETE /groups/{name}</code></td><td>Group CRUD</td></tr>
           <tr><td><code>POST /groups/{name}/schedule</code></td><td>Set a group's schedule</td></tr>
           <tr><td><code>GET /groups/{name}/savings</code></td><td>The two savings percentages for a group</td></tr>
+          <tr><td><code>GET</code> / <code>PUT</code> / <code>DELETE /instances/{name}/hooks</code></td><td>Read (own and effective), set, or clear an instance's hooks</td></tr>
+          <tr><td><code>POST /instances/{name}/hooks/run</code> &middot; <code>GET /instances/{name}/hook-events</code></td><td>Run a hook on demand; read hook run and change history</td></tr>
+          <tr><td><code>GET</code> / <code>PUT</code> / <code>DELETE /groups/{name}/hooks</code></td><td>Read, set, or clear a group's hooks</td></tr>
         </tbody></table></div>
         <p>Every route mirrors a CLI command one-to-one &mdash; there is no capability in the API that isn't equally available from the command line, and vice versa.</p>
       </section>
@@ -668,7 +693,7 @@ pre.code .m{color:var(--code-mut)}
 
       <section class="chapter" id="c7-3">
         <h2><span class="chno">7.3</span> The Web Dashboard</h2>
-        <p>A browser-based dashboard, served by the same API process, covers the full day-to-day surface: signing in, viewing and onboarding instances, configuring individual and group schedules, starting and stopping instances manually (with the auto-revert countdown shown plainly when active), managing group membership, and both savings percentages. It's a thin visual layer over the identical API described above &mdash; nothing it does isn't equally available from the CLI.</p>
+        <p>A browser-based dashboard, served by the same API process, covers the full day-to-day surface: signing in, viewing and onboarding instances, configuring individual and group schedules, starting and stopping instances manually (with the auto-revert countdown shown plainly when active), managing group membership, configuring pre-stop hooks and post-start checks (with each instance's recent hook activity), and both savings percentages. It's a thin visual layer over the identical API described above &mdash; nothing it does isn't equally available from the CLI.</p>
         <p>Path B migration (Part II.2) can be driven entirely from the dashboard, not just the CLI &mdash; a guided flow walks through the same pre-flight checks, starts the migration, then presents the manual copy step directly in the browser: paste the guest's own device listing to confirm the correct disks before copying, run the copy in the Lish console as usual, then paste its output back in to verify and complete the migration. A successful migration chains straight into onboarding automatically, landing on the instance's own detail page with no separate manual step. The same one-time SSH password/key fallback described in Part VIII.1 is available here too, for a node that doesn't yet trust this deployment's key.</p>
       </section>
 
@@ -684,6 +709,7 @@ pre.code .m{color:var(--code-mut)}
         <h2><span class="chno">8.1</span> One SSH Keypair, Never a Stored Credential</h2>
         <p class="lede">SSH access is needed on an ongoing basis &mdash; to verify real reachability after every recreate, and to re-read the current authorized-keys list before every stop so a departing team member's revoked access isn't silently reinstated on the next cycle.</p>
         <p>This never requires storing a customer's root credential anywhere. One SSH keypair belongs to the deployment itself &mdash; its private key lives only on the server running this tool, read fresh at each use, never written into the database. For a brand-new instance provisioned from a template, this deployment's public key is simply baked into the template once, with no credential ever exchanged. For an existing instance being brought under management, you add this deployment's public key yourself, the normal way you'd add any key &mdash; through access you already have.</p>
+        <p>The same SSH access carries pre-stop hooks and post-start checks (Part IV.3), which run as <code>root</code>. Anyone permitted to set a hook &mdash; from the CLI, the API, or the dashboard &mdash; can therefore run a root command on that instance, which is why every hook change is recorded with who made it and the full command, and why dashboard access deserves the same care as shell access to the instances themselves.</p>
         <p>A one-time fallback exists on the onboarding screen for a customer who'd rather hand over temporary access than add the key themselves &mdash; a password or a private key pasted directly into the form. Neither is ever written to the database: a pasted password is used once, for that single request, and discarded; a pasted private key is written to a locked-down temporary file, used once, and deleted immediately afterward regardless of whether onboarding succeeds or fails.</p>
       </section>
 

@@ -1,5 +1,9 @@
 import type {
   DeregisterResult,
+  HookConfig,
+  HookEvent,
+  HookRunResult,
+  InstanceHooks,
   InstanceRecord,
   LinodeRawInstance,
   MigrateResumeResult,
@@ -164,6 +168,7 @@ export const api = {
     opts?: {
       skipPrecapture?: boolean
       force?: boolean
+      skipHooks?: boolean
     },
     onProgress?: (percent: number, currentStep: string | null) => void,
     onWarning?: (warnings: string[]) => void,
@@ -173,6 +178,7 @@ export const api = {
     }>('POST', `/instances/${encodeURIComponent(name)}/stop`, {
       skip_precapture: opts?.skipPrecapture ?? false,
       force: opts?.force ?? false,
+      skip_hooks: opts?.skipHooks ?? false,
     })
     return pollOperation<StopResult>(kickoff.operation_id, onProgress, onWarning)
   },
@@ -241,6 +247,32 @@ export const api = {
     request<ScheduleGroup>('POST', `/groups/${encodeURIComponent(name)}/schedule`, schedule),
   getGroupSavings: (name: string, days = 7) =>
     request<Savings>('GET', `/groups/${encodeURIComponent(name)}/savings?days=${days}`),
+  getInstanceHooks: (name: string) =>
+    request<InstanceHooks>('GET', `/instances/${encodeURIComponent(name)}/hooks`),
+  setInstanceHooks: (name: string, config: HookConfig) =>
+    request<{
+      own: HookConfig
+    }>('PUT', `/instances/${encodeURIComponent(name)}/hooks`, config),
+  clearInstanceHooks: (name: string) =>
+    request<{
+      cleared: boolean
+    }>('DELETE', `/instances/${encodeURIComponent(name)}/hooks`),
+  runInstanceHook: (name: string, hook: 'pre_stop' | 'post_start') =>
+    request<HookRunResult>('POST', `/instances/${encodeURIComponent(name)}/hooks/run`, { hook }),
+  getHookEvents: (name: string, limit = 20) =>
+    request<HookEvent[]>('GET', `/instances/${encodeURIComponent(name)}/hook-events?limit=${limit}`),
+  getGroupHooks: (name: string) =>
+    request<{
+      hooks: HookConfig | null
+    }>('GET', `/groups/${encodeURIComponent(name)}/hooks`),
+  setGroupHooks: (name: string, config: HookConfig) =>
+    request<{
+      hooks: HookConfig
+    }>('PUT', `/groups/${encodeURIComponent(name)}/hooks`, config),
+  clearGroupHooks: (name: string) =>
+    request<{
+      cleared: boolean
+    }>('DELETE', `/groups/${encodeURIComponent(name)}/hooks`),
   logout: () =>
     request<{
       ok: boolean

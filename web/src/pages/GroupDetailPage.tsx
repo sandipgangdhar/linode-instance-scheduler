@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api, ApiError, errorWarnings } from '../api/client'
 import type { InstanceRecord, Savings, ScheduleGroup, ScheduleGroupSummary } from '../api/types'
 import { SavingsCard } from '../components/SavingsCard'
+import { HooksCard } from '../components/HooksCard'
 import { ScheduleEditor } from '../components/ScheduleEditor'
 import {
   Button,
@@ -323,6 +324,7 @@ export function GroupDetailPage() {
               />
             </div>
           </Card>
+          <HooksCard key={group.name} target={{ kind: 'group', name: group.name }} />
         </div>
         <div className="space-y-6">
           <Card>
