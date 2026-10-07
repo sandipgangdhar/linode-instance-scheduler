@@ -208,16 +208,20 @@ and is worth setting up for anything beyond a purely disposable dev/test fleet.
 Two independent backups exist alongside the local database, and neither is something you have to
 maintain by hand:
 
-- **Linode's own resource tags** — every onboard and stop writes the instance's identity (OS
+- **Linode's own resource tags** — every onboard, start, and stop writes the instance's identity (OS
   volume, data volumes, reserved IP), individual schedule, group membership, a simple network
   configuration (if it's a single public interface), and a reference to any SSH key that's also
   registered on your Linode account, directly onto the resources themselves. This happens
-  automatically, for every managed instance, with nothing to configure.
+  automatically, for every managed instance, with nothing to configure. Hooks are referenced from
+  tags too: a pointer to each hook's stored copy, or (without Object Storage) a short command
+  written inline.
 - **Object Storage** (optional) — the same operations also back up a complete record of
   everything tags can't hold: a more complex network configuration (multiple interfaces, VPC,
   VLAN), any SSH key not registered on your Linode account, and the instance's plan/firewall/
-  placement-group/maintenance-policy/watchdog/label/tags. This layer only exists if you configure
-  it (below).
+  placement-group/maintenance-policy/watchdog/label/tags. It also holds every pre-stop hook and
+  post-start check (commands, script paths, and uploaded scripts, for instances and groups), each
+  stored under a fingerprint of its own content that the instance's tags point at. This layer only
+  exists if you configure it (below).
 
 Both are best-effort and self-healing: a failed backup never blocks the real stop/onboard
 operation, and the very next time that instance is touched, its full current state is backed up
@@ -402,7 +406,13 @@ python instance_manager.py hooks-show --name <name>      # what applies now, and
 ```
 
 The dashboard's Hooks card on each instance lists recent hook changes and runs; the API serves the
-same record at `GET /instances/{name}/hook-events`.
+same record at `GET /instances/{name}/hook-events`. An uploaded script is identified in that
+history by its size and a SHA-256 fingerprint, so you can tell exactly which version ran.
+
+With Object Storage configured, hooks are stored in your bucket under a `hooks/` prefix, named by a
+fingerprint of their own content and never overwritten. Treat write access to that bucket like
+shell access to your instances. `rebuild` refuses to restore any hook whose content no longer
+matches the fingerprint its tag records, so a modified object is detected rather than run.
 
 ### Rotating the Linode API token
 

@@ -914,18 +914,36 @@ def api_get_instance_hooks(name: str, user: str = Depends(require_session)) -> d
 
 @app.put("/instances/{name}/hooks")
 def api_set_instance_hooks(
-    name: str, body: HookConfigRequest, user: str = Depends(require_session),
+    name: str, body: HookConfigRequest, request: Request, user: str = Depends(require_session),
 ) -> dict:
-    return {"own": im.set_instance_hooks(
-        name, body.model_dump(), triggered_by="api", actor=user,
-    )}
+
+    own, warnings = _call_collecting_warnings(
+        lambda on_warning: im.set_instance_hooks(
+            name, body.model_dump(), triggered_by="api", actor=user,
+            client=_client(request), on_warning=on_warning,
+        )
+    )
+    result: dict = {"own": own}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 @app.delete("/instances/{name}/hooks")
-def api_clear_instance_hooks(name: str, user: str = Depends(require_session)) -> dict:
+def api_clear_instance_hooks(
+    name: str, request: Request, user: str = Depends(require_session),
+) -> dict:
     if name not in im.load_registry():
         raise im.NotOnboardedError(f"'{name}' is not onboarded.")
-    return {"cleared": im.clear_instance_hooks(name, triggered_by="api", actor=user)}
+    cleared, warnings = _call_collecting_warnings(
+        lambda on_warning: im.clear_instance_hooks(
+            name, triggered_by="api", actor=user, client=_client(request), on_warning=on_warning,
+        )
+    )
+    result: dict = {"cleared": cleared}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 @app.post("/instances/{name}/hooks/run")
@@ -956,16 +974,35 @@ def api_get_group_hooks(group_name: str, user: str = Depends(require_session)) -
 
 @app.put("/groups/{group_name}/hooks")
 def api_set_group_hooks(
-    group_name: str, body: HookConfigRequest, user: str = Depends(require_session),
+    group_name: str, body: HookConfigRequest, request: Request,
+    user: str = Depends(require_session),
 ) -> dict:
-    return {"hooks": im.set_group_hooks(
-        group_name, body.model_dump(), triggered_by="api", actor=user,
-    )}
+    hooks, warnings = _call_collecting_warnings(
+        lambda on_warning: im.set_group_hooks(
+            group_name, body.model_dump(), triggered_by="api", actor=user,
+            client=_client(request), on_warning=on_warning,
+        )
+    )
+    result: dict = {"hooks": hooks}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 @app.delete("/groups/{group_name}/hooks")
-def api_clear_group_hooks(group_name: str, user: str = Depends(require_session)) -> dict:
-    return {"cleared": im.clear_group_hooks(group_name, triggered_by="api", actor=user)}
+def api_clear_group_hooks(
+    group_name: str, request: Request, user: str = Depends(require_session),
+) -> dict:
+    cleared, warnings = _call_collecting_warnings(
+        lambda on_warning: im.clear_group_hooks(
+            group_name, triggered_by="api", actor=user, client=_client(request),
+            on_warning=on_warning,
+        )
+    )
+    result: dict = {"cleared": cleared}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 @app.get("/instances/{name}/schedule")

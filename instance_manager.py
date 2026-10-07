@@ -2048,6 +2048,16 @@ def onboard_instance(
 
 
         try:
+            _sync_hook_tags_locked(client, name, record, on_warning)
+        except Exception as e:
+            if on_warning is not None:
+                on_warning(
+                    f"  WARNING: could not sync hook tags for '{name}' onto its OS volume ({e}) "
+                    "-- hooks stay in effect locally; re-run hooks-set to retry."
+                )
+
+
+        try:
             matched_key_ids, _unmatched_keys = _classify_authorized_keys(
                 client, record["authorized_keys"],
             )
@@ -2226,7 +2236,7 @@ def start_instance(
     _validate_override_window_hours(override_window_hours)
     result = _start_instance_locked(
         client, name, ssh_key, triggered_by=triggered_by, override_window_hours=override_window_hours,
-        on_progress=on_progress, on_created=on_created, on_retry=on_retry,
+        on_progress=on_progress, on_created=on_created, on_retry=on_retry, on_warning=on_warning,
     )
     _record_start_event(name, result, triggered_by, on_warning, actor)
     if result.outcome == "started":
@@ -2302,6 +2312,7 @@ def _start_instance_locked(
     on_progress: Callable[[str], None] | None,
     on_created: Callable[[int], None] | None,
     on_retry: Callable[[int, int, Exception], None] | None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> StartResult:
     with _instance_lock(name):
 
@@ -2423,6 +2434,7 @@ def _start_instance_locked(
                 name, record, triggered_by, override_window_hours,
             )
             _save_one_record(name, record)
+            _refresh_recovery_tags_after_start(client, name, record, on_warning)
             return StartResult(
                 outcome="started", instance_id=instance_id, reserved_ip=record["reserved_ip"],
                 manual_override_expires_at=record["manual_override_expires_at"],
@@ -2496,10 +2508,36 @@ def _start_instance_locked(
             name, record, triggered_by, override_window_hours,
         )
         _save_one_record(name, record)
+        _refresh_recovery_tags_after_start(client, name, record, on_warning)
         return StartResult(
             outcome="started", instance_id=instance.id, reserved_ip=record["reserved_ip"],
             manual_override_expires_at=record["manual_override_expires_at"],
         )
+
+
+def _refresh_recovery_tags_after_start(
+    client, name: str, record: dict, on_warning: Callable[[str], None] | None,
+) -> None:
+
+    try:
+        engine.tag_managed_resources(
+            client, name, os_volume_id=record["os_volume_id"],
+            data_volume_ids=[dv["volume_id"] for dv in (record.get("data_volumes") or [])],
+            reserved_ip=record.get("reserved_ip"),
+        )
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(
+                f"  WARNING: could not refresh disaster-recovery tags for '{name}' after "
+                f"starting it ({e}) -- it's running normally; the next stop retries this."
+            )
+    try:
+        _sync_hook_tags_locked(client, name, record, on_warning)
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(
+                f"  WARNING: could not refresh hook tags for '{name}' after starting it ({e})."
+            )
 
 
 def _is_host_key_mismatch(e: Exception) -> bool:
@@ -2899,6 +2937,9 @@ def _stop_instance_locked(
         try:
             matched_key_ids, _unmatched_keys = _classify_authorized_keys(client, fresh_authorized_keys)
             _sync_extra_recovery_tags_locked(client, name, record, matched_key_ids)
+
+
+            _sync_hook_tags_locked(client, name, record, on_warning)
         except Exception as e:
             if on_warning is not None:
                 on_warning(
@@ -3036,8 +3077,15 @@ def _merge_hook_cli_args(existing: dict | None, args) -> dict:
     ):
         command = getattr(args, cmd_attr, None)
         timeout = getattr(args, timeout_attr, None)
+        script_path = getattr(args, f"{cmd_attr}_script", None)
+        script = None
+        if script_path is not None:
+            try:
+                script = Path(script_path).read_text()
+            except (OSError, UnicodeDecodeError) as e:
+                raise engine.ConfigError(f"could not read script file {script_path}: {e}") from e
         if getattr(args, clear_attr, False):
-            if command is not None or timeout is not None:
+            if command is not None or timeout is not None or script is not None:
                 raise engine.ConfigError(
                     f"--{clear_attr.replace('_', '-')} can't be combined with other "
                     f"--{hook_type.replace('_', '-')} options."
@@ -3047,13 +3095,22 @@ def _merge_hook_cli_args(existing: dict | None, args) -> dict:
         if command is not None:
 
 
-            config[hook_type] = {**(config[hook_type] or {}), "command": command}
+            config[hook_type] = {
+                **{k: v for k, v in (config[hook_type] or {}).items() if k != "script"},
+                "command": command,
+            }
+        if script is not None:
+            config[hook_type] = {
+                **{k: v for k, v in (config[hook_type] or {}).items() if k != "command"},
+                "script": script,
+            }
         if timeout is not None:
             entry = config[hook_type]
             if entry is None:
                 raise engine.ConfigError(
                     f"--{timeout_attr.replace('_', '-')} given but there's no "
-                    f"{hook_type.replace('_', '-')} hook -- also pass --{cmd_attr.replace('_', '-')}."
+                    f"{hook_type.replace('_', '-')} hook -- also pass --{cmd_attr.replace('_', '-')} "
+                    f"or --{cmd_attr.replace('_', '-')}-script."
                 )
             entry["timeout_s"] = timeout
     on_failure = getattr(args, "pre_stop_on_failure", None)
@@ -3067,15 +3124,19 @@ def _merge_hook_cli_args(existing: dict | None, args) -> dict:
     return config
 
 
-def cmd_hooks_set(args) -> int:
+def cmd_hooks_set(client, args) -> int:
     try:
         if args.group_name is not None:
             config = _merge_hook_cli_args(get_group_hooks(args.group_name), args)
-            normalized = set_group_hooks(args.group_name, config)
+            normalized = set_group_hooks(
+                args.group_name, config, client=client, on_warning=_print_to_stderr,
+            )
             target = f"group '{args.group_name}'"
         else:
             config = _merge_hook_cli_args(get_instance_hooks(args.name), args)
-            normalized = set_instance_hooks(args.name, config)
+            normalized = set_instance_hooks(
+                args.name, config, client=client, on_warning=_print_to_stderr,
+            )
             target = f"'{args.name}'"
     except InstanceLockedError as e:
         print(f"Configuration error: {e}", file=sys.stderr)
@@ -3108,15 +3169,15 @@ def cmd_hooks_show(args) -> int:
     return 0
 
 
-def cmd_hooks_clear(args) -> int:
+def cmd_hooks_clear(client, args) -> int:
     try:
         if args.group_name is not None:
-            cleared = clear_group_hooks(args.group_name)
+            cleared = clear_group_hooks(args.group_name, client=client, on_warning=_print_to_stderr)
             target = f"group '{args.group_name}'"
         else:
             if args.name not in load_registry():
                 raise NotOnboardedError(f"'{args.name}' is not onboarded.")
-            cleared = clear_instance_hooks(args.name)
+            cleared = clear_instance_hooks(args.name, client=client, on_warning=_print_to_stderr)
             target = f"'{args.name}'"
     except InstanceLockedError as e:
         print(f"Configuration error: {e}", file=sys.stderr)
@@ -3466,7 +3527,7 @@ def _encode_schedule_as_tags(schedule: dict, *, prefix: str = _SCHEDULE_TAG_PREF
 
 
 def _decode_schedule_from_tags(
-    tags: list[str] | None, *, prefix: str = _SCHEDULE_TAG_PREFIX
+    tags: list[str] | None, *, prefix: str = _SCHEDULE_TAG_PREFIX, allow_no_rules: bool = False,
 ) -> dict | None:
 
     tz_prefix, en_prefix, rule_prefix = f"{prefix}tz:", f"{prefix}en:", f"{prefix}r"
@@ -3494,7 +3555,7 @@ def _decode_schedule_from_tags(
                 "start_time": f"{start[:2]}:{start[2:]}",
                 "stop_time": f"{stop[:2]}:{stop[2:]}",
             }
-    if timezone is None or not rules_by_index:
+    if timezone is None or (not rules_by_index and not allow_no_rules):
         return None
     rules = [rules_by_index[i] for i in sorted(rules_by_index)]
     return {"timezone": timezone, "rules": rules, "enabled": enabled}
@@ -3673,6 +3734,15 @@ DEFAULT_PRE_STOP_HOOK_TIMEOUT_S = 300
 DEFAULT_POST_START_HOOK_TIMEOUT_S = 600
 MAX_HOOK_TIMEOUT_S = 3600
 MAX_HOOK_COMMAND_LENGTH = 4096
+
+
+MAX_HOOK_SCRIPT_BYTES = 1024 * 1024
+
+
+_HOOK_SCRIPT_RUNNER = (
+    'f=$(mktemp /tmp/linode-scheduler-hook.XXXXXX) && cat > "$f" && chmod 700 "$f" && "$f"; '
+    'rc=$?; rm -f "$f"; exit $rc'
+)
 POST_START_HOOK_RETRY_INTERVAL_S = 15
 HOOK_OUTPUT_TAIL_CHARS = 4096
 _HOOK_ON_FAILURE_VALUES = ("abort", "continue")
@@ -3696,18 +3766,36 @@ def _validate_hook_config(config: dict) -> dict:
             continue
         if not isinstance(hook, dict):
             raise engine.ConfigError(f"{hook_type} must be an object (or null to unset it).")
-        allowed = {"command", "timeout_s"} | ({"on_failure"} if hook_type == "pre_stop" else set())
+        allowed = {"command", "script", "timeout_s"} | (
+            {"on_failure"} if hook_type == "pre_stop" else set()
+        )
         extra = set(hook) - allowed
         if extra:
             raise engine.ConfigError(f"{hook_type}: unknown field(s) {sorted(extra)}.")
-        command = hook.get("command")
-        if not isinstance(command, str) or not command.strip():
-            raise engine.ConfigError(f"{hook_type}: command must be a non-empty string.")
-        if len(command) > MAX_HOOK_COMMAND_LENGTH:
+        has_command, has_script = hook.get("command") is not None, hook.get("script") is not None
+        if has_command == has_script:
             raise engine.ConfigError(
-                f"{hook_type}: command is {len(command)} characters; the limit is "
-                f"{MAX_HOOK_COMMAND_LENGTH}. Put a longer script on the instance and call it."
+                f"{hook_type}: set exactly one of command (run as-is on the instance, e.g. a "
+                "script already installed there) or script (uploaded script text)."
             )
+        if has_command:
+            command = hook["command"]
+            if not isinstance(command, str) or not command.strip():
+                raise engine.ConfigError(f"{hook_type}: command must be a non-empty string.")
+            if len(command) > MAX_HOOK_COMMAND_LENGTH:
+                raise engine.ConfigError(
+                    f"{hook_type}: command is {len(command)} characters; the limit is "
+                    f"{MAX_HOOK_COMMAND_LENGTH}. Upload it as a script instead."
+                )
+        else:
+            script = hook["script"]
+            if not isinstance(script, str) or not script.strip():
+                raise engine.ConfigError(f"{hook_type}: script must be non-empty text.")
+            size = len(script.encode("utf-8"))
+            if size > MAX_HOOK_SCRIPT_BYTES:
+                raise engine.ConfigError(
+                    f"{hook_type}: script is {size} bytes; the limit is {MAX_HOOK_SCRIPT_BYTES}."
+                )
         default_timeout = (
             DEFAULT_PRE_STOP_HOOK_TIMEOUT_S if hook_type == "pre_stop"
             else DEFAULT_POST_START_HOOK_TIMEOUT_S
@@ -3721,7 +3809,10 @@ def _validate_hook_config(config: dict) -> dict:
                 f"{hook_type}: timeout_s must be a whole number of seconds from 1 to "
                 f"{MAX_HOOK_TIMEOUT_S}."
             )
-        entry: dict = {"command": command, "timeout_s": timeout_s}
+        entry: dict = (
+            {"command": hook["command"]} if has_command else {"script": hook["script"]}
+        )
+        entry["timeout_s"] = timeout_s
         if hook_type == "pre_stop":
             on_failure = hook.get("on_failure", "abort")
             if on_failure not in _HOOK_ON_FAILURE_VALUES:
@@ -3818,16 +3909,41 @@ def _hook_config_summary(config: dict | None) -> str:
         if hook is None:
             continue
         extra = f", on_failure={hook['on_failure']}" if hook_type == "pre_stop" else ""
-        parts.append(f"{hook_type}={hook['command']!r} (timeout {hook['timeout_s']}s{extra})")
+        parts.append(f"{hook_type}={_hook_what(hook)} (timeout {hook['timeout_s']}s{extra})")
     return "; ".join(parts)
+
+
+def _hook_what(hook: dict) -> str:
+
+    if hook.get("script") is not None:
+        size = len(hook["script"].encode("utf-8"))
+        return f"<uploaded script, {size} bytes, sha256 {_entry_digest(hook)}>"
+    return repr(hook["command"])
+
+
+def _entry_digest(hook: dict) -> str:
+
+    return osb.hook_spec_digest({k: v for k, v in hook.items() if k != "source"})
+
+
+def _hook_exec(host: str, ssh_key: str, hook: dict, timeout_s: int) -> engine.SshExecResult:
+    if hook.get("script") is not None:
+        return engine.ssh_exec(
+            host, ssh_key, _HOOK_SCRIPT_RUNNER, timeout_s=timeout_s, stdin=hook["script"],
+        )
+    return engine.ssh_exec(host, ssh_key, hook["command"], timeout_s=timeout_s)
 
 
 def set_instance_hooks(
     name: str, config: dict, *,
     triggered_by: Literal["schedule", "manual", "api"] = "manual", actor: str | None = None,
+    client=None, on_warning: Callable[[str], None] | None = None,
 ) -> dict:
 
     normalized = _validate_hook_config(config)
+
+
+    _store_hook_entries(normalized)
     with _instance_lock(name):
         registry = load_registry()
         if name not in registry:
@@ -3838,6 +3954,7 @@ def set_instance_hooks(
         detail=_hook_config_summary(normalized),
     )
     osb.sync_object_storage_backup(name, _backup_payload(name, registry[name]))
+    _sync_hook_tags(client, name, on_warning)
     return normalized
 
 
@@ -3894,7 +4011,7 @@ def _restore_instance_hooks_from_backup(
 
 def clear_instance_hooks(
     name: str, *, triggered_by: Literal["schedule", "manual", "api"] = "manual",
-    actor: str | None = None,
+    actor: str | None = None, client=None, on_warning: Callable[[str], None] | None = None,
 ) -> bool:
 
     with _instance_lock(name):
@@ -3916,18 +4033,21 @@ def clear_instance_hooks(
         )
         if record is not None:
             osb.sync_object_storage_backup(name, _backup_payload(name, record))
+        _sync_hook_tags(client, name, on_warning)
     return cleared
 
 
 def set_group_hooks(
     group_name: str, config: dict, *,
     triggered_by: Literal["schedule", "manual", "api"] = "manual", actor: str | None = None,
+    client=None, on_warning: Callable[[str], None] | None = None,
 ) -> dict:
 
     normalized = _validate_hook_config(config)
     group = get_schedule_group(group_name)
     if group is None:
         raise GroupNotFoundError(f"no schedule group named '{group_name}'.")
+    _store_hook_entries(normalized)
 
     def _do():
         conn = _connect()
@@ -3952,12 +4072,14 @@ def set_group_hooks(
         "group", group_name, "config", triggered_by, "changed", actor=actor,
         detail=_hook_config_summary(normalized),
     )
+    for member in group["members"]:
+        _sync_hook_tags(client, member, on_warning)
     return normalized
 
 
 def clear_group_hooks(
     group_name: str, *, triggered_by: Literal["schedule", "manual", "api"] = "manual",
-    actor: str | None = None,
+    actor: str | None = None, client=None, on_warning: Callable[[str], None] | None = None,
 ) -> bool:
 
     group = get_schedule_group(group_name)
@@ -3979,6 +4101,8 @@ def clear_group_hooks(
             "group", group_name, "config", triggered_by, "changed", actor=actor,
             detail="group hooks cleared",
         )
+        for member in group["members"]:
+            _sync_hook_tags(client, member, on_warning)
     return cleared
 
 
@@ -4042,7 +4166,7 @@ def run_pre_stop_hook(
         return HookRunResult("pre_stop", ran=False, ok=True, summary="no pre-stop hook")
     if on_progress is not None:
         on_progress(f"  Running pre-stop hook ({hook['source']}, timeout {hook['timeout_s']}s)...")
-    result = engine.ssh_exec(host, ssh_key, hook["command"], timeout_s=hook["timeout_s"])
+    result = _hook_exec(host, ssh_key, hook, hook["timeout_s"])
     tail = _output_tail(result.stdout, result.stderr)
     if result.ok:
         summary = "pre-stop hook succeeded"
@@ -4083,7 +4207,7 @@ def run_post_start_hook(
     result: engine.SshExecResult | None = None
     while True:
         remaining = max(1, int(deadline - monotonic()))
-        result = engine.ssh_exec(host, ssh_key, hook["command"], timeout_s=remaining)
+        result = _hook_exec(host, ssh_key, hook, remaining)
         attempts += 1
         if result.ok:
             break
@@ -4124,6 +4248,204 @@ def _best_effort_hook_event(
     except Exception as e:
         if on_progress is not None:
             on_progress(f"  WARNING: could not record hook audit event for '{name}': {e}")
+
+
+_HOOK_TAG_CODES = {"pre_stop": "ps", "post_start": "pa"}
+_HOOK_SCOPES = ("hk", "hkg")
+_MAX_TAG_LENGTH_FOR_HOOKS = 50
+
+
+def _is_hook_tag(tag: str) -> bool:
+    return any(tag.startswith(f"{scope}-{code}") for scope in _HOOK_SCOPES
+               for code in _HOOK_TAG_CODES.values())
+
+
+def _hook_option_tag_value(hook_type: str, entry: dict) -> str:
+    if hook_type == "pre_stop":
+        return f"{entry['timeout_s']}:{'a' if entry['on_failure'] == 'abort' else 'c'}"
+    return str(entry["timeout_s"])
+
+
+def _encode_hook_tags(config: dict | None, scope: str, *, stored: bool) -> tuple[list[str], list[str]]:
+
+    tags: list[str] = []
+    unrecoverable: list[str] = []
+    for hook_type, code in _HOOK_TAG_CODES.items():
+        entry = (config or {}).get(hook_type)
+        if not entry:
+            continue
+        if stored:
+            tags.append(f"{scope}-{code}:{osb.hook_spec_digest(entry)}")
+            continue
+        command_tag = f"{scope}-{code}-c:{entry.get('command')}"
+        if entry.get("command") is not None and len(command_tag) <= _MAX_TAG_LENGTH_FOR_HOOKS:
+            tags += [command_tag, f"{scope}-{code}-o:{_hook_option_tag_value(hook_type, entry)}"]
+        else:
+            unrecoverable.append(hook_type)
+    return tags, unrecoverable
+
+
+def _decode_hook_tags(tags: list[str], scope: str) -> dict:
+
+    found: dict = {}
+    for hook_type, code in _HOOK_TAG_CODES.items():
+        ref = next((t.split(":", 1)[1] for t in tags if t.startswith(f"{scope}-{code}:")), None)
+        if ref:
+            found[hook_type] = ("ref", ref)
+            continue
+        command = next((t.split(":", 1)[1] for t in tags if t.startswith(f"{scope}-{code}-c:")), None)
+        options = next((t.split(":", 1)[1] for t in tags if t.startswith(f"{scope}-{code}-o:")), None)
+        if not command or options is None:
+            continue
+        parts = options.split(":")
+        try:
+            entry: dict = {"command": command, "timeout_s": int(parts[0])}
+        except ValueError:
+            continue
+        if hook_type == "pre_stop":
+            entry["on_failure"] = "continue" if parts[1:] == ["c"] else "abort"
+        found[hook_type] = ("inline", entry)
+    return found
+
+
+def _store_hook_entries(config: dict | None) -> bool:
+
+    if not osb.is_configured():
+        return False
+    for entry in (config or {}).values():
+        if not entry:
+            continue
+        try:
+            osb.upload_hook_spec({k: v for k, v in entry.items() if k != "source"})
+        except Exception as e:
+            raise engine.ConfigError(f"could not store the hook in Object Storage ({e})") from e
+    return True
+
+
+def _group_hooks_by_id(group_id: int | None) -> dict | None:
+    if group_id is None:
+        return None
+    return _read_hook_row("SELECT config FROM group_hooks WHERE group_id = ?", group_id)
+
+
+def _sync_hook_tags_locked(
+    client, name: str, record: dict, on_warning: Callable[[str], None] | None,
+) -> None:
+
+    if not record.get("os_volume_id"):
+        return
+    desired: list[str] = []
+    unrecoverable: list[str] = []
+    for scope, config in (("hk", get_instance_hooks(name)), ("hkg", _group_hooks_by_id(record.get("group_id")))):
+        if not config:
+            continue
+        try:
+            stored = _store_hook_entries(config)
+        except engine.ConfigError as e:
+            stored = False
+            if on_warning is not None:
+                on_warning(f"  WARNING: {e} -- falling back to inline tags for '{name}'.")
+        tags, missing = _encode_hook_tags(config, scope, stored=stored)
+        desired += tags
+        unrecoverable += [f"{'group ' if scope == 'hkg' else ''}{t.replace('_', '-')}" for t in missing]
+    if unrecoverable and on_warning is not None:
+        on_warning(
+            f"  WARNING: {', '.join(unrecoverable)} hook(s) for '{name}' can't be recorded in "
+            "Linode tags (an uploaded script, or a command over the tag length limit, with Object "
+            "Storage not configured) -- they're kept locally and in `backup` snapshots, but "
+            "`rebuild` alone won't restore them. Configure Object Storage to make them recoverable."
+        )
+    os_volume = engine.retry_transient(lambda: client.load(Volume, record["os_volume_id"]))
+    current = list(os_volume.tags or [])
+    new_tags = [t for t in current if not _is_hook_tag(t)] + desired
+    if new_tags != current:
+        os_volume.tags = new_tags
+        os_volume.save()
+        _verify_os_volume_tag_write(client, record["os_volume_id"], new_tags)
+
+
+def _sync_hook_tags(client, name: str, on_warning: Callable[[str], None] | None = None) -> None:
+
+    if client is None:
+        return
+    try:
+        with _instance_lock(name):
+            record = load_registry().get(name)
+            if record is None:
+                return
+            _sync_hook_tags_locked(client, name, record, on_warning)
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(
+                f"  WARNING: could not record hooks for '{name}' in its disaster-recovery tags "
+                f"({e}) -- the hooks are in effect locally; re-run hooks-set to retry."
+            )
+
+
+def _restore_hooks_from_tags(
+    client, name: str, record: dict, on_progress: Callable[[str], None] | None,
+    on_warning: Callable[[str], None] | None,
+) -> bool:
+
+    os_volume = engine.retry_transient(lambda: client.load(Volume, record["os_volume_id"]))
+    tags = list(os_volume.tags) if isinstance(os_volume.tags, list) else []
+    had_instance_hooks = False
+    for scope in _HOOK_SCOPES:
+        decoded = _decode_hook_tags(tags, scope)
+        if not decoded:
+            continue
+        if scope == "hk":
+            had_instance_hooks = True
+            if get_instance_hooks(name) is not None:
+                continue
+        else:
+            if record.get("group_id") is None or _group_hooks_by_id(record["group_id"]) is not None:
+                continue
+        config: dict = {}
+        for hook_type, (kind, value) in decoded.items():
+            entry = value if kind == "inline" else osb.download_hook_spec(value)
+            if entry is None:
+                if on_warning is not None:
+                    on_warning(
+                        f"  WARNING: '{name}': the {hook_type.replace('_', '-')} hook its tags point "
+                        f"at ({value}) couldn't be fetched from Object Storage or didn't match its "
+                        "digest -- not restored. Set it again with hooks-set."
+                    )
+                continue
+            config[hook_type] = entry
+        if not config:
+            continue
+        try:
+            normalized = _validate_hook_config(config)
+        except engine.ConfigError as e:
+            if on_warning is not None:
+                on_warning(f"  WARNING: '{name}': restored hook config is invalid ({e}) -- skipped.")
+            continue
+        summary = _hook_config_summary(normalized)
+        if scope == "hk":
+            _write_instance_hooks_row(name, normalized)
+            _record_hook_event("instance", name, "config", "manual", "changed",
+                               detail="restored by rebuild from tags: " + summary)
+        else:
+            def _write_group(gid=record["group_id"], cfg=normalized):
+                conn = _connect()
+                try:
+                    conn.execute(
+                        "INSERT INTO group_hooks (group_id, config) VALUES (?, ?)"
+                        " ON CONFLICT(group_id) DO UPDATE SET config = excluded.config",
+                        (gid, json.dumps(cfg)),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            _retry_db(_write_group)
+            group = _group_row_by_id(record["group_id"]) or {}
+            _record_hook_event("group", group.get("name", str(record["group_id"])), "config",
+                               "manual", "changed", detail="restored by rebuild from tags: " + summary)
+        if on_progress is not None:
+            target = "its own" if scope == "hk" else "its group's"
+            on_progress(f"  restored {target} hooks for '{name}' from tags: {summary}")
+    return had_instance_hooks
 
 
 def _parse_schedule_rules_from_cli_args(args) -> list | None:
@@ -4728,6 +5050,7 @@ def assign_instance_to_group(
 
         raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
     _sync_group_membership_tags(client, name, group, on_warning=on_warning)
+    _sync_hook_tags(client, name, on_warning)
     return group["id"]
 
 
@@ -4772,6 +5095,7 @@ def remove_instance_from_group(
 
         _retry_db(_do)
     _sync_group_membership_tags(client, name, None, on_warning=on_warning)
+    _sync_hook_tags(client, name, on_warning)
 
     if outcome == "removed_copied_schedule":
         if group is None:
@@ -5431,7 +5755,7 @@ def _hook_status_lines(name: str, record: dict) -> list[str]:
         policy = f", on failure: {hook['on_failure']}" if hook_type == "pre_stop" else ""
         lines.append(
             f"'{name}' {label} (from {hook['source']}, timeout {hook['timeout_s']}s{policy}): "
-            f"{hook['command']}"
+            f"{_hook_what(hook)}"
         )
     last_failure = get_last_hook_failure(name, "post_start")
     if last_failure is not None and record.get("current_status") == "running":
@@ -5766,7 +6090,6 @@ def rebuild_instances(
                 if existing is not None and record.get("group_id") is None:
                     record["group_id"] = existing.get("group_id")
                 _save_one_record(name, record)
-                _restore_instance_hooks_from_backup(name, on_warning)
 
                 if record.get("current_status") == "running" and on_warning is not None:
 
@@ -5830,7 +6153,8 @@ def rebuild_instances(
 
 
                                 snapshot = _decode_schedule_from_tags(
-                                    os_volume.tags, prefix=_GROUP_SCHEDULE_TAG_PREFIX
+                                    os_volume.tags, prefix=_GROUP_SCHEDULE_TAG_PREFIX,
+                                    allow_no_rules=True,
                                 )
                                 if snapshot is None:
                                     raise engine.ConfigError(
@@ -5840,12 +6164,14 @@ def rebuild_instances(
                                     )
 
 
-                                _validate_schedule_rules(snapshot["rules"])
+                                if snapshot["rules"]:
+                                    _validate_schedule_rules(snapshot["rules"])
                                 group_id = create_schedule_group(group_name, snapshot["timezone"])
-                                _set_group_schedule_row(
-                                    group_name, snapshot["timezone"], snapshot["rules"],
-                                    snapshot["enabled"],
-                                )
+                                if snapshot["rules"]:
+                                    _set_group_schedule_row(
+                                        group_name, snapshot["timezone"], snapshot["rules"],
+                                        snapshot["enabled"],
+                                    )
                                 if on_progress is not None:
                                     on_progress(
                                         f"  recreated group '{group_name}' from '{name}''s tags."
@@ -5875,6 +6201,21 @@ def rebuild_instances(
                                 f"could not be restored: {e} -- re-run group-add for it "
                                 "manually if it belonged to a group."
                             )
+
+
+                try:
+                    record["group_id"] = (load_registry().get(name) or {}).get("group_id")
+                    found_in_tags = _restore_hooks_from_tags(
+                        client, name, record, on_progress, on_warning,
+                    )
+                    if not found_in_tags:
+                        _restore_instance_hooks_from_backup(name, on_warning)
+                except Exception as e:
+                    if on_warning is not None:
+                        on_warning(
+                            f"  WARNING: '{name}' recovered, but its hooks could not be "
+                            f"restored: {e} -- set them again with hooks-set."
+                        )
         except InstanceLockedError as e:
             if on_warning is not None:
                 on_warning(f"  WARNING: {e} -- skipping '{name}' this pass, safe to re-run "
@@ -6466,12 +6807,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     hooks_set_parser = subparsers.add_parser(
         "hooks-set",
         help="Set an instance's or group's pre-stop hook and/or post-start check. Only the "
-        "options given change; others are kept. Commands run as root on the instance over SSH.",
+        "options given change; others are kept. Hooks run as root on the instance over SSH. "
+        "With Object Storage configured, every hook is also stored there and referenced from the "
+        "instance's tags, so `rebuild` can restore it after losing the local database.",
     )
     _add_hook_target(hooks_set_parser)
-    hooks_set_parser.add_argument(
+    pre_stop_what = hooks_set_parser.add_mutually_exclusive_group()
+    pre_stop_what.add_argument(
         "--pre-stop", metavar="COMMAND",
-        help="Run right before every stop (e.g. stop PostgreSQL cleanly).",
+        help="Run right before every stop (e.g. stop PostgreSQL cleanly) -- an inline command, "
+        "or the path of a script already installed on the instance.",
+    )
+    pre_stop_what.add_argument(
+        "--pre-stop-script", metavar="FILE",
+        help="Upload this local script file as the pre-stop hook (stored by the scheduler, "
+        f"copied to the instance and run each time; up to {MAX_HOOK_SCRIPT_BYTES // 1024} KB).",
     )
     hooks_set_parser.add_argument(
         "--pre-stop-timeout", type=int, metavar="SECONDS",
@@ -6483,10 +6833,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "continue: stop anyway.",
     )
     hooks_set_parser.add_argument("--clear-pre-stop", action="store_true")
-    hooks_set_parser.add_argument(
+    post_start_what = hooks_set_parser.add_mutually_exclusive_group()
+    post_start_what.add_argument(
         "--post-start", metavar="COMMAND",
         help="Readiness check run after every start, retried every "
-        f"{POST_START_HOOK_RETRY_INTERVAL_S}s until it succeeds or times out.",
+        f"{POST_START_HOOK_RETRY_INTERVAL_S}s until it succeeds or times out -- an inline "
+        "command, or the path of a script already installed on the instance.",
+    )
+    post_start_what.add_argument(
+        "--post-start-script", metavar="FILE",
+        help="Upload this local script file as the post-start check.",
     )
     hooks_set_parser.add_argument(
         "--post-start-timeout", type=int, metavar="SECONDS",
@@ -6736,12 +7092,8 @@ def _route(args) -> int:
         return cmd_reset_host_key(args)
     if args.command == "backup":
         return cmd_backup(args)
-    if args.command == "hooks-set":
-        return cmd_hooks_set(args)
     if args.command == "hooks-show":
         return cmd_hooks_show(args)
-    if args.command == "hooks-clear":
-        return cmd_hooks_clear(args)
     if args.command == "hooks-run":
         return cmd_hooks_run(args)
 
@@ -6786,6 +7138,10 @@ def _route(args) -> int:
         return cmd_group_add(client, args)
     if args.command == "group-remove":
         return cmd_group_remove(client, args)
+    if args.command == "hooks-set":
+        return cmd_hooks_set(client, args)
+    if args.command == "hooks-clear":
+        return cmd_hooks_clear(client, args)
 
     return 1
 

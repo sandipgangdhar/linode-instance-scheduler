@@ -169,12 +169,14 @@ export const VALID_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as c
 export type Weekday = (typeof VALID_DAYS)[number]
 export type HookFailurePolicy = 'abort' | 'continue'
 export interface PreStopHook {
-  command: string
+  command?: string
+  script?: string
   timeout_s: number
   on_failure: HookFailurePolicy
 }
 export interface PostStartHook {
-  command: string
+  command?: string
+  script?: string
   timeout_s: number
 }
 export interface HookConfig {

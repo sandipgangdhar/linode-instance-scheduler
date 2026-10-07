@@ -77,3 +77,32 @@ test('saving hooks sends the normalized config', async ({ page }) => {
     post_start: { command: 'pg_isready -q', timeout_s: 120 },
   })
 })
+test('a hook can be an uploaded script file instead of a command', async ({ page }) => {
+  await loginAs(page)
+  await mockInstanceList(page, { 'pg-1': baseInstanceRecord({ label: 'pg-1' }) })
+  await mockGroupList(page)
+  let putBody: Record<string, unknown> | null = null
+  await page.route('**/instances/pg-1/hooks', async (route: Route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    putBody = route.request().postDataJSON() as Record<string, unknown>
+    await route.fulfill({ json: { own: putBody } })
+  })
+  await page.goto('/ui/#/instances/pg-1')
+  await page.getByRole('radiogroup', { name: 'Pre-stop hook type' }).getByLabel('Upload a script').check()
+  await page.getByLabel('Pre-stop script file').setInputFiles({
+    name: 'before-stop.sh',
+    mimeType: 'text/x-shellscript',
+    buffer: Buffer.from('#!/bin/bash\npg_ctlcluster 16 main stop -m fast\n'),
+  })
+  await expect(page.getByLabel('Pre-stop script', { exact: true })).toHaveValue(/pg_ctlcluster 16 main stop/)
+  await page.getByRole('button', { name: 'Save hooks' }).click()
+  await expect.poll(() => putBody).not.toBeNull()
+  expect(putBody).toEqual({
+    pre_stop: {
+      script: '#!/bin/bash\npg_ctlcluster 16 main stop -m fast\n',
+      timeout_s: 300,
+      on_failure: 'abort',
+    },
+    post_start: null,
+  })
+})

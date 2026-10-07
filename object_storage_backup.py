@@ -122,6 +122,68 @@ def upload_instance_backup(
     _retry(_do, attempts=attempts, delay_s=delay_s)
 
 
+HOOK_DIGEST_LENGTH = 32
+
+
+def hook_spec_bytes(entry: dict) -> bytes:
+
+    return json.dumps(entry, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def hook_spec_digest(entry: dict) -> str:
+    return hashlib.sha256(hook_spec_bytes(entry)).hexdigest()[:HOOK_DIGEST_LENGTH]
+
+
+def _hook_object_key(digest: str) -> str:
+    return f"hooks/{digest}.json"
+
+
+def upload_hook_spec(
+    entry: dict, *, attempts: int = DEFAULT_ATTEMPTS, delay_s: float = DEFAULT_DELAY_S
+) -> str:
+
+    client = build_object_storage_client()
+    if client is None:
+        raise ObjectStorageError("Object Storage is not configured (LINODE_OBJ_STORAGE_* unset)")
+    bucket = _cached_bucket
+    body = hook_spec_bytes(entry)
+    digest = hashlib.sha256(body).hexdigest()[:HOOK_DIGEST_LENGTH]
+    md5_hex = hashlib.md5(body).hexdigest()
+
+    def _do():
+        response = client.put_object(
+            Bucket=bucket, Key=_hook_object_key(digest), Body=body,
+            ContentType="application/json", Metadata={_MD5_METADATA_KEY: md5_hex},
+        )
+        etag = response.get("ETag", "").strip('"')
+        if etag and etag != md5_hex:
+            raise ObjectStorageError(
+                f"hook spec {digest} did not verify: expected ETag {md5_hex}, got {etag}."
+            )
+
+    _retry(_do, attempts=attempts, delay_s=delay_s)
+    return digest
+
+
+def download_hook_spec(digest: str) -> dict | None:
+
+    client = build_object_storage_client()
+    if client is None:
+        return None
+    try:
+        response = _retry(lambda: client.get_object(Bucket=_cached_bucket, Key=_hook_object_key(digest)))
+    except (ClientError, BotoCoreError, ObjectStorageError):
+        return None
+    body = response["Body"].read()
+    if hashlib.sha256(body).hexdigest()[:HOOK_DIGEST_LENGTH] != digest:
+        return None
+    try:
+        entry = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
 def snapshot_database(db_path: Path, dest_path: Path) -> None:
 
     source = sqlite3.connect(db_path)

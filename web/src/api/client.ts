@@ -252,6 +252,7 @@ export const api = {
   setInstanceHooks: (name: string, config: HookConfig) =>
     request<{
       own: HookConfig
+      warnings?: string[]
     }>('PUT', `/instances/${encodeURIComponent(name)}/hooks`, config),
   clearInstanceHooks: (name: string) =>
     request<{
@@ -268,6 +269,7 @@ export const api = {
   setGroupHooks: (name: string, config: HookConfig) =>
     request<{
       hooks: HookConfig
+      warnings?: string[]
     }>('PUT', `/groups/${encodeURIComponent(name)}/hooks`, config),
   clearGroupHooks: (name: string) =>
     request<{

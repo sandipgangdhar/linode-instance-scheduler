@@ -274,7 +274,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `poll` | Runs the scheduler — checks every node's individual AND group schedule and starts/stops it if due, and auto-reverts any expired manual override. Run it continuously (the normal way), or `--once` from cron. See §8.5/§8.6/§8.7. |
 | `serve-api` | Runs the optional REST API server — the same capabilities as the CLI, over HTTP, with "Login with Linode" auth. See §8.8. |
 | `extend` | Pushes an active manual-override auto-stop timer further out. See §8.7. |
-| `hooks-set` | Sets a node's (or a group's) pre-stop hook and/or post-start check — your own commands, run on the node right before every stop and right after every start. See §8.12. |
+| `hooks-set` | Sets a node's (or a group's) pre-stop hook and/or post-start check — your own command, script path, or uploaded script, run on the node right before every stop and right after every start. See §8.12. |
 | `hooks-show` | Shows a node's own hooks and the ones that actually apply to it (its own, or inherited from its group), or a group's hooks. |
 | `hooks-clear` | Removes a node's own hooks (its group's then apply), or a group's hooks. |
 | `hooks-run` | Runs a node's hook right now, without starting or stopping it — to test a hook, or re-run a failed post-start check after fixing the cause. |
@@ -724,7 +724,7 @@ Your local registry (the file this tool keeps track of your nodes in) lives only
 machine you run it from. If that machine is ever lost entirely — hard drive failure, an
 accidentally wiped laptop, whatever — this command gets you back.
 
-**How it works**: every time you `onboard` or `stop` a node, this tool tags that node's OS
+**How it works**: every time you `onboard`, `start`, or `stop` a node, this tool tags that node's OS
 volume, data volume(s), and reserved IP directly in your Linode account with the mapping
 ("these resources belong to `redis-standby-1`"). That's the one piece of information that isn't
 recoverable from Linode's API on its own — everything else about a node (its network config,
@@ -1232,14 +1232,30 @@ python instance_manager.py hooks-set --name pg-1 \
     --post-start "pg_isready -q"
 ```
 
+A hook can be given two ways:
+
+- **A command** — run as-is on the node. That's either an inline command (`pg_isready -q`) or the
+  path of a script you already ship on the node, for example with your own image or configuration
+  management (`/opt/app/hooks/before-stop.sh`). The script itself stays on the node's OS volume,
+  which survives every stop/start.
+- **An uploaded script** — the script text itself, stored by this tool. Each time the hook runs,
+  it's copied to a temporary file on the node, run (its own `#!` line picks the interpreter), and
+  deleted afterward. Up to 1 MB.
+
+```
+python instance_manager.py hooks-set --name pg-1 --pre-stop-script ./before-stop.sh
+```
+
 Options (only the ones you pass change; anything already set is kept):
 
 | Option | Meaning |
 |---|---|
-| `--pre-stop COMMAND` | The pre-stop hook. |
+| `--pre-stop COMMAND` | The pre-stop hook, as a command or a path on the node. |
+| `--pre-stop-script FILE` | The pre-stop hook, as an uploaded script (read from a local file). |
 | `--pre-stop-timeout SECONDS` | How long it may run (default 300, max 3600). |
 | `--pre-stop-on-failure abort\|continue` | What happens if it fails — see below (default `abort`). |
-| `--post-start COMMAND` | The post-start check. |
+| `--post-start COMMAND` | The post-start check, as a command or a path on the node. |
+| `--post-start-script FILE` | The post-start check, as an uploaded script. |
 | `--post-start-timeout SECONDS` | Total time allowed for the check to pass (default 600, max 3600). |
 | `--clear-pre-stop` / `--clear-post-start` | Remove just that one hook. |
 
@@ -1249,8 +1265,9 @@ so a node can set its own post-start check and still use the group's pre-stop ho
 `hooks-show --name pg-1` shows both its own hooks and the ones that actually apply, including
 which group each inherited one comes from.
 
-For anything longer than a one-liner, put a script on the node and call it
-(`--pre-stop /usr/local/bin/before-stop.sh`). A command can be up to 4096 characters.
+A command can be up to 4096 characters; for anything longer, upload it as a script or ship it on
+the node and give its path. A timed-out hook's command is not killed on the node — if you need a
+hard limit there, wrap your command in `timeout`.
 
 **What happens if a hook fails.** A hook fails when its command exits with a non-zero code, runs
 past its timeout, or the node can't be reached over SSH to run it at all.
@@ -1285,11 +1302,25 @@ hook stops stays stopped until you restart it.
 changed it, when, and what it was changed to) is recorded. The dashboard's Hooks card on each node
 shows this, and the API exposes it at `GET /instances/{name}/hook-events`.
 
-**Backups.** Hooks are stored in the local database alongside schedules and groups, so `backup`
-(§8.10) covers them. With Object Storage backups configured, each node's own hooks are also
-included in its per-node backup, and `rebuild` restores them. Hook commands are not stored in
-Linode tags (tags are limited to 50 characters), so after losing the local database with no
-backup of either kind, hooks need to be set again.
+**Recovering hooks after losing the local database.** Hooks are kept in the local database
+alongside schedules and groups (so `backup`, §8.10, covers them), and are also recorded where
+`rebuild` can find them with no local database at all:
+
+- **With Object Storage configured (recommended):** every hook — command, script path, or uploaded
+  script, for a node or a group — is stored in your bucket, and the node's OS volume gets a short
+  tag pointing at it (`hk-…` for its own hooks, `hkg-…` for its group's). `rebuild` reads the tags,
+  fetches each hook, checks that its content matches the fingerprint in the tag, and restores it
+  on the right node and group. A hook is stored in Object Storage *before* it takes effect: if that
+  write fails, the change is refused and nothing changes, so a configured hook is always
+  recoverable.
+- **Without Object Storage:** a short command (up to about 40 characters, such as a script path)
+  is written directly into the node's tags and restored the same way. A longer command or an
+  uploaded script can't fit in a tag, so it's kept locally only — `hooks-set` warns when that
+  happens, and only a `backup` snapshot can bring it back.
+
+Hooks are never stored on the node by this tool (an uploaded script only exists there while it
+runs), and the fingerprint check means a hook can't be swapped for different content in your bucket
+or by editing a tag without `rebuild` refusing to restore it.
 
 ## 9. Costs
 

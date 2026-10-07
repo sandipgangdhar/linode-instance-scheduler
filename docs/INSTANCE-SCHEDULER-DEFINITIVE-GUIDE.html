@@ -495,7 +495,9 @@ pre.code .m{color:var(--code-mut)}
           <span class="co-label">A hook is never undone</span>
           If a pre-stop hook performs several steps and fails partway, the tool doesn't attempt to reverse what it already did &mdash; a script that needs to leave its services running after a failure should restore them itself before exiting non-zero.
         </div>
-        <p>Every hook run and every hook change &mdash; who made it, when, and the new command &mdash; is recorded in the instance's hook history. Hook configuration is stored in the local database alongside schedules and groups, and included in Object Storage backups; it is not encoded in resource tags, which are too short to hold a command.</p>
+        <p>A hook is either a <strong>command</strong> run as-is on the instance &mdash; an inline command, or the path of a script you already ship on it &mdash; or an <strong>uploaded script</strong>, stored by the tool, copied to a temporary file on the instance each time it runs, executed under the interpreter its own first line names, and deleted afterward.</p>
+        <p>Hooks are recoverable after a total loss of the local database, the same way schedules and group membership are. With Object Storage configured, every hook is stored in the bucket under a fingerprint of its own content, and the instance's OS volume carries a short tag pointing at it; recovery reads the tag, fetches the hook, confirms the content still matches the fingerprint, and restores it on the right instance and group. A hook is written to Object Storage before it takes effect &mdash; if that write fails, the change is refused &mdash; so a configured hook is always a recoverable one. Without Object Storage, a short command is recorded in tags directly; a longer command or an uploaded script is kept locally only, with a warning when it's set.</p>
+        <p>Every hook run and every hook change &mdash; who made it, when, and what it was changed to (an uploaded script identified by its size and fingerprint) &mdash; is recorded in the instance's hook history.</p>
       </section>
 
       <!-- ============ PART V ============ -->
@@ -509,7 +511,7 @@ pre.code .m{color:var(--code-mut)}
       <section class="chapter" id="c5-1">
         <h2><span class="chno">5.1</span> The Registry, and Why It Can Be Rebuilt From Nothing</h2>
         <p class="lede">Every managed instance's identity &mdash; which OS volume, which data volumes, which reserved IP, which schedule, which group &mdash; lives in one local database. Losing that file would normally mean losing the only record of which real Linode resources belong to which logical instance, with no way to reconstruct it.</p>
-        <p>This tool avoids that with two independent, layered backups, neither of which the local database ever depends on to function day to day. The first is Linode's own resource tags: the same identifying information is written directly onto the OS volume, each data volume, and the reserved IP themselves, every time an instance is onboarded or stopped. The second, optional layer is Object Storage: a single, complete backup of everything about the instance that tags can't hold, written to a bucket you control. The local database is always the fast, authoritative source of truth for day-to-day operation &mdash; recovery only ever reads from tags or Object Storage when that database itself is gone or unreadable, never otherwise.</p>
+        <p>This tool avoids that with two independent, layered backups, neither of which the local database ever depends on to function day to day. The first is Linode's own resource tags: the same identifying information is written directly onto the OS volume, each data volume, and the reserved IP themselves, every time an instance is onboarded, started, or stopped &mdash; so tags removed or edited out of band are put back within one start/stop cycle. The second, optional layer is Object Storage: a single, complete backup of everything about the instance that tags can't hold, written to a bucket you control. The local database is always the fast, authoritative source of truth for day-to-day operation &mdash; recovery only ever reads from tags or Object Storage when that database itself is gone or unreadable, never otherwise.</p>
         <div class="callout">
           <span class="co-label">Who answers "what's the truth" at any given moment</span>
           The local database, without exception, whenever it's readable. Tags and Object Storage are never consulted during ordinary operation &mdash; not by the poller, not by a manual start or stop, not by the dashboard. They exist purely so the recovery command has somewhere to read from on the one occasion the local database itself is the thing that's broken.
@@ -531,6 +533,7 @@ pre.code .m{color:var(--code-mut)}
           <tr><td>An SSH key registered nowhere on the account</td><td>&mdash;</td><td>Yes, if configured</td></tr>
           <tr><td>Plan, firewall, placement group, maintenance policy, watchdog</td><td>&mdash;</td><td>Yes, if configured</td></tr>
           <tr><td>Label, and the customer's own Linode tags</td><td>&mdash;</td><td>Yes, if configured</td></tr>
+          <tr><td>Pre-stop hooks and post-start checks (instance and group)</td><td>A content fingerprint pointing at the stored copy; without Object Storage, a short command written inline</td><td>Yes, if configured &mdash; every command, script path, and uploaded script</td></tr>
           <tr><td>An armed manual-override timer</td><td>&mdash;</td><td>&mdash;</td></tr>
           <tr><td>Audit/history log</td><td>&mdash;</td><td>&mdash;</td></tr>
         </tbody></table></div>
@@ -621,7 +624,7 @@ pre.code .m{color:var(--code-mut)}
           <tr><td><code>schedule-clear</code></td><td>Removes an instance's individual schedule &mdash; it then falls back to its group's schedule, if it belongs to one.</td></tr>
           <tr><td><code>extend</code></td><td>Pushes an active manual-override countdown forward by another window.</td></tr>
           <tr><td><code>poll</code></td><td>Runs the scheduler loop &mdash; continuously by default, or a single evaluation pass with <code>--once</code>.</td></tr>
-          <tr><td><code>hooks-set</code></td><td>Sets an instance's or group's pre-stop hook and/or post-start check, with timeouts and the pre-stop failure policy (Part IV.3). Only the options given change.</td></tr>
+          <tr><td><code>hooks-set</code></td><td>Sets an instance's or group's pre-stop hook and/or post-start check &mdash; a command, a script path on the instance, or an uploaded script file &mdash; with timeouts and the pre-stop failure policy (Part IV.3). Only the options given change.</td></tr>
           <tr><td><code>hooks-show</code></td><td>Shows an instance's own hooks and the ones that actually apply to it, including which group an inherited one comes from &mdash; or a group's hooks.</td></tr>
           <tr><td><code>hooks-clear</code></td><td>Removes an instance's own hooks (its group's then apply), or a group's hooks.</td></tr>
           <tr><td><code>hooks-run</code></td><td>Runs an instance's hook immediately, without starting or stopping it &mdash; to test it, or to re-run a failed post-start check.</td></tr>

@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import type { EffectiveHooks, HookConfig, HookEvent, HookFailurePolicy, HookRunResult } from '../api/types'
-import { Button, Card, CardHeader, ErrorBanner, Spinner } from './ui'
+import { Button, Card, CardHeader, ErrorBanner, Spinner, WarningBanner } from './ui'
 const DEFAULT_PRE_STOP_TIMEOUT_S = 300
 const DEFAULT_POST_START_TIMEOUT_S = 600
 const MAX_TIMEOUT_S = 3600
+const MAX_SCRIPT_BYTES = 1024 * 1024
+type HookMode = 'command' | 'script'
 export type HooksTarget =
   | {
       kind: 'instance'
@@ -38,6 +40,11 @@ export function HooksCard({
   const [lastFailure, setLastFailure] = useState<HookEvent | null>(null)
   const [events, setEvents] = useState<HookEvent[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [preStopMode, setPreStopMode] = useState<HookMode>('command')
+  const [preStopScript, setPreStopScript] = useState('')
+  const [postStartMode, setPostStartMode] = useState<HookMode>('command')
+  const [postStartScript, setPostStartScript] = useState('')
+  const [saveWarnings, setSaveWarnings] = useState<string[] | null>(null)
   const [preStopCommand, setPreStopCommand] = useState('')
   const [preStopTimeout, setPreStopTimeout] = useState(String(DEFAULT_PRE_STOP_TIMEOUT_S))
   const [preStopOnFailure, setPreStopOnFailure] = useState<HookFailurePolicy>('abort')
@@ -48,6 +55,10 @@ export function HooksCard({
   const [actionError, setActionError] = useState<string | null>(null)
   const [runResult, setRunResult] = useState<HookRunResult | null>(null)
   const seedForm = (config: HookConfig | null) => {
+    setPreStopMode(config?.pre_stop?.script != null ? 'script' : 'command')
+    setPreStopScript(config?.pre_stop?.script ?? '')
+    setPostStartMode(config?.post_start?.script != null ? 'script' : 'command')
+    setPostStartScript(config?.post_start?.script ?? '')
     setPreStopCommand(config?.pre_stop?.command ?? '')
     setPreStopTimeout(String(config?.pre_stop?.timeout_s ?? DEFAULT_PRE_STOP_TIMEOUT_S))
     setPreStopOnFailure(config?.pre_stop?.on_failure ?? 'abort')
@@ -94,18 +105,35 @@ export function HooksCard({
     }
     return n
   }
-  const buildConfig = (): HookConfig => ({
-    pre_stop: preStopCommand.trim()
-      ? {
-          command: preStopCommand,
-          timeout_s: parseTimeout(preStopTimeout, 'Pre-stop'),
-          on_failure: preStopOnFailure,
-        }
-      : null,
-    post_start: postStartCommand.trim()
-      ? { command: postStartCommand, timeout_s: parseTimeout(postStartTimeout, 'Post-start') }
-      : null,
-  })
+  const what = (
+    mode: HookMode,
+    command: string,
+    script: string,
+  ):
+    | {
+        command: string
+      }
+    | {
+        script: string
+      }
+    | null => {
+    if (mode === 'script') {
+      if (!script.trim()) return null
+      if (new Blob([script]).size > MAX_SCRIPT_BYTES) throw new Error('A hook script can be at most 1 MB.')
+      return { script }
+    }
+    return command.trim() ? { command } : null
+  }
+  const buildConfig = (): HookConfig => {
+    const pre = what(preStopMode, preStopCommand, preStopScript)
+    const post = what(postStartMode, postStartCommand, postStartScript)
+    return {
+      pre_stop: pre
+        ? { ...pre, timeout_s: parseTimeout(preStopTimeout, 'Pre-stop'), on_failure: preStopOnFailure }
+        : null,
+      post_start: post ? { ...post, timeout_s: parseTimeout(postStartTimeout, 'Post-start') } : null,
+    }
+  }
   async function act(kind: 'save' | 'clear' | 'run', fn: () => Promise<void>) {
     if (busyRef.current) return
     busyRef.current = true
@@ -124,9 +152,13 @@ export function HooksCard({
   }
   const save = () =>
     act('save', async () => {
+      setSaveWarnings(null)
       const config = buildConfig()
-      if (target.kind === 'instance') await api.setInstanceHooks(target.name, config)
-      else await api.setGroupHooks(target.name, config)
+      const result =
+        target.kind === 'instance'
+          ? await api.setInstanceHooks(target.name, config)
+          : await api.setGroupHooks(target.name, config)
+      if (mountedRef.current && result.warnings?.length) setSaveWarnings(result.warnings)
       const fresh = await load()
       if (mountedRef.current && fresh !== undefined) seedForm(fresh)
     })
@@ -146,9 +178,10 @@ export function HooksCard({
       setRunResult(result)
       await load()
     })
-  const inherited = (hookType: 'pre_stop' | 'post_start') => {
+  const inheritedLabel = (hookType: 'pre_stop' | 'post_start'): string | null => {
     const hook = effective?.[hookType]
-    return hook && hook.source === 'group' ? hook : null
+    if (!hook || hook.source !== 'group') return null
+    return hook.script != null ? 'an uploaded script' : (hook.command ?? '')
   }
   const hasOwn = own !== null && (own.pre_stop !== null || own.post_start !== null)
   const effectivePostStart = effective?.post_start ?? null
@@ -195,17 +228,16 @@ export function HooksCard({
             <p className="text-xs text-slate-500">
               Runs once, right before the instance is shut down and deleted (e.g. stop a database cleanly).
             </p>
-            <textarea
-              aria-label="Pre-stop command"
-              rows={2}
-              className={`${inputClass} font-mono`}
-              placeholder={
-                inherited('pre_stop')
-                  ? `Inherited from group: ${inherited('pre_stop')!.command}`
-                  : 'e.g. pg_ctlcluster 16 main stop -m fast'
-              }
-              value={preStopCommand}
-              onChange={(e) => setPreStopCommand(e.target.value)}
+            <HookWhat
+              label="Pre-stop"
+              mode={preStopMode}
+              onMode={setPreStopMode}
+              command={preStopCommand}
+              onCommand={setPreStopCommand}
+              script={preStopScript}
+              onScript={setPreStopScript}
+              inherited={inheritedLabel('pre_stop')}
+              example="e.g. pg_ctlcluster 16 main stop -m fast, or /opt/app/hooks/before-stop.sh"
             />
             <div className="flex flex-wrap gap-4">
               <label className="block text-xs font-medium text-slate-500">
@@ -241,17 +273,16 @@ export function HooksCard({
               Runs after the instance is reachable, retried every 15 seconds until it succeeds or times out. A
               failure never stops the instance — it's flagged for someone to look at.
             </p>
-            <textarea
-              aria-label="Post-start command"
-              rows={2}
-              className={`${inputClass} font-mono`}
-              placeholder={
-                inherited('post_start')
-                  ? `Inherited from group: ${inherited('post_start')!.command}`
-                  : 'e.g. pg_isready -q'
-              }
-              value={postStartCommand}
-              onChange={(e) => setPostStartCommand(e.target.value)}
+            <HookWhat
+              label="Post-start"
+              mode={postStartMode}
+              onMode={setPostStartMode}
+              command={postStartCommand}
+              onCommand={setPostStartCommand}
+              script={postStartScript}
+              onScript={setPostStartScript}
+              inherited={inheritedLabel('post_start')}
+              example="e.g. pg_isready -q, or /opt/app/hooks/ready.sh"
             />
             <label className="block text-xs font-medium text-slate-500">
               Timeout (seconds, total)
@@ -268,6 +299,7 @@ export function HooksCard({
           </fieldset>
 
           {actionError && <ErrorBanner message={actionError} />}
+          {saveWarnings && <WarningBanner messages={saveWarnings} />}
           {runResult && (
             <div
               className={`rounded-md px-3 py-2 text-xs ${runResult.ok ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-800'}`}
@@ -318,6 +350,80 @@ export function HooksCard({
         </div>
       )}
     </Card>
+  )
+}
+function HookWhat({
+  label,
+  mode,
+  onMode,
+  command,
+  onCommand,
+  script,
+  onScript,
+  inherited,
+  example,
+}: {
+  label: string
+  mode: HookMode
+  onMode: (m: HookMode) => void
+  command: string
+  onCommand: (v: string) => void
+  script: string
+  onScript: (v: string) => void
+  inherited: string | null
+  example: string
+}) {
+  const [fileError, setFileError] = useState<string | null>(null)
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-4 text-xs text-slate-600" role="radiogroup" aria-label={`${label} hook type`}>
+        <label className="flex items-center gap-1">
+          <input type="radio" checked={mode === 'command'} onChange={() => onMode('command')} />
+          Command or script path on the instance
+        </label>
+        <label className="flex items-center gap-1">
+          <input type="radio" checked={mode === 'script'} onChange={() => onMode('script')} />
+          Upload a script
+        </label>
+      </div>
+      {mode === 'command' ? (
+        <textarea
+          aria-label={`${label} command`}
+          rows={2}
+          className={`${inputClass} font-mono`}
+          placeholder={inherited !== null ? `Inherited from group: ${inherited}` : example}
+          value={command}
+          onChange={(e) => onCommand(e.target.value)}
+        />
+      ) : (
+        <>
+          <textarea
+            aria-label={`${label} script`}
+            rows={6}
+            className={`${inputClass} font-mono`}
+            placeholder={'#!/bin/bash\n# Stored by the scheduler, copied to the instance and run each time.'}
+            value={script}
+            onChange={(e) => onScript(e.target.value)}
+          />
+          <input
+            aria-label={`${label} script file`}
+            type="file"
+            className="block text-xs text-slate-600"
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              setFileError(null)
+              if (!file) return
+              if (file.size > MAX_SCRIPT_BYTES) {
+                setFileError('That file is larger than 1 MB.')
+                return
+              }
+              void file.text().then(onScript)
+            }}
+          />
+          {fileError && <p className="text-xs text-red-600">{fileError}</p>}
+        </>
+      )}
+    </div>
   )
 }
 function hookLabel(hook: HookEvent['hook']): string {

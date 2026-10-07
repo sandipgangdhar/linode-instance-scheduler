@@ -1100,6 +1100,7 @@ _SSH_CONNECTION_FAILURE_EXIT = 255
 def ssh_exec(
     host: str, ssh_key_path: str, command: str, *, timeout_s: int,
     connect_timeout_s: int = 10, known_hosts_path: str | Path | None = None,
+    stdin: str | None = None,
 ) -> SshExecResult:
 
     if known_hosts_path is None:
@@ -1123,6 +1124,7 @@ def ssh_exec(
             text=True,
             check=False,
             timeout=timeout_s,
+            input=stdin,
         )
     except subprocess.TimeoutExpired as e:
         def _text(v) -> str:
