@@ -483,18 +483,18 @@ pre.code .m{color:var(--code-mut)}
 
       <section class="chapter" id="c3-4">
         <h2><span class="chno">3.4</span> Start Order Between Groups</h2>
-        <p class="lede">A group can depend on one other group, so that applications start only after the services they need are up, and stop before those services go down.</p>
+        <p class="lede">A group can depend on one or more other groups, so that applications start only after every service they need is up, and stop before those services go down.</p>
         <p>Without an order, every instance due at the same time starts independently: an application server can finish booting before its database and fail to connect. Making the application group depend on the database group changes that. When the application group's members are due to start, the poller holds them &mdash; reported as <em>waiting on dependency</em> &mdash; until every member of the database group is running, is not mid-transition, and, where that group has a post-start check (Part IV.3), has passed that check since its latest start. On the way down the order reverses: the database group's members wait until every member of the application group is stopped.</p>
         <p>The wait is re-evaluated on every poller cycle and is bounded by the same catch-up window as any other scheduled action (one hour by default). If the database group never becomes ready within that window, the dependent group is not started that day. A post-start check that has not reported back is given its own configured timeout plus two minutes before it stops holding dependents.</p>
         <table><thead><tr><th>Rule</th><th>Behavior</th></tr></thead><tbody>
-          <tr><td>How many</td><td>A group depends on at most one other group; chains such as web &rarr; app &rarr; database are allowed</td></tr>
-          <tr><td>Refused</td><td>A group depending on itself, any change that would form a cycle, and deleting a group that others still depend on</td></tr>
+          <tr><td>How many</td><td>A group can depend on several groups and waits for all of them; several groups can depend on the same one, which then waits for all of them to stop. Chains and diamonds of any depth are allowed</td></tr>
+          <tr><td>Refused</td><td>A group depending on itself, any change that would form a cycle through any path, and deleting a group that others still depend on</td></tr>
           <tr><td>Who is held</td><td>Every member of the dependent group, including a member that follows its own individual schedule &mdash; the order follows group membership, not which schedule fired</td></tr>
           <tr><td>What counts as stopped</td><td>Stopped or awaiting manual recovery; an instance in <code>unreachable</code> still exists and still bills, so it holds the stop</td></tr>
           <tr><td>Manual start or stop</td><td>Never blocked &mdash; a warning is shown when the dependency isn't satisfied</td></tr>
-          <tr><td>Disaster recovery</td><td>Recorded on every member's OS volume; restored by <code>rebuild</code> once both groups exist again</td></tr>
+          <tr><td>Disaster recovery</td><td>Every member's OS volume carries the group's full dependency list; with Object Storage configured, every group's definition &mdash; including one with no members &mdash; is also stored there. <code>rebuild</code> recreates the groups and then restores the full start order (Part V.2)</td></tr>
         </tbody></table>
-        <p>Set it with <code>group-depends</code> on the command line, the <strong>Start order</strong> card on a group's dashboard page, or <code>PATCH /groups/{name}</code> with <code>{"depends_on": "&lt;group&gt;"}</code>.</p>
+        <p>Set it with <code>group-depends</code> on the command line (<code>--on</code> replaces the list, <code>--add</code>/<code>--remove</code> change one entry, <code>--clear</code> removes them all), the <strong>Start order</strong> card on a group's dashboard page, or <code>PATCH /groups/{name}</code> with <code>{"depends_on": ["&lt;group&gt;", ...]}</code>. A one-click start of a group with its dependencies brings up every group it depends on, through every branch, each one only after all of its own dependencies are ready; a stop does the same in reverse.</p>
       </section>
 
       <!-- ============ PART IV ============ -->
@@ -579,6 +579,7 @@ pre.code .m{color:var(--code-mut)}
         <div class="table-wrap"><table><thead><tr><th>What</th><th>Linode tags</th><th>Object Storage</th></tr></thead><tbody>
           <tr><td>Identity: OS volume, data volumes, reserved IP</td><td>Always</td><td>&mdash;</td></tr>
           <tr><td>Individual schedule, group membership &amp; start order</td><td>Always</td><td>&mdash;</td></tr>
+          <tr><td>Each group's definition: schedule, hooks, start order (including a group with no members)</td><td>On every member's OS volume</td><td>Yes, if configured &mdash; one record per group</td></tr>
           <tr><td>A simple, single public interface configuration</td><td>Yes</td><td>Also, as a fallback</td></tr>
           <tr><td>A more complex configuration (multiple interfaces, VPC, VLAN)</td><td>&mdash;</td><td>Yes, if configured</td></tr>
           <tr><td>An SSH key also registered on the Linode account</td><td>A reference to it</td><td>The key itself, as a fallback</td></tr>
@@ -626,11 +627,24 @@ pre.code .m{color:var(--code-mut)}
         <div class="table-wrap"><table><thead><tr><th>Situation</th><th>What actually happens</th></tr></thead><tbody>
           <tr><td>The local database write succeeds; the tag or Object Storage backup fails</td><td>The real operation (stop, start, onboard) is already fully successful &mdash; both backups are best-effort and never block or reverse it. The next successful stop or onboard for that same instance re-attempts the backup with its then-current state. The only actual exposure is a total local database loss landing in the narrow window before that next backup succeeds, in which case recovery falls back to whatever the last successful backup provided.</td></tr>
           <tr><td>Both the tag and the Object Storage backup happen to disagree</td><td>Tags win, for the fields tags cover. Both are written at the same moment from the same captured state, so in practice they only ever disagree if one of the two most recent write attempts failed while the other succeeded &mdash; not a routine occurrence.</td></tr>
-          <tr><td>A schedule group currently has zero members</td><td>A group's own definition lives only on its members' tags, never on a standalone resource of its own &mdash; an empty group has nothing anywhere in the account to reconstruct it from. If local state is lost at that exact moment, that one group's definition has to be recreated from scratch. Any instance it previously had is unaffected; only the group's own name/schedule needs to be redefined.</td></tr>
+          <tr><td>A schedule group currently has zero members</td><td>With Object Storage configured, the group is recreated from its stored record &mdash; schedule, hooks, and start order. Without it, a group's definition lives only on its members' tags, so an empty group has nothing in the account to reconstruct it from and has to be recreated by hand. Any instance it previously had is unaffected.</td></tr>
           <tr><td>A manual-override auto-revert timer is armed</td><td>Not recoverable through either backup. If local state is lost while one happens to be armed, it's silently discarded &mdash; the instance simply reverts to ordinary schedule or manual behavior on its next check, never an unsafe or unexpected action either way.</td></tr>
           <tr><td>The audit/history log</td><td>Not recoverable through either backup &mdash; it's a local-only record by design. Recovery restores an instance to a fully working state; it does not restore the history of what happened to it before the loss.</td></tr>
           <tr><td>Object Storage was never configured at all</td><td>Everything in 5.2&ndash;5.3 that depends on it simply doesn't apply &mdash; a stopped instance's recovery is limited to whatever tags alone provide (identity, schedule, group, and, when applicable, a simple network configuration and an account-registered SSH key). This is the same outcome as before this layer existed at all, never worse.</td></tr>
         </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c5-7">
+        <h2><span class="chno">5.7</span> Moving to a New Host</h2>
+        <p class="lede">If the host running this tool is lost, a replacement can take over with everything it was doing &mdash; from a backup when there is one, from Linode tags and Object Storage when there isn't.</p>
+        <p>Three things live only on the deployment host. The database holds every instance, schedule, group, hook, start order, API token and the audit history. The trusted host-key file records each managed instance's SSH host key, which every start checks strictly. The deployment SSH private key is the one key every managed instance trusts. The <code>backup</code> command covers the first two: a consistent database snapshot and a copy of the trusted host keys, to Object Storage and/or a local directory, on a timer. The third is covered by <code>ssh-key-backup</code>, which encrypts the key on the host (AES-256-GCM, with a key derived from a passphrase by scrypt) before storing it in the bucket. The passphrase is never stored, so the stored copy is useless without it.</p>
+        <p><code>install.sh recover</code> sets up a fresh host and puts all of it back before starting anything: it decrypts the SSH key (or takes the original key file), restores the newest database snapshot and the trusted host keys, then runs the same tag-and-Object-Storage reconstruction described in 5.3 to add anything onboarded or changed after that snapshot without disturbing what the snapshot restored. Only then are the poller and API started. With <code>--no-start</code> it stops short of that so the result can be reviewed first.</p>
+        <div class="table-wrap"><table><thead><tr><th>Recovered from</th><th>What comes back</th></tr></thead><tbody>
+          <tr><td>A database snapshot</td><td>Everything, as of the snapshot &mdash; including API tokens and history &mdash; plus anything newer from tags and Object Storage</td></tr>
+          <tr><td>Tags and Object Storage only (no snapshot)</td><td>Every instance, its schedule, group membership, every group's schedule, hooks and start order (groups with no members included, from their Object Storage records), and a stopped instance's network and SSH settings. API tokens and the audit history don't come back; a running manual-override timer is reported, not re-armed</td></tr>
+          <tr><td>Tags only (no Object Storage)</td><td>Identity, schedules, group membership and start order for every group with a member; see 5.6 for what a stopped instance needs beyond that</td></tr>
+        </tbody></table></div>
+        <p>Two pollers must never act on the same instances at once, so the old host has to be shut down or its poller stopped before the new one starts; <code>recover</code> asks for that confirmation. An instance onboarded after the last copy of the trusted host keys will refuse its next start until its host key is deliberately re-trusted with <code>reset-host-key</code>. That's the same strict check that protects every start, and it is never relaxed automatically.</p>
       </section>
 
       <!-- ============ PART VI ============ -->
@@ -694,7 +708,7 @@ pre.code .m{color:var(--code-mut)}
           <tr><td><code>group-list</code></td><td>Lists every schedule group.</td></tr>
           <tr><td><code>group-delete</code></td><td>Deletes a group &mdash; refuses while it still has members.</td></tr>
           <tr><td><code>set-mode</code></td><td>Makes an instance manual-only (<code>--manual</code>) or schedulable again (<code>--auto</code>) (Part IV.4).</td></tr>
-          <tr><td><code>group-depends</code></td><td>Makes a group start only after another group is up and ready, and stop only after it is down (Part III.4); <code>--clear</code> removes it.</td></tr>
+          <tr><td><code>group-depends</code></td><td>Makes a group start only after one or more other groups are up and ready, and stop only after it is down (Part III.4); <code>--on</code> sets the list, <code>--add</code>/<code>--remove</code> change one entry, <code>--clear</code> removes them all.</td></tr>
         </tbody></table></div>
       </section>
 
@@ -702,7 +716,9 @@ pre.code .m{color:var(--code-mut)}
         <h2><span class="chno">6.5</span> Recovery &amp; Maintenance</h2>
         <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
           <tr><td><code>rebuild</code></td><td>Reconstructs the local registry from Linode's own tags &mdash; the disaster-recovery mechanism described in Part V.</td></tr>
-          <tr><td><code>backup</code></td><td>On-demand, whole-system backup &mdash; re-syncs every instance's Object Storage record and takes a full database snapshot (locally, to Object Storage, or both). Meant to be run on a schedule, not just invoked manually; see the Operations Guide.</td></tr>
+          <tr><td><code>backup</code></td><td>On-demand, whole-system backup &mdash; re-syncs every instance's and group's Object Storage record, takes a full database snapshot and saves the trusted host keys (locally, to Object Storage, or both). Meant to be run on a schedule, not just invoked manually; see the Operations Guide.</td></tr>
+          <tr><td><code>restore</code></td><td>On a new host: puts the newest (or a chosen, or a local) database snapshot in place, plus the trusted host keys; <code>--list</code> shows the snapshots. Run <code>rebuild</code> afterward (Part V.7).</td></tr>
+          <tr><td><code>ssh-key-backup</code> / <code>ssh-key-restore</code></td><td>Store the deployment SSH key in Object Storage encrypted with a passphrase you keep, and get it back on a replacement host.</td></tr>
           <tr><td><code>clear-lock</code></td><td>Clears a stuck per-instance operation lock &mdash; an administrative escape hatch, used rarely.</td></tr>
           <tr><td><code>reset-host-key</code></td><td>Deliberately rotates the trusted SSH host key recorded for an instance (see Part I.5) &mdash; the only sanctioned way to do this.</td></tr>
           <tr><td><code>api-token-create</code> / <code>-list</code> / <code>-revoke</code></td><td>Manage API tokens for scripts (Part VII.2).</td></tr>
@@ -948,7 +964,7 @@ pre.code .m{color:var(--code-mut)}
     {label:"Part V", title:"Disaster Recovery", chapters:[
       ["c5-1","5.1 The Registry"],["c5-2","5.2 What's Stored Where"],
       ["c5-3","5.3 Recovering a Stopped Instance"],["c5-4","5.4 Self-Healing Writes"],
-      ["c5-5","5.5 A Corrupted Database"],["c5-6","5.6 Edge Cases"]
+      ["c5-5","5.5 A Corrupted Database"],["c5-6","5.6 Edge Cases"],["c5-7","5.7 Moving to a New Host"]
     ]},
     {label:"Part VI", title:"The CLI", chapters:[
       ["c6-1","6.1 Onboarding &amp; Lifecycle"],["c6-2","6.2 Migration"],

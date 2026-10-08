@@ -1341,7 +1341,8 @@ def api_group_stop(
 
 class GroupPatchRequest(BaseModel):
 
-    depends_on: str | None
+
+    depends_on: list[str] | str | None
 
 
 @app.patch("/groups/{group_name}")
@@ -1349,8 +1350,19 @@ def api_patch_group(
     group_name: str, body: GroupPatchRequest, request: Request,
     user: str = Depends(require_session),
 ) -> dict:
+    meta = _limited_token(request)
+    if meta is not None:
+
+
+        targets = im.normalize_dependency_list(body.depends_on)
+        outside = [t for t in targets if not im.api_token_allows_group(meta, t)]
+        if outside:
+            raise HTTPException(
+                status_code=403,
+                detail=f"this token isn't allowed to act on group(s) {', '.join(outside)}.",
+            )
     _, warnings = _call_collecting_warnings(
-        lambda on_warning: im.set_group_dependency(
+        lambda on_warning: im.set_group_dependencies(
             _client(request), group_name, body.depends_on, on_warning=on_warning,
         )
     )

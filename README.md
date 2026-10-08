@@ -277,7 +277,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `group-show` | Shows a group's schedule and its current members. |
 | `group-list` | Lists every schedule group you've created. |
 | `group-delete` | Permanently deletes a schedule group. Refuses if it still has members. |
-| `group-depends` | Makes one group start only after another group is up and ready, and stop only after it is down (e.g. app servers after their database). See §8.6. |
+| `group-depends` | Makes a group start only after one or more other groups are up and ready, and stop only after it is down (e.g. app servers after their database and cache). See §8.6. |
 | `group-add` | Adds (or moves) a node into a schedule group. |
 | `group-remove` | Removes a node from its group — asks what to do about its schedule if it doesn't have one of its own. See §8.6. |
 | `poll` | Runs the scheduler — checks every node's individual AND group schedule and starts/stops it if due, and auto-reverts any expired manual override. Run it continuously (the normal way), or `--once` from cron. See §8.5/§8.6/§8.7. |
@@ -290,7 +290,9 @@ Every command below is run from the repository root, with the virtual environmen
 | `clear-lock` | Admin escape hatch — forcibly clears a stuck in-progress operation. You should rarely need this. |
 | `reset-host-key` | Admin escape hatch — re-establishes SSH trust for a node after a genuine, confirmed key change. You should rarely need this either; see [§8](#8-day-to-day-usage) and the one-time migration note below. |
 | `rebuild` | Disaster recovery — reconstructs your local registry from tags on your own Linode account, in case the machine running this tool (and its local records) is ever lost. You should rarely need this either. |
-| `backup` | On-demand, whole-system backup — re-syncs every node's Object Storage record and takes a full local/remote database snapshot. Meant to be run on a schedule (cron/systemd timer). See §8.10. |
+| `backup` | On-demand, whole-system backup — re-syncs every node's and group's Object Storage record, takes a full local/remote database snapshot, and saves the trusted host keys. Meant to be run on a schedule (cron/systemd timer). See §8.10. |
+| `restore` | On a replacement host: puts the newest (or a chosen, or a local) database snapshot in place, plus the trusted host keys. Run `rebuild` afterward. See §8.10. |
+| `ssh-key-backup` / `ssh-key-restore` | Store the deployment SSH key in Object Storage, encrypted with a passphrase you keep, and get it back on a replacement host. See §8.10. |
 | `offboard` | Permanently decommission a stopped node — releases its reserved IP, removes it from tracking, and optionally deletes its volumes. For when you're actually done with a node, not just pausing it. |
 | `deregister` | Admin escape hatch — removes a node from local tracking only, with no changes to the real Linode instance, volumes, or reserved IP at all. For correcting a wrong or unsafe local record, not for decommissioning a real node (use `offboard` for that). |
 
@@ -1068,23 +1070,41 @@ With that in place:
   database never becomes ready within that window, the app servers aren't started that day.
 - The rule follows **group membership**, so it applies even to a member of `app` that has its own
   individual schedule.
-- A group depends on at most one other group, and chains are allowed (`web` → `app` → `db`).
-  A group can't depend on itself, cycles are refused, and a group that others depend on can't be
-  deleted until they stop depending on it.
+- A group can depend on **several** groups at once — `app` can wait for both `db` and `cache`:
+
+  ```
+  python instance_manager.py group-depends --group-name app --on db,cache
+  ```
+
+  `app` then starts only once every member of **both** is up and ready, and neither `db` nor
+  `cache` stops until `app` is down. `--on` replaces the whole list; use `--add <group>` or
+  `--remove <group>` to change one entry, and `--clear` to remove them all.
+- Several groups can depend on the same group (both `app` and `reports` on `db`); `db` then stops
+  only after both are down. Chains of any length are allowed (`web` → `app` → `db`), including
+  diamonds (`web` on `app` and `api`, both on `db`).
+- A group can't depend on itself, any change that would create a loop through any path is
+  refused, and a group that others depend on can't be deleted until they stop depending on it.
 - **Manual `start`/`stop` is never blocked** — you're acting deliberately — but it prints a
   warning when the dependency isn't satisfied (e.g. starting an app server while the database is
   stopped).
 
 `group-show` lists what a group depends on and which groups depend on it; `group-list` shows each
-group's dependency. Remove it with:
+group's dependencies. Remove them with:
 
 ```
 python instance_manager.py group-depends --group-name app --clear
 ```
 
-The dependency is saved in the disaster-recovery tags on each member's OS volume, so `rebuild`
-restores it once both groups are back. In the dashboard, set it from the group page's **Start
-order** card; over the API, `PATCH /groups/{name}` with `{"depends_on": "db"}` (or `null`).
+In the dashboard, tick the groups in the group page's **Start order** card; over the API,
+`PATCH /groups/{name}` with `{"depends_on": ["db", "cache"]}` (`[]` clears them).
+
+**Recovery after losing the local database.** Every member of a group carries the group's full
+list of dependencies in its disaster-recovery tags, so `rebuild` restores them once the groups
+are back. A group with **no members** has no volume to carry tags, so on its own it couldn't be
+recovered — with Object Storage configured (§8.10), every group's definition (schedule, hooks
+and dependencies) is also kept there, and `rebuild` recreates any group the tags didn't bring
+back, then restores the full start order. Without Object Storage, keep at least one member in
+any group others depend on, or take regular `backup` snapshots.
 
 ### 8.7 Manual override — starting a node outside its own scheduled hours
 
@@ -1272,7 +1292,26 @@ default:
 
 Exits non-zero if anything didn't complete (a per-node re-sync failure, either snapshot
 destination failing) — check the exit code if you're wiring this into your own monitoring rather
-than just reading the log.
+than just reading the log. Each run also saves the trusted SSH host keys of your nodes (the tool's
+own `state/known_hosts`), to Object Storage and next to the local snapshot.
+
+**If you install with `install.sh`** (see `DEPLOYMENT.md`), an hourly backup timer is set up for you.
+
+**Moving to a new host.** If the machine running this tool is lost, `sudo ./install.sh recover` on a
+fresh one restores everything before starting anything — see `DEPLOYMENT.md` §8.1. The pieces it
+uses are also available directly:
+
+```
+python instance_manager.py ssh-key-backup     # once, on the original host: the deployment SSH key, encrypted
+python instance_manager.py ssh-key-restore    # on the new host (asks for the passphrase)
+python instance_manager.py restore --list     # the snapshots in your bucket
+python instance_manager.py restore            # newest snapshot + trusted host keys (or --snapshot / --from-file)
+python instance_manager.py rebuild            # adds anything newer than the snapshot, from tags and Object Storage
+```
+
+`restore` refuses to overwrite a database that already has instances or groups unless you pass
+`--force`, which moves it aside rather than deleting it. A snapshot from an older version is
+upgraded automatically.
 
 ### 8.11 High availability — why this isn't an always-on active-active or active-passive setup
 

@@ -24,6 +24,11 @@ cluster instead is a separate path with its own guide, DEPLOYMENT-LKE.md -- skip
 "What you're running" below if that's what you're on; everything from there onward applies
 regardless of which deployment model you chose.
 
+**The quick way:** `sudo ./install.sh install` from a clone sets up everything below — service
+user, environment, credentials, SSH key, services, dashboard and an hourly backup timer — and
+`sudo ./install.sh recover` sets up a replacement host with full recovery (see "Moving to a new
+host" below, and `DEPLOYMENT.md`). The rest of this section is the manual equivalent.
+
 The tool is a plain Python program with no database server or other infrastructure of its own
 to stand up — cloning the repository, creating a virtual environment, and installing its
 dependencies is the entire install. Run this on one centralized, persistent machine your whole
@@ -221,8 +226,10 @@ maintain by hand:
   VLAN), any SSH key not registered on your Linode account, and the instance's plan/firewall/
   placement-group/maintenance-policy/watchdog/label/tags. It also holds every pre-stop hook and
   post-start check (commands, script paths, and uploaded scripts, for instances and groups), each
-  stored under a fingerprint of its own content that the instance's tags point at. This layer only
-  exists if you configure it (below).
+  stored under a fingerprint of its own content that the instance's tags point at. And it holds one
+  record per schedule group (schedule, hooks, and the groups it depends on), updated on every change
+  to the group — the only way a group with **no members** survives a database loss, since an empty
+  group has no volume to carry tags. This layer only exists if you configure it (below).
 
 Both are best-effort and self-healing: a failed backup never blocks the real stop/onboard
 operation, and the very next time that instance is touched, its full current state is backed up
@@ -250,7 +257,8 @@ table of edge cases.
 
 No backfill step is needed — the very next stop or onboard for each instance starts backing it up
 from that point on. An instance that isn't touched again after this is configured won't have an
-Object Storage backup until it is.
+Object Storage backup until it is. Run `backup` once right after configuring it to back up every
+instance and group immediately.
 
 ### Scheduling whole-system backups with `backup`
 
@@ -344,6 +352,19 @@ recover fully, the most common cause is that Object Storage wasn't configured (o
 backed up for that specific instance) at the time local state was lost — see "How recovery
 actually works" above, and the Definitive Guide's Part 5.6 for the complete list of edge cases
 and exactly what's at risk in each.
+
+### Moving to a new host
+
+If the deployment host itself is lost, set up a fresh one with `sudo ./install.sh recover
+--ssh-key-from-backup` (or `--ssh-key <the original key file>`). Give it the same API token and
+bucket. It restores the newest database snapshot and the trusted host keys, runs `rebuild` for
+anything newer, then starts the services. `--no-start` lets you review first, `--rebuild-only`
+skips the snapshot. Shut the old host's poller down first: two pollers must never run at once.
+Full details, including what to check afterwards: `DEPLOYMENT.md` §8.1.
+
+Keep three things recoverable at all times: Object Storage configured (snapshots, instance and
+group records, host keys), the deployment SSH key (stored once with `ssh-key-backup`, or kept in
+your own secret store), and its passphrase (in your password manager).
 
 ### Resolving a stuck per-instance lock
 
@@ -529,9 +550,11 @@ a week, rehearse at your real scale, then onboard production in waves.
       scripts check `start`/`stop` exit codes (3 = busy, retry; 5 = start order not satisfied) or
       use `?wait=true` over the API. Review `api-token-list` (last used) periodically and revoke
       what's unused.
-- [ ] **Start order**: where one group needs another up first (applications and their
-      database), `group-depends --group-name <app-group> --on <db-group>`, and give the database
-      group a post-start readiness check so "up" means accepting connections.
+- [ ] **Start order**: where a group needs others up first (applications and their database and
+      cache), `group-depends --group-name <app-group> --on <db-group>,<cache-group>`, and give
+      those groups a post-start readiness check so "up" means accepting connections. Configure
+      Object Storage (or keep a member in every depended-on group) so the full order survives a
+      database loss.
 - [ ] **Hooks**: `hooks-set --name <name>` (or `--group-name <group>`) with `--pre-stop` /
       `--post-start` commands or `--pre-stop-script` / `--post-start-script` uploads. Verify with
       `hooks-run`.
@@ -581,7 +604,7 @@ a week, rehearse at your real scale, then onboard production in waves.
 | `onboard` refuses with "IP not reserved" | The instance's public IP is still an ordinary, ephemeral one | Reserve it first via Cloud Manager, or use the one-time in-flow "reserve and retry" option on the dashboard's onboarding screen |
 | A stop/start command refuses with "already operating on" | A per-instance lock is held — normally released automatically when the holding process exits | Confirm nothing is actually mid-operation on that instance, then `clear-lock --name <name>` |
 | `rebuild` recovered an instance as `needs_manual_recovery` instead of `stopped` | Neither tags nor Object Storage had a complete-enough record for it at the moment of loss — most commonly, Object Storage wasn't configured yet, or that specific instance hadn't been stopped/onboarded since it was | See "Recovering from a lost or corrupted registry" above for the manual-boot recovery steps, and Part 5.6 of the Definitive Guide for the full edge-case table |
-| A group's members show "waiting on dependency" or "waiting on dependents" and never act | The group it depends on isn't fully running and ready (or, on the way down, a dependent group isn't fully stopped) — often a member that failed to start, is `unreachable`, or whose post-start check failed | `group-show --group-name <group>` to see the dependency; `list` for each member's status; `history --name <member>` and `hooks-run --name <member> --post-start` for a failing readiness check. Fix the blocking member, or `group-depends --group-name <group> --clear` to remove the order |
+| A group's members show "waiting on dependency" or "waiting on dependents" and never act | The group it depends on isn't fully running and ready (or, on the way down, a dependent group isn't fully stopped) — often a member that failed to start, is `unreachable`, or whose post-start check failed | `group-show --group-name <group>` to see the dependency; `list` for each member's status; `history --name <member>` and `hooks-run --name <member> --post-start` for a failing readiness check. Fix the blocking member, or `group-depends --group-name <group> --remove <other-group>` (or `--clear`) to remove the order |
 | Group's timezone or schedule doesn't seem to apply | An individual schedule exists and is silently overriding the group entirely (working as designed, not a bug) | `schedule-show --name <name>` to check for an individual schedule; clear it if the group should govern instead |
 | A stop fails with "pre-stop hook ... Stop aborted" and the instance stays running | The instance's pre-stop hook exited non-zero, timed out, or couldn't be reached over SSH, and its failure policy is `abort` (the default) — by design, nothing was shut down or deleted | Read the hook output printed with the error (also in the Hooks card and `hook-events`), fix the cause, and stop again. To stop without the hook, use `stop --skip-hooks` (dashboard: "Stop anyway, without the pre-stop hook"). A manual-override auto-stop retries the stop on every poll tick until it succeeds |
 | A start reports "post-start check still failing" | The instance started and is running, but its readiness check never passed within its timeout | The instance is deliberately left running. Check the service on the instance, then re-run the check with `hooks-run --name <name> --post-start`. If the check needs longer on a cold boot, raise `--post-start-timeout` |

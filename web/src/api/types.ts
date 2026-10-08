@@ -82,7 +82,7 @@ export interface ScheduleGroup {
   rules: ScheduleRule[]
   enabled: boolean
   members: string[]
-  depends_on?: string | null
+  depends_on?: string[]
   dependents?: string[]
   warnings?: string[]
 }
@@ -93,7 +93,7 @@ export interface ScheduleGroupSummary {
   rules: ScheduleRule[]
   enabled: boolean
   member_count: number
-  depends_on?: string | null
+  depends_on?: string[]
 }
 export interface ScheduleEvent {
   action: 'create' | 'delete'

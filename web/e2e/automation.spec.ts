@@ -56,7 +56,7 @@ test('group "Start group" runs every member and shows the results', async ({ pag
         rules: [],
         enabled: true,
         members: ['web-1', 'web-2'],
-        depends_on: null,
+        depends_on: [],
         dependents: [],
       },
     })

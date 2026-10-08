@@ -14,6 +14,7 @@ import secrets
 import shlex
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -250,6 +251,30 @@ def _migrate_add_group_dependency_column(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_group_dependencies_table(conn: sqlite3.Connection) -> None:
+
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+        " AND name IN ('schedule_groups', 'group_dependencies')"
+    ).fetchall()}
+    if tables != {"schedule_groups", "group_dependencies"}:
+        return
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(schedule_groups)").fetchall()}
+    if "depends_on_group_id" not in columns:
+        return
+    rows = conn.execute(
+        "SELECT id, depends_on_group_id FROM schedule_groups WHERE depends_on_group_id IS NOT NULL"
+    ).fetchall()
+    if not rows:
+        return
+    conn.executemany(
+        "INSERT OR IGNORE INTO group_dependencies (group_id, depends_on_group_id) VALUES (?, ?)",
+        [(gid, dep) for gid, dep in rows if gid != dep],
+    )
+    conn.execute("UPDATE schedule_groups SET depends_on_group_id = NULL")
+    conn.commit()
+
+
 def _connect() -> sqlite3.Connection:
 
     REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -265,6 +290,8 @@ def _connect() -> sqlite3.Connection:
         _migrate_add_group_dependency_column(conn)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(SCHEMA_PATH.read_text())
+
+        _migrate_group_dependencies_table(conn)
     except sqlite3.DatabaseError as e:
         conn.close()
         if isinstance(e, sqlite3.OperationalError):
@@ -4300,6 +4327,7 @@ def set_group_hooks(
     )
     for member in group["members"]:
         _sync_hook_tags(client, member, on_warning)
+    _sync_group_object_backup(group_name, on_warning=on_warning)
     return normalized
 
 
@@ -4329,6 +4357,7 @@ def clear_group_hooks(
         )
         for member in group["members"]:
             _sync_hook_tags(client, member, on_warning)
+        _sync_group_object_backup(group_name, on_warning=on_warning)
     return cleared
 
 
@@ -4785,15 +4814,14 @@ def _group_row_by_id(group_id: int) -> dict | None:
         conn = _connect()
         try:
             row = conn.execute(
-                "SELECT name, timezone, rules, enabled, depends_on_group_id FROM schedule_groups"
-                " WHERE id = ?",
+                "SELECT name, timezone, rules, enabled FROM schedule_groups WHERE id = ?",
                 (group_id,),
             ).fetchone()
             if row is None:
                 return None
             return {
                 "id": group_id, "name": row[0], "timezone": row[1], "rules": json.loads(row[2]),
-                "enabled": bool(row[3]), "depends_on": _group_name_by_id(conn, row[4]),
+                "enabled": bool(row[3]), "depends_on": _group_dependency_names(conn, group_id),
             }
         finally:
             conn.close()
@@ -4808,42 +4836,111 @@ def _group_name_by_id(conn: sqlite3.Connection, group_id: int | None) -> str | N
     return row[0] if row else None
 
 
-def set_group_dependency(
-    client, group_name: str, depends_on: str | None,
-    on_warning: Callable[[str], None] | None = None,
+def _group_dependency_names(conn: sqlite3.Connection, group_id: int) -> list[str]:
+
+    return [r[0] for r in conn.execute(
+        "SELECT g.name FROM group_dependencies d JOIN schedule_groups g"
+        " ON g.id = d.depends_on_group_id WHERE d.group_id = ? ORDER BY g.name", (group_id,)
+    ).fetchall()]
+
+
+def _group_dependent_names(conn: sqlite3.Connection, group_id: int) -> list[str]:
+
+    return [r[0] for r in conn.execute(
+        "SELECT g.name FROM group_dependencies d JOIN schedule_groups g"
+        " ON g.id = d.group_id WHERE d.depends_on_group_id = ? ORDER BY g.name", (group_id,)
+    ).fetchall()]
+
+
+def _group_backup_payload(group_name: str) -> dict | None:
+
+    group = get_schedule_group(group_name)
+    if group is None:
+        return None
+    return {
+        "name": group["name"], "timezone": group["timezone"], "rules": group["rules"],
+        "enabled": group["enabled"], "depends_on": group["depends_on"],
+        "hooks": _read_hook_row("SELECT config FROM group_hooks WHERE group_id = ?", group["id"]),
+    }
+
+
+def _sync_group_object_backup(
+    group_name: str, *, on_warning: Callable[[str], None] | None = None
 ) -> None:
+
+    if not osb.is_configured():
+        return
+    try:
+        payload = _group_backup_payload(group_name)
+        if payload is None:
+            osb.delete_group_backup(group_name)
+        else:
+            osb.upload_group_backup(group_name, payload)
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(
+                f"  WARNING: could not back up group '{group_name}' to Object Storage ({e}) -- "
+                "the change is in effect locally; run `backup` (or change the group again) to "
+                "retry."
+            )
+
+
+def normalize_dependency_list(depends_on) -> list[str]:
+
+    if depends_on is None:
+        return []
+    if isinstance(depends_on, str):
+        depends_on = [depends_on]
+    names = []
+    for item in depends_on:
+        if not isinstance(item, str) or not item.strip():
+            raise engine.ConfigError("each dependency must be a group name.")
+        names.append(item.strip())
+    return sorted(set(names))
+
+
+def set_group_dependencies(
+    client, group_name: str, depends_on, on_warning: Callable[[str], None] | None = None,
+) -> list[str]:
+
+    targets = normalize_dependency_list(depends_on)
 
     def _do():
         conn = _connect()
         try:
             group_id = _group_id_for_name(conn, group_name)
-            target_id = None
-            if depends_on is not None:
-                target_id = _group_id_for_name(conn, depends_on)
+            target_ids = {}
+            for target in targets:
+                target_id = _group_id_for_name(conn, target)
                 if target_id == group_id:
                     raise engine.ConfigError(f"group '{group_name}' can't depend on itself.")
+                target_ids[target] = target_id
 
-                seen, cursor = {target_id}, target_id
-                while True:
-                    row = conn.execute(
-                        "SELECT depends_on_group_id FROM schedule_groups WHERE id = ?", (cursor,)
-                    ).fetchone()
-                    nxt = row[0] if row else None
-                    if nxt is None:
-                        break
-                    if nxt == group_id:
+
+            edges: dict[int, set[int]] = {}
+            for gid, dep in conn.execute(
+                "SELECT group_id, depends_on_group_id FROM group_dependencies"
+            ).fetchall():
+                if gid != group_id:
+                    edges.setdefault(gid, set()).add(dep)
+            for target, target_id in target_ids.items():
+                stack, seen = [target_id], set()
+                while stack:
+                    node = stack.pop()
+                    if node == group_id:
                         raise engine.ConfigError(
-                            f"'{depends_on}' already depends (directly or indirectly) on "
-                            f"'{group_name}', so '{group_name}' can't depend on it -- that would "
-                            "be a cycle."
+                            f"'{target}' already depends (directly or indirectly) on "
+                            f"'{group_name}', so '{group_name}' can't depend on it -- that "
+                            "would be a cycle."
                         )
-                    if nxt in seen:
-                        break
-                    seen.add(nxt)
-                    cursor = nxt
-            conn.execute(
-                "UPDATE schedule_groups SET depends_on_group_id = ? WHERE id = ?",
-                (target_id, group_id),
+                    if node in seen:
+                        continue
+                    seen.add(node)
+                    stack.extend(edges.get(node, ()))
+            conn.execute("DELETE FROM group_dependencies WHERE group_id = ?", (group_id,))
+            conn.executemany(
+                "INSERT INTO group_dependencies (group_id, depends_on_group_id) VALUES (?, ?)",
+                [(group_id, tid) for tid in target_ids.values()],
             )
             conn.commit()
         finally:
@@ -4855,9 +4952,48 @@ def set_group_dependency(
         raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
     for member in group["members"]:
         _sync_group_membership_tags(client, member, group, on_warning=on_warning)
+    _sync_group_object_backup(group_name, on_warning=on_warning)
+    return group["depends_on"]
 
 
-def create_schedule_group(group_name: str, timezone: str) -> int:
+def set_group_dependency(
+    client, group_name: str, depends_on: str | None,
+    on_warning: Callable[[str], None] | None = None,
+) -> None:
+
+    set_group_dependencies(client, group_name, depends_on, on_warning=on_warning)
+
+
+def add_group_dependency(
+    client, group_name: str, depends_on: str, on_warning: Callable[[str], None] | None = None,
+) -> list[str]:
+
+    group = get_schedule_group(group_name)
+    if group is None:
+        raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+    return set_group_dependencies(
+        client, group_name, [*group["depends_on"], depends_on], on_warning=on_warning
+    )
+
+
+def remove_group_dependency(
+    client, group_name: str, depends_on: str, on_warning: Callable[[str], None] | None = None,
+) -> list[str]:
+
+    group = get_schedule_group(group_name)
+    if group is None:
+        raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+    if depends_on not in group["depends_on"]:
+        raise engine.ConfigError(f"group '{group_name}' doesn't depend on '{depends_on}'.")
+    return set_group_dependencies(
+        client, group_name, [d for d in group["depends_on"] if d != depends_on],
+        on_warning=on_warning,
+    )
+
+
+def create_schedule_group(
+    group_name: str, timezone: str, *, on_warning: Callable[[str], None] | None = None,
+) -> int:
 
     if not group_name or not group_name.strip():
         raise engine.ConfigError("a group name is required.")
@@ -4885,7 +5021,9 @@ def create_schedule_group(group_name: str, timezone: str) -> int:
         finally:
             conn.close()
 
-    return _retry_db(_do)
+    group_id = _retry_db(_do)
+    _sync_group_object_backup(group_name, on_warning=on_warning)
+    return group_id
 
 
 def get_schedule_group(group_name: str) -> dict | None:
@@ -4894,8 +5032,7 @@ def get_schedule_group(group_name: str) -> dict | None:
         conn = _connect()
         try:
             row = conn.execute(
-                "SELECT id, name, timezone, rules, enabled, depends_on_group_id"
-                " FROM schedule_groups WHERE name = ?",
+                "SELECT id, name, timezone, rules, enabled FROM schedule_groups WHERE name = ?",
                 (group_name,),
             ).fetchone()
             if row is None:
@@ -4905,16 +5042,11 @@ def get_schedule_group(group_name: str) -> dict | None:
                     "SELECT name FROM instances WHERE group_id = ? ORDER BY name", (row[0],)
                 ).fetchall()
             ]
-            dependents = [
-                r[0] for r in conn.execute(
-                    "SELECT name FROM schedule_groups WHERE depends_on_group_id = ? ORDER BY name",
-                    (row[0],),
-                ).fetchall()
-            ]
             return {
                 "id": row[0], "name": row[1], "timezone": row[2], "rules": json.loads(row[3]),
                 "enabled": bool(row[4]), "members": members,
-                "depends_on": _group_name_by_id(conn, row[5]), "dependents": dependents,
+                "depends_on": _group_dependency_names(conn, row[0]),
+                "dependents": _group_dependent_names(conn, row[0]),
             }
         finally:
             conn.close()
@@ -4928,10 +5060,15 @@ def list_schedule_groups() -> list[dict]:
         conn = _connect()
         try:
             groups = conn.execute(
-                "SELECT id, name, timezone, rules, enabled, depends_on_group_id"
-                " FROM schedule_groups ORDER BY name"
+                "SELECT id, name, timezone, rules, enabled FROM schedule_groups ORDER BY name"
             ).fetchall()
             names_by_id = {g[0]: g[1] for g in groups}
+            deps: dict[int, list[str]] = {}
+            for gid, dep in conn.execute(
+                "SELECT group_id, depends_on_group_id FROM group_dependencies"
+            ).fetchall():
+                if dep in names_by_id:
+                    deps.setdefault(gid, []).append(names_by_id[dep])
             counts = dict(conn.execute(
                 "SELECT group_id, COUNT(*) FROM instances"
                 " WHERE group_id IS NOT NULL GROUP BY group_id"
@@ -4940,9 +5077,9 @@ def list_schedule_groups() -> list[dict]:
                 {
                     "id": gid, "name": name, "timezone": tz, "rules": json.loads(rules),
                     "enabled": bool(enabled), "member_count": counts.get(gid, 0),
-                    "depends_on": names_by_id.get(dep) if dep is not None else None,
+                    "depends_on": sorted(deps.get(gid, [])),
                 }
-                for gid, name, tz, rules, enabled, dep in groups
+                for gid, name, tz, rules, enabled in groups
             ]
         finally:
             conn.close()
@@ -4971,8 +5108,7 @@ def _sync_group_membership_tags_locked(client, name: str, record: dict, group: d
     if group is not None:
         new_tags = new_tags + [f"{_GROUP_NAME_TAG_PREFIX}{group['name']}"] + \
             _encode_schedule_as_tags(group, prefix=_GROUP_SCHEDULE_TAG_PREFIX)
-        if group.get("depends_on"):
-            new_tags.append(f"{_GROUP_DEP_TAG_PREFIX}{group['depends_on']}")
+        new_tags += [f"{_GROUP_DEP_TAG_PREFIX}{dep}" for dep in group.get("depends_on") or []]
     if new_tags != (os_volume.tags or []):
         os_volume.tags = new_tags
         os_volume.save()
@@ -5160,6 +5296,10 @@ class BackupResult:
     object_storage_configured: bool = False
     instances_synced: list[str] = field(default_factory=list)
     instances_failed: list[str] = field(default_factory=list)
+    groups_synced: list[str] = field(default_factory=list)
+    groups_failed: list[str] = field(default_factory=list)
+    known_hosts_key: str | None = None
+    known_hosts_error: str | None = None
     object_storage_snapshot_key: str | None = None
     object_storage_snapshot_error: str | None = None
     local_snapshot_path: str | None = None
@@ -5170,6 +5310,8 @@ class BackupResult:
 
         return not (
             self.instances_failed
+            or self.groups_failed
+            or self.known_hosts_error
             or self.object_storage_snapshot_error
             or self.local_snapshot_error
         )
@@ -5196,6 +5338,22 @@ def backup_full_system(
                 if on_warning is not None:
                     on_warning(f"  WARNING: could not back up '{name}' to Object Storage ({e})")
 
+        groups = list_schedule_groups()
+        if on_progress is not None:
+            on_progress(f"Re-syncing {len(groups)} group record(s) to Object Storage...")
+        for g in groups:
+            try:
+                payload = _group_backup_payload(g["name"])
+                if payload is not None:
+                    osb.upload_group_backup(g["name"], payload)
+                    result.groups_synced.append(g["name"])
+            except Exception as e:
+                result.groups_failed.append(g["name"])
+                if on_warning is not None:
+                    on_warning(
+                        f"  WARNING: could not back up group '{g['name']}' to Object Storage ({e})"
+                    )
+
         if on_progress is not None:
             on_progress("Uploading a full database snapshot to Object Storage...")
         try:
@@ -5204,6 +5362,18 @@ def backup_full_system(
             result.object_storage_snapshot_error = str(e)
             if on_warning is not None:
                 on_warning(f"  WARNING: could not upload full database snapshot ({e})")
+
+
+        hosts = known_hosts_path()
+        if hosts.exists():
+            try:
+                result.known_hosts_key = osb.upload_deployment_file(
+                    KNOWN_HOSTS_OBJECT_NAME, hosts.read_bytes()
+                )
+            except Exception as e:
+                result.known_hosts_error = str(e)
+                if on_warning is not None:
+                    on_warning(f"  WARNING: could not back up the trusted host keys ({e})")
     elif on_warning is not None:
         on_warning(
             "  WARNING: Object Storage is not configured (LINODE_OBJ_STORAGE_* unset) -- "
@@ -5219,6 +5389,11 @@ def backup_full_system(
         try:
             osb.snapshot_database(REGISTRY_PATH, local_path)
             result.local_snapshot_path = str(local_path)
+            hosts = known_hosts_path()
+            if hosts.exists():
+                hosts_copy = local_dir / f"{local_path.stem}.known_hosts"
+                hosts_copy.write_bytes(hosts.read_bytes())
+                hosts_copy.chmod(0o600)
         except Exception as e:
             result.local_snapshot_error = str(e)
             if on_warning is not None:
@@ -5246,16 +5421,332 @@ def cmd_backup(args) -> int:
         summary = f"Object Storage: {len(result.instances_synced)} instance record(s) re-synced"
         if result.instances_failed:
             summary += f", {len(result.instances_failed)} failed"
+        summary += f"; {len(result.groups_synced)} group record(s) re-synced"
+        if result.groups_failed:
+            summary += f", {len(result.groups_failed)} failed"
         print(summary + ".")
         if result.object_storage_snapshot_key:
             print(
                 f"Object Storage: full database snapshot uploaded as "
                 f"'{result.object_storage_snapshot_key}'."
             )
+        if result.known_hosts_key:
+            print(f"Object Storage: trusted host keys saved as '{result.known_hosts_key}'.")
     if result.local_snapshot_path:
         print(f"Local snapshot written to {result.local_snapshot_path}.")
 
     return 0 if result.ok else 1
+
+
+KNOWN_HOSTS_OBJECT_NAME = "known_hosts"
+SSH_KEY_OBJECT_NAME = "ssh-key.enc"
+SSH_PUBLIC_KEY_OBJECT_NAME = "ssh-key.pub"
+_SSH_KEY_BLOB_MAGIC = b"LISK1"
+MIN_SSH_KEY_PASSPHRASE_LENGTH = 12
+
+
+def known_hosts_path() -> Path:
+
+    return engine.BASE_DIR / "state" / "known_hosts"
+
+
+def encrypt_ssh_key(private_key: bytes, passphrase: str) -> bytes:
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+    if len(passphrase) < MIN_SSH_KEY_PASSPHRASE_LENGTH:
+        raise engine.ConfigError(
+            f"the passphrase must be at least {MIN_SSH_KEY_PASSPHRASE_LENGTH} characters."
+        )
+    salt, nonce = secrets.token_bytes(16), secrets.token_bytes(12)
+    key = Scrypt(salt=salt, length=32, n=2**15, r=8, p=1).derive(passphrase.encode())
+    return _SSH_KEY_BLOB_MAGIC + salt + nonce + AESGCM(key).encrypt(nonce, private_key, None)
+
+
+def decrypt_ssh_key(blob: bytes, passphrase: str) -> bytes:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+    head = len(_SSH_KEY_BLOB_MAGIC)
+    if not blob.startswith(_SSH_KEY_BLOB_MAGIC) or len(blob) < head + 16 + 12 + 16:
+        raise engine.ConfigError("the stored SSH key backup isn't in a recognised format.")
+    salt, nonce, ciphertext = blob[head:head + 16], blob[head + 16:head + 28], blob[head + 28:]
+    key = Scrypt(salt=salt, length=32, n=2**15, r=8, p=1).derive(passphrase.encode())
+    try:
+        return AESGCM(key).decrypt(nonce, ciphertext, None)
+    except InvalidTag as e:
+        raise engine.ConfigError("wrong passphrase (or the backup was altered).") from e
+
+
+def backup_ssh_key(key_path: Path, passphrase: str) -> str:
+
+    if not osb.is_configured():
+        raise engine.ConfigError("Object Storage isn't configured (LINODE_OBJ_STORAGE_* in .env).")
+    if not key_path.is_file():
+        raise engine.ConfigError(f"no SSH private key at {key_path}.")
+    private_key = key_path.read_bytes()
+    if b"PRIVATE KEY" not in private_key:
+        raise engine.ConfigError(f"{key_path} doesn't look like an SSH private key.")
+    key = osb.upload_deployment_file(SSH_KEY_OBJECT_NAME, encrypt_ssh_key(private_key, passphrase))
+    pub = key_path.with_name(key_path.name + ".pub")
+    if pub.is_file():
+        osb.upload_deployment_file(SSH_PUBLIC_KEY_OBJECT_NAME, pub.read_bytes())
+    return key
+
+
+def restore_ssh_key(dest: Path, passphrase: str, *, force: bool = False) -> Path:
+
+    if not osb.is_configured():
+        raise engine.ConfigError("Object Storage isn't configured (LINODE_OBJ_STORAGE_* in .env).")
+    blob = osb.download_deployment_file(SSH_KEY_OBJECT_NAME)
+    if blob is None:
+        raise engine.ConfigError(
+            "no SSH key backup in Object Storage -- it's only there if `ssh-key-backup` was run on "
+            "the old host. Copy the original private key over instead."
+        )
+    private_key = decrypt_ssh_key(blob, passphrase)
+    if dest.exists() and dest.read_bytes() != private_key and not force:
+        raise engine.ConfigError(f"{dest} already holds a different key -- pass --force to replace it.")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(private_key)
+    dest.chmod(0o600)
+    pub = osb.download_deployment_file(SSH_PUBLIC_KEY_OBJECT_NAME)
+    if pub is not None:
+        dest.with_name(dest.name + ".pub").write_bytes(pub)
+    return dest
+
+
+@dataclass
+class RestoreResult:
+    source: str
+    instances: int = 0
+    groups: int = 0
+    known_hosts_restored: int = 0
+    previous_database: str | None = None
+
+
+def _registry_has_content(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(path)
+        try:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for table in ("instances", "schedule_groups"):
+                if table in tables and conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]:
+                    return True
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        return True
+    return False
+
+
+def _validate_snapshot(path: Path) -> tuple[int, int]:
+
+    try:
+        conn = sqlite3.connect(path)
+        try:
+            ok = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            if ok != "ok":
+                raise engine.ConfigError(f"the snapshot failed SQLite's integrity check ({ok}).")
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "instances" not in tables:
+                raise engine.ConfigError("that file isn't a registry database (no instances table).")
+            instances = conn.execute("SELECT COUNT(*) FROM instances").fetchone()[0]
+            groups = (conn.execute("SELECT COUNT(*) FROM schedule_groups").fetchone()[0]
+                      if "schedule_groups" in tables else 0)
+            return instances, groups
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as e:
+        raise engine.ConfigError(f"that file isn't a readable SQLite database ({e}).") from e
+
+
+def _merge_known_hosts(data: bytes) -> int:
+
+    path = known_hosts_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text().splitlines() if path.exists() else []
+    seen = {line.strip() for line in existing if line.strip()}
+    added = [line for line in data.decode(errors="replace").splitlines()
+             if line.strip() and not line.startswith("#") and line.strip() not in seen]
+    if added:
+        with engine.known_hosts_file_lock(path), open(path, "a") as f:
+            if existing and not path.read_text().endswith("\n"):
+                f.write("\n")
+            f.write("\n".join(added) + "\n")
+        path.chmod(0o600)
+    return len(added)
+
+
+def list_database_snapshots() -> list[str]:
+    if not osb.is_configured():
+        raise engine.ConfigError("Object Storage isn't configured (LINODE_OBJ_STORAGE_* in .env).")
+    keys = osb.list_database_snapshots()
+    if keys is None:
+        raise engine.ConfigError("couldn't list the bucket's database snapshots.")
+    return keys
+
+
+def restore_from_backup(
+    *, snapshot_key: str | None = None, from_file: Path | None = None,
+    known_hosts_file: Path | None = None, force: bool = False,
+    on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> RestoreResult:
+
+    say = on_progress or (lambda _m: None)
+    if _registry_has_content(REGISTRY_PATH) and not force:
+        raise engine.ConfigError(
+            f"{REGISTRY_PATH} already holds instances or groups -- restoring would replace them. "
+            "Pass --force to move it aside first (it's kept, not deleted)."
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        staged = Path(tmp) / "restore.db"
+        if from_file is not None:
+            if not from_file.is_file():
+                raise engine.ConfigError(f"no file at {from_file}.")
+            staged.write_bytes(from_file.read_bytes())
+            source = str(from_file)
+        else:
+            if not osb.is_configured():
+                raise engine.ConfigError(
+                    "Object Storage isn't configured (LINODE_OBJ_STORAGE_* in .env) -- give a local "
+                    "snapshot with --from-file, or set those up first."
+                )
+            if snapshot_key is None:
+                keys = list_database_snapshots()
+                if not keys:
+                    raise engine.ConfigError("the bucket has no database snapshots -- run `rebuild` "
+                                             "to recover from tags and Object Storage instead.")
+                snapshot_key = keys[-1]
+            say(f"Downloading {snapshot_key}...")
+            try:
+                osb.download_database_snapshot(snapshot_key, staged)
+            except osb.ObjectStorageError as e:
+                raise engine.ConfigError(str(e)) from e
+            source = snapshot_key
+        instances, groups = _validate_snapshot(staged)
+        result = RestoreResult(source=source, instances=instances, groups=groups)
+        if REGISTRY_PATH.exists():
+            aside = REGISTRY_PATH.with_name(f"{REGISTRY_PATH.name}.pre-restore-{int(time.time())}")
+            REGISTRY_PATH.rename(aside)
+            result.previous_database = str(aside)
+            say(f"Moved the existing database aside to {aside}.")
+        for suffix in ("-wal", "-shm"):
+            stale = REGISTRY_PATH.with_name(REGISTRY_PATH.name + suffix)
+            if stale.exists():
+                stale.unlink()
+        REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        REGISTRY_PATH.write_bytes(staged.read_bytes())
+    _connect().close()
+    say(f"Restored {instances} instance(s) and {groups} group(s) from {source}.")
+
+    result.known_hosts_restored = restore_known_hosts(
+        known_hosts_file, on_progress=on_progress, on_warning=on_warning,
+    )
+    return result
+
+
+def restore_known_hosts(
+    known_hosts_file: Path | None = None, *,
+    on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> int:
+
+    hosts: bytes | None = None
+    if known_hosts_file is not None:
+        hosts = known_hosts_file.read_bytes()
+    elif osb.is_configured():
+        try:
+            hosts = osb.download_deployment_file(KNOWN_HOSTS_OBJECT_NAME)
+        except osb.ObjectStorageError as e:
+            if on_warning is not None:
+                on_warning(f"  WARNING: couldn't fetch the trusted host keys ({e}).")
+    if hosts:
+        added = _merge_known_hosts(hosts)
+        if on_progress is not None:
+            on_progress(f"Restored {added} trusted host key line(s).")
+        return added
+    if on_warning is not None:
+        on_warning("  WARNING: no trusted host keys restored -- a node that's stopped now will "
+                   "refuse its next start until `reset-host-key --name <node>` is run for it.")
+    return 0
+
+
+def cmd_restore(args) -> int:
+    try:
+        if args.known_hosts_only:
+            restore_known_hosts(Path(args.known_hosts) if args.known_hosts else None,
+                                on_progress=print, on_warning=_print_to_stderr)
+            return 0
+        if args.list:
+            keys = list_database_snapshots()
+            if not keys:
+                print("No database snapshots in Object Storage.")
+            for k in keys:
+                print(k)
+            return 0
+        if not args.yes and _registry_has_content(REGISTRY_PATH) and args.force:
+            answer = input(f"Move the current database ({REGISTRY_PATH}) aside and restore? [y/N] ")
+            if answer.strip().lower() not in ("y", "yes"):
+                print("Aborted.")
+                return 1
+        result = restore_from_backup(
+            snapshot_key=args.snapshot,
+            from_file=Path(args.from_file) if args.from_file else None,
+            known_hosts_file=Path(args.known_hosts) if args.known_hosts else None,
+            force=args.force, on_progress=print, on_warning=_print_to_stderr,
+        )
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    print(f"Restore complete from {result.source}. Now run `rebuild` to add anything onboarded "
+          "after this snapshot, then start the poller.")
+    return 0
+
+
+def _read_passphrase(args, *, confirm: bool) -> str:
+    if getattr(args, "passphrase_file", None):
+        return Path(args.passphrase_file).read_text().rstrip("\n")
+    import getpass
+    first = getpass.getpass("SSH key backup passphrase: ")
+    if confirm and getpass.getpass("Repeat the passphrase: ") != first:
+        raise engine.ConfigError("the passphrases didn't match.")
+    return first
+
+
+def cmd_ssh_key_backup(args) -> int:
+    try:
+        key = backup_ssh_key(Path(args.ssh_key), _read_passphrase(args, confirm=True))
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    except osb.ObjectStorageError as e:
+        print(f"Object Storage error: {e}", file=sys.stderr)
+        return 1
+    print(f"Encrypted SSH key stored as '{key}'. Keep the passphrase somewhere safe and separate -- "
+          "it isn't stored anywhere, and the key can't be recovered without it.")
+    return 0
+
+
+def cmd_ssh_key_restore(args) -> int:
+    try:
+        dest = restore_ssh_key(Path(args.ssh_key), _read_passphrase(args, confirm=False),
+                               force=args.force)
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    except osb.ObjectStorageError as e:
+        print(f"Object Storage error: {e}", file=sys.stderr)
+        return 1
+    print(f"SSH key restored to {dest}.")
+    return 0
 
 
 def _set_group_schedule_row(group_name: str, timezone: str, rules: list, enabled: bool) -> None:
@@ -5302,9 +5793,12 @@ def set_group_schedule(
         raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
     for member in group["members"]:
         _sync_group_membership_tags(client, member, group, on_warning=on_warning)
+    _sync_group_object_backup(group_name, on_warning=on_warning)
 
 
-def delete_schedule_group(group_name: str) -> None:
+def delete_schedule_group(
+    group_name: str, *, on_warning: Callable[[str], None] | None = None,
+) -> None:
 
     def _do():
         conn = _connect()
@@ -5318,13 +5812,12 @@ def delete_schedule_group(group_name: str) -> None:
                     f"group '{group_name}' still has {len(members)} member(s): "
                     f"{', '.join(members)} -- run `group-remove` for each one first."
                 )
-            dependents = [r[0] for r in conn.execute(
-                "SELECT name FROM schedule_groups WHERE depends_on_group_id = ?", (group_id,)
-            ).fetchall()]
+            dependents = _group_dependent_names(conn, group_id)
             if dependents:
                 raise engine.ConfigError(
                     f"group(s) {', '.join(dependents)} depend on '{group_name}' -- run "
-                    f"`group-depends --group-name <group> --clear` for each one first."
+                    f"`group-depends --group-name <group> --remove {group_name}` for each one "
+                    "first."
                 )
             try:
                 conn.execute("DELETE FROM schedule_groups WHERE id = ?", (group_id,))
@@ -5341,6 +5834,7 @@ def delete_schedule_group(group_name: str) -> None:
             conn.close()
 
     _retry_db(_do)
+    _sync_group_object_backup(group_name, on_warning=on_warning)
 
 
 SCHEDULE_MODES = ("auto", "manual")
@@ -5556,7 +6050,7 @@ def remove_instance_from_group(
 
 def cmd_group_create(args) -> int:
     try:
-        group_id = create_schedule_group(args.name, args.timezone)
+        group_id = create_schedule_group(args.name, args.timezone, on_warning=_print_to_stderr)
     except engine.ConfigError as e:
         print(f"Configuration error: {e}", file=sys.stderr)
         return 1
@@ -5652,17 +6146,28 @@ def cmd_set_mode(client, args) -> int:
 
 
 def cmd_group_depends(client, args) -> int:
-    depends_on = None if args.clear else args.on
     try:
-        set_group_dependency(client, args.group_name, depends_on, on_warning=_print_to_stderr)
+        if args.add:
+            deps = add_group_dependency(client, args.group_name, args.add,
+                                        on_warning=_print_to_stderr)
+        elif args.remove:
+            deps = remove_group_dependency(client, args.group_name, args.remove,
+                                           on_warning=_print_to_stderr)
+        else:
+            wanted = [] if args.clear else [
+                part.strip() for item in args.on for part in item.split(",") if part.strip()
+            ]
+            deps = set_group_dependencies(client, args.group_name, wanted,
+                                          on_warning=_print_to_stderr)
     except engine.ConfigError as e:
         print(f"Configuration error: {e}", file=sys.stderr)
         return 1
-    if depends_on is None:
-        print(f"Group '{args.group_name}' no longer depends on another group.")
+    if not deps:
+        print(f"Group '{args.group_name}' no longer depends on any other group.")
     else:
-        print(f"Group '{args.group_name}' now depends on '{depends_on}': its members start only "
-              f"after every member of '{depends_on}' is running and ready, and '{depends_on}''s "
+        names = ", ".join(f"'{d}'" for d in deps)
+        print(f"Group '{args.group_name}' now depends on {names}: its members start only after "
+              f"every member of each of those groups is running and ready, and those groups' "
               f"members stop only after every member of '{args.group_name}' is stopped.")
     return 0
 
@@ -5683,7 +6188,8 @@ def cmd_group_list(args) -> int:
         return 0
     for g in groups:
         state = "enabled" if g["enabled"] else "disabled"
-        dep = f", depends on '{g['depends_on']}'" if g.get("depends_on") else ""
+        dep = (f", depends on {', '.join(repr(d) for d in g['depends_on'])}"
+               if g.get("depends_on") else "")
         print(f"{g['name']} (id {g['id']}, {g['timezone']}, {len(g['rules'])} rule(s), {state}, "
               f"{g['member_count']} member(s){dep})")
     return 0
@@ -5691,7 +6197,7 @@ def cmd_group_list(args) -> int:
 
 def cmd_group_delete(args) -> int:
     try:
-        delete_schedule_group(args.group_name)
+        delete_schedule_group(args.group_name, on_warning=_print_to_stderr)
     except engine.ConfigError as e:
         print(f"Configuration error: {e}", file=sys.stderr)
         return 1
@@ -6026,15 +6532,17 @@ _POLL_NOOP_STOP_OUTCOMES = frozenset({"already_stopped", "aborted_by_user"})
 POST_START_SETTLE_MARGIN_S = 120
 
 
-def _group_dependency_map() -> dict[int, int]:
+def _group_dependency_map() -> dict[int, set[int]]:
 
     def _do():
         conn = _connect()
         try:
-            return dict(conn.execute(
-                "SELECT id, depends_on_group_id FROM schedule_groups"
-                " WHERE depends_on_group_id IS NOT NULL"
-            ).fetchall())
+            dep_map: dict[int, set[int]] = {}
+            for gid, dep in conn.execute(
+                "SELECT group_id, depends_on_group_id FROM group_dependencies"
+            ).fetchall():
+                dep_map.setdefault(gid, set()).add(dep)
+            return dep_map
         finally:
             conn.close()
 
@@ -6088,29 +6596,33 @@ def _member_ready(name: str, record: dict, now: datetime) -> str | None:
     return None
 
 
-def dependency_wait_reason(record: dict, registry: dict, dep_map: dict[int, int],
+def dependency_wait_reason(record: dict, registry: dict, dep_map: dict[int, set[int]],
                            now: datetime) -> str | None:
 
-    target = dep_map.get(record.get("group_id"))
-    if target is None:
+    targets = dep_map.get(record.get("group_id"))
+    if not targets:
         return None
-    target_group = _group_row_by_id(target)
-    label = f"group '{target_group['name']}'" if target_group else f"group {target}"
-    for member, member_record in sorted(registry.items()):
-        if member_record.get("group_id") != target:
-            continue
-        reason = _member_ready(member, member_record, now)
-        if reason is not None:
-            return f"waiting for {label}: {reason}"
+    labelled = []
+    for target in targets:
+        target_group = _group_row_by_id(target)
+        labelled.append((target_group["name"] if target_group else str(target), target))
+    for label, target in sorted(labelled):
+        for member, member_record in sorted(registry.items()):
+            if member_record.get("group_id") != target:
+                continue
+            reason = _member_ready(member, member_record, now)
+            if reason is not None:
+                return f"waiting for group '{label}': {reason}"
     return None
 
 
-def dependents_wait_reason(record: dict, registry: dict, dep_map: dict[int, int]) -> str | None:
+def dependents_wait_reason(record: dict, registry: dict,
+                           dep_map: dict[int, set[int]]) -> str | None:
 
     group_id = record.get("group_id")
     if group_id is None:
         return None
-    dependents = {gid for gid, target in dep_map.items() if target == group_id}
+    dependents = {gid for gid, targets in dep_map.items() if group_id in targets}
     if not dependents:
         return None
     for member, member_record in sorted(registry.items()):
@@ -6196,24 +6708,24 @@ def _group_chain(group_name: str, action: Literal["start", "stop"]) -> list[str]
     if group_name not in groups:
         raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
     if action == "start":
-        chain = [group_name]
-        cursor = groups[group_name].get("depends_on")
-        while cursor and cursor not in chain:
-            chain.append(cursor)
-            cursor = groups.get(cursor, {}).get("depends_on")
-        return list(reversed(chain))
-    dependents: dict[str, list[str]] = {}
-    for g in groups.values():
-        if g.get("depends_on"):
-            dependents.setdefault(g["depends_on"], []).append(g["name"])
+        edges = {name: list(g.get("depends_on") or []) for name, g in groups.items()}
+    else:
+        edges = {}
+        for g in groups.values():
+            for dep in g.get("depends_on") or []:
+                edges.setdefault(dep, []).append(g["name"])
     order: list[str] = []
+    visiting: set[str] = set()
 
     def _visit(name: str) -> None:
-        for child in sorted(dependents.get(name, [])):
-            if child not in order:
-                _visit(child)
-        if name not in order:
-            order.append(name)
+        if name in order or name in visiting:
+            return
+        visiting.add(name)
+        for nxt in sorted(edges.get(name, [])):
+            if nxt in groups:
+                _visit(nxt)
+        visiting.discard(name)
+        order.append(name)
 
     _visit(group_name)
     return order
@@ -6998,33 +7510,99 @@ class RebuildResult:
         return not (self.failed or self.incomplete or self.ambiguous or self.invalid or self.conflicts)
 
 
+def _restore_groups_from_object_storage(
+    client, groups_from_tags: set[str],
+    on_progress: Callable[[str], None] | None,
+    on_warning: Callable[[str], None] | None,
+) -> dict[str, set[str]]:
+
+    dependencies: dict[str, set[str]] = {}
+    names = osb.list_group_backups()
+    if names is None:
+        if osb.is_configured() and on_warning is not None:
+            on_warning("  WARNING: couldn't list group records in Object Storage -- only groups "
+                       "with surviving members were recovered; re-run rebuild to retry.")
+        return dependencies
+    for group_name in names:
+        try:
+            record = osb.download_group_backup(group_name)
+            if record is None:
+                if on_warning is not None:
+                    on_warning(f"  WARNING: group '{group_name}''s Object Storage record is "
+                               "missing or failed verification -- not restored from it.")
+                continue
+            if group_name not in groups_from_tags:
+                dependencies[group_name] = set(normalize_dependency_list(
+                    record.get("depends_on")
+                ))
+            if get_schedule_group(group_name) is not None:
+                continue
+            timezone = record.get("timezone") or "UTC"
+            rules = record.get("rules") or []
+            if rules:
+                _validate_schedule_rules(rules)
+            create_schedule_group(group_name, timezone)
+            if rules:
+                _set_group_schedule_row(group_name, timezone, rules, bool(record.get("enabled", True)))
+            elif not record.get("enabled", True):
+                _set_group_schedule_row(group_name, timezone, [], False)
+            if on_progress is not None:
+                on_progress(f"  recreated group '{group_name}' from Object Storage.")
+            hooks = record.get("hooks")
+            if hooks and any(hooks.values()):
+                set_group_hooks(group_name, hooks, actor="rebuild", client=client,
+                                on_warning=on_warning)
+                if on_progress is not None:
+                    on_progress(f"  restored group '{group_name}''s hooks from Object Storage.")
+        except Exception as e:
+            if on_warning is not None:
+                on_warning(f"  WARNING: could not restore group '{group_name}' from Object "
+                           f"Storage: {e} -- recreate it with group-create.")
+    return dependencies
+
+
 def _restore_group_dependencies(
-    client, pending: dict[str, str],
+    client, from_tags: dict[str, list[set[str]]], from_objects: dict[str, set[str]],
     on_progress: Callable[[str], None] | None,
     on_warning: Callable[[str], None] | None,
 ) -> None:
 
-    for group_name, dep in sorted(pending.items()):
+    wanted: dict[str, tuple[set[str], str]] = {}
+    for group_name, member_sets in from_tags.items():
+        union = set().union(*member_sets) if member_sets else set()
+        if any(m != union for m in member_sets) and on_warning is not None:
+            on_warning(f"  WARNING: group '{group_name}''s members disagree about its "
+                       f"dependencies -- restoring all of them ({', '.join(sorted(union))}); "
+                       "check with group-show.")
+        wanted[group_name] = (union, "tags")
+    for group_name, deps in from_objects.items():
+        wanted.setdefault(group_name, (deps, "Object Storage"))
+    for group_name, (deps, source) in sorted(wanted.items()):
+        if not deps:
+            continue
         try:
             group = get_schedule_group(group_name)
             if group is None or group.get("depends_on"):
                 continue
-            if get_schedule_group(dep) is None:
-                if on_warning is not None:
-                    on_warning(
-                        f"  WARNING: group '{group_name}' depended on '{dep}', but '{dep}' could "
-                        "not be recovered (it had no surviving members) -- recreate it and run "
-                        f"group-depends --group-name {group_name} --on {dep}."
-                    )
+            missing = sorted(d for d in deps if get_schedule_group(d) is None)
+            present = sorted(d for d in deps if d not in missing)
+            if missing and on_warning is not None:
+                on_warning(
+                    f"  WARNING: group '{group_name}' depended on {', '.join(missing)}, which "
+                    "could not be recovered -- recreate it and run group-depends --group-name "
+                    f"{group_name} --add <group>."
+                )
+            if not present:
                 continue
-            set_group_dependency(client, group_name, dep, on_warning=on_warning)
+            set_group_dependencies(client, group_name, present, on_warning=on_warning)
             if on_progress is not None:
-                on_progress(f"  restored group '{group_name}''s dependency on '{dep}' from tags.")
+                on_progress(f"  restored group '{group_name}''s dependencies on "
+                            f"{', '.join(present)} from {source}.")
         except Exception as e:
             if on_warning is not None:
                 on_warning(
-                    f"  WARNING: could not restore group '{group_name}''s dependency on "
-                    f"'{dep}': {e} -- run group-depends --group-name {group_name} --on {dep}."
+                    f"  WARNING: could not restore group '{group_name}''s dependencies "
+                    f"({', '.join(sorted(deps))}): {e} -- set them again with group-depends."
                 )
 
 
@@ -7049,7 +7627,7 @@ def rebuild_instances(
     ambiguous: list[tuple[str, dict]] = []
 
 
-    pending_dependencies: dict[str, str] = {}
+    pending_dependencies: dict[str, list[set[str]]] = {}
 
     for name, resources in found.items():
 
@@ -7207,16 +7785,13 @@ def rebuild_instances(
                                     f"  restored '{name}''s membership in group "
                                     f"'{group_name}' from tags."
                                 )
-                            dep = next(
-                                (
-                                    t[len(_GROUP_DEP_TAG_PREFIX):]
-                                    for t in (os_volume.tags or [])
-                                    if t.startswith(_GROUP_DEP_TAG_PREFIX)
-                                ),
-                                None,
-                            )
-                            if dep:
-                                pending_dependencies.setdefault(group_name, dep)
+
+
+                            pending_dependencies.setdefault(group_name, []).append({
+                                t[len(_GROUP_DEP_TAG_PREFIX):]
+                                for t in (os_volume.tags or [])
+                                if t.startswith(_GROUP_DEP_TAG_PREFIX)
+                            })
                     except Exception as e:
                         if on_warning is not None:
                             on_warning(
@@ -7277,7 +7852,12 @@ def rebuild_instances(
         else:
             partial.append(name)
 
-    _restore_group_dependencies(client, pending_dependencies, on_progress, on_warning)
+    object_dependencies = _restore_groups_from_object_storage(
+        client, set(pending_dependencies), on_progress, on_warning,
+    )
+    _restore_group_dependencies(
+        client, pending_dependencies, object_dependencies, on_progress, on_warning,
+    )
 
     if on_progress is not None:
         on_progress(f"Scanned tags: {len(found)} name(s) found.")
@@ -8227,8 +8807,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     group_depends_parser.add_argument("--group-name", required=True)
     depends_target = group_depends_parser.add_mutually_exclusive_group(required=True)
-    depends_target.add_argument("--on", help="The group this group depends on.")
-    depends_target.add_argument("--clear", action="store_true", help="Remove the dependency.")
+    depends_target.add_argument(
+        "--on", action="append", metavar="GROUP",
+        help="Set the full list of groups this group depends on, replacing any existing ones. "
+        "Repeat it, or give a comma-separated list (--on db,cache).",
+    )
+    depends_target.add_argument("--add", metavar="GROUP", help="Add one dependency.")
+    depends_target.add_argument("--remove", metavar="GROUP", help="Remove one dependency.")
+    depends_target.add_argument("--clear", action="store_true", help="Remove all dependencies.")
 
     group_delete_parser = subparsers.add_parser(
         "group-delete",
@@ -8334,6 +8920,45 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "or both -- refuses if neither is available, since there'd be nothing to actually do.",
     )
 
+    restore_parser = subparsers.add_parser(
+        "restore",
+        help="Put a full database snapshot in place on a new host (from Object Storage or a "
+        "local file), plus the trusted host keys. Run `rebuild` afterward. Stop the poller first.",
+    )
+    restore_source = restore_parser.add_mutually_exclusive_group()
+    restore_source.add_argument("--list", action="store_true",
+                                help="List the database snapshots in Object Storage and exit.")
+    restore_source.add_argument("--snapshot", metavar="KEY",
+                                help="A specific Object Storage snapshot (default: the latest).")
+    restore_source.add_argument("--from-file", metavar="PATH",
+                                help="A local snapshot file (e.g. from `backup --backup-dir`).")
+    restore_source.add_argument("--known-hosts-only", action="store_true",
+                                help="Only restore the trusted host keys (e.g. before a `rebuild` "
+                                "with no snapshot).")
+    restore_parser.add_argument("--known-hosts", metavar="PATH",
+                                help="Trusted host keys file to restore (default: from Object "
+                                "Storage, when configured).")
+    restore_parser.add_argument("--force", action="store_true",
+                                help="Replace a database that already holds instances or groups "
+                                "(it's moved aside, not deleted).")
+    restore_parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
+
+    for cmd, helptext in (
+        ("ssh-key-backup", "Store the deployment's SSH private key in Object Storage, encrypted "
+         "with a passphrase you choose (and keep yourself), so a replacement host can get it back."),
+        ("ssh-key-restore", "Fetch and decrypt the deployment SSH key from Object Storage onto "
+         "this host."),
+    ):
+        p_ = subparsers.add_parser(cmd, help=helptext)
+        p_.add_argument("--ssh-key", default=default_ssh_key,
+                        help="Path of the private key (default: LINODE_SSH_KEY_PATH, or the "
+                        "tool's default key path).")
+        p_.add_argument("--passphrase-file", metavar="PATH",
+                        help="Read the passphrase from this file instead of prompting.")
+        if cmd == "ssh-key-restore":
+            p_.add_argument("--force", action="store_true",
+                            help="Overwrite a different key already at that path.")
+
     return parser
 
 
@@ -8392,6 +9017,12 @@ def _route(args) -> int:
         return cmd_reset_host_key(args)
     if args.command == "backup":
         return cmd_backup(args)
+    if args.command == "restore":
+        return cmd_restore(args)
+    if args.command == "ssh-key-backup":
+        return cmd_ssh_key_backup(args)
+    if args.command == "ssh-key-restore":
+        return cmd_ssh_key_restore(args)
     if args.command == "hooks-show":
         return cmd_hooks_show(args)
     if args.command == "hooks-run":

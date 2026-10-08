@@ -8,6 +8,13 @@ CREATE TABLE IF NOT EXISTS schedule_groups (
     depends_on_group_id INTEGER REFERENCES schedule_groups(id)
 );
 
+CREATE TABLE IF NOT EXISTS group_dependencies (
+    group_id INTEGER NOT NULL REFERENCES schedule_groups(id) ON DELETE CASCADE,
+    depends_on_group_id INTEGER NOT NULL REFERENCES schedule_groups(id),
+    PRIMARY KEY (group_id, depends_on_group_id),
+    CHECK (group_id != depends_on_group_id)
+);
+
 CREATE TABLE IF NOT EXISTS instances (
     name TEXT PRIMARY KEY,
     label TEXT,

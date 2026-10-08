@@ -130,7 +130,9 @@ export function GroupsPage() {
                     <td className="px-5 py-3 text-sm text-slate-600">{g.timezone}</td>
                     <td className="px-5 py-3 text-sm text-slate-600">{g.rules.length}</td>
                     <td className="px-5 py-3 text-sm text-slate-600">{g.member_count}</td>
-                    <td className="px-5 py-3 text-sm text-slate-600">{g.depends_on ?? '—'}</td>
+                    <td className="px-5 py-3 text-sm text-slate-600">
+                      {g.depends_on && g.depends_on.length > 0 ? g.depends_on.join(', ') : '—'}
+                    </td>
                     <td className="px-5 py-3 text-sm text-slate-600">
                       {!g.enabled ? 'Disabled' : g.rules.length === 0 ? 'No schedule yet' : 'Enabled'}
                     </td>

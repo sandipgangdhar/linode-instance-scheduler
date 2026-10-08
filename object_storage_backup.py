@@ -233,6 +233,105 @@ def upload_database_snapshot(
     return key
 
 
+_SNAPSHOT_PREFIX = "full-backups/"
+_DEPLOYMENT_PREFIX = "deployment/"
+
+
+def list_database_snapshots() -> list[str] | None:
+
+    client = build_object_storage_client()
+    if client is None:
+        return None
+    keys: list[str] = []
+    token = None
+    try:
+        while True:
+            kwargs = {"Bucket": _cached_bucket, "Prefix": _SNAPSHOT_PREFIX}
+            if token:
+                kwargs["ContinuationToken"] = token
+            page = _retry(lambda kwargs=kwargs: client.list_objects_v2(**kwargs))
+            keys += [o["Key"] for o in page.get("Contents", []) or [] if o.get("Key", "").endswith(".db")]
+            if not page.get("IsTruncated"):
+                break
+            token = page.get("NextContinuationToken")
+    except (ClientError, BotoCoreError, ObjectStorageError):
+        return None
+
+    def _ts(key: str) -> int:
+        stem = key[len(_SNAPSHOT_PREFIX):].removeprefix("instances-").removesuffix(".db")
+        return int(stem) if stem.isdigit() else 0
+
+    return sorted(keys, key=lambda k: (_ts(k), k))
+
+
+def _get_verified(key: str) -> bytes:
+
+    client = build_object_storage_client()
+    if client is None:
+        raise ObjectStorageError("Object Storage is not configured (LINODE_OBJ_STORAGE_* unset)")
+    try:
+        response = _retry(lambda: client.get_object(Bucket=_cached_bucket, Key=key))
+    except (ClientError, BotoCoreError) as e:
+        raise ObjectStorageError(f"could not download '{key}': {e}") from e
+    body = response["Body"].read()
+    stored_md5 = response.get("Metadata", {}).get(_MD5_METADATA_KEY)
+    if stored_md5 and hashlib.md5(body).hexdigest() != stored_md5:
+        raise ObjectStorageError(f"'{key}' failed its checksum -- not using it.")
+    return body
+
+
+def download_database_snapshot(key: str, dest_path: Path) -> None:
+
+    body = _get_verified(key)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_bytes(body)
+
+
+def upload_deployment_file(
+    name: str, data: bytes, *, attempts: int = DEFAULT_ATTEMPTS, delay_s: float = DEFAULT_DELAY_S
+) -> str:
+
+    client = build_object_storage_client()
+    if client is None:
+        raise ObjectStorageError("Object Storage is not configured (LINODE_OBJ_STORAGE_* unset)")
+    bucket = _cached_bucket
+    key = f"{_DEPLOYMENT_PREFIX}{name}"
+    md5_hex = hashlib.md5(data).hexdigest()
+
+    def _do():
+        response = client.put_object(
+            Bucket=bucket, Key=key, Body=data, ContentType="application/octet-stream",
+            Metadata={_MD5_METADATA_KEY: md5_hex},
+        )
+        etag = response.get("ETag", "").strip('"')
+        if etag and etag != md5_hex:
+            raise ObjectStorageError(f"'{key}' did not verify: expected ETag {md5_hex}, got {etag}.")
+
+    _retry(_do, attempts=attempts, delay_s=delay_s)
+    return key
+
+
+def download_deployment_file(name: str) -> bytes | None:
+
+    client = build_object_storage_client()
+    if client is None:
+        raise ObjectStorageError("Object Storage is not configured (LINODE_OBJ_STORAGE_* unset)")
+    key = f"{_DEPLOYMENT_PREFIX}{name}"
+    try:
+        response = _retry(lambda: client.get_object(Bucket=_cached_bucket, Key=key))
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return None
+        raise ObjectStorageError(f"could not download '{key}': {e}") from e
+    except BotoCoreError as e:
+        raise ObjectStorageError(f"could not download '{key}': {e}") from e
+    body = response["Body"].read()
+    stored_md5 = response.get("Metadata", {}).get(_MD5_METADATA_KEY)
+    if stored_md5 and hashlib.md5(body).hexdigest() != stored_md5:
+        raise ObjectStorageError(f"'{key}' failed its checksum -- not using it.")
+    return body
+
+
 def download_instance_backup(name: str) -> dict | None:
 
     client = build_object_storage_client()
@@ -259,6 +358,95 @@ def download_instance_backup(name: str) -> dict | None:
         return json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+
+
+_GROUP_PREFIX = "groups/"
+
+
+def _group_object_key(group_name: str) -> str:
+    return f"{_GROUP_PREFIX}{group_name}.json"
+
+
+def upload_group_backup(
+    group_name: str, record: dict, *, attempts: int = DEFAULT_ATTEMPTS,
+    delay_s: float = DEFAULT_DELAY_S,
+) -> None:
+
+    client = build_object_storage_client()
+    if client is None:
+        raise ObjectStorageError("Object Storage is not configured (LINODE_OBJ_STORAGE_* unset)")
+    bucket = _cached_bucket
+    body, md5_hex = _serialize(record)
+
+    def _do():
+        response = client.put_object(
+            Bucket=bucket, Key=_group_object_key(group_name), Body=body,
+            ContentType="application/json", Metadata={_MD5_METADATA_KEY: md5_hex},
+        )
+        etag = response.get("ETag", "").strip('"')
+        if etag and etag != md5_hex:
+            raise ObjectStorageError(
+                f"Object Storage record for group '{group_name}' did not verify: expected ETag "
+                f"{md5_hex}, got {etag}."
+            )
+
+    _retry(_do, attempts=attempts, delay_s=delay_s)
+
+
+def delete_group_backup(group_name: str) -> None:
+
+    client = build_object_storage_client()
+    if client is None:
+        raise ObjectStorageError("Object Storage is not configured (LINODE_OBJ_STORAGE_* unset)")
+    bucket = _cached_bucket
+    _retry(lambda: client.delete_object(Bucket=bucket, Key=_group_object_key(group_name)))
+
+
+def download_group_backup(group_name: str) -> dict | None:
+
+    client = build_object_storage_client()
+    if client is None:
+        return None
+    try:
+        response = _retry(
+            lambda: client.get_object(Bucket=_cached_bucket, Key=_group_object_key(group_name))
+        )
+    except (ClientError, BotoCoreError, ObjectStorageError):
+        return None
+    body = response["Body"].read()
+    stored_md5 = response.get("Metadata", {}).get(_MD5_METADATA_KEY)
+    if stored_md5 and hashlib.md5(body).hexdigest() != stored_md5:
+        return None
+    try:
+        record = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def list_group_backups() -> list[str] | None:
+
+    client = build_object_storage_client()
+    if client is None:
+        return None
+    names: list[str] = []
+    token = None
+    try:
+        while True:
+            kwargs = {"Bucket": _cached_bucket, "Prefix": _GROUP_PREFIX}
+            if token:
+                kwargs["ContinuationToken"] = token
+            page = _retry(lambda kwargs=kwargs: client.list_objects_v2(**kwargs))
+            for obj in page.get("Contents", []) or []:
+                key = obj.get("Key", "")
+                if key.startswith(_GROUP_PREFIX) and key.endswith(".json"):
+                    names.append(key[len(_GROUP_PREFIX):-len(".json")])
+            if not page.get("IsTruncated"):
+                break
+            token = page.get("NextContinuationToken")
+    except (ClientError, BotoCoreError, ObjectStorageError):
+        return None
+    return sorted(names)
 
 
 def sync_object_storage_backup(

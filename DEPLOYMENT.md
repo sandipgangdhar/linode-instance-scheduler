@@ -19,6 +19,45 @@ alternatives, not sequential reading.
 
 ---
 
+## Quick start: `install.sh`
+
+`install.sh`, at the top of the repository, does everything in §2–§8 for you on a fresh host:
+system packages, a dedicated service user, the Python environment, credentials, the deployment SSH
+key, the poller and API services, the dashboard, and an hourly backup timer. The rest of this
+guide explains each piece, for anyone who wants to set it up by hand or understand what the
+script did.
+
+```
+git clone https://github.com/sandipgangdhar/linode-instance-scheduler.git
+cd linode-instance-scheduler
+sudo ./install.sh install --backup-ssh-key
+```
+
+It asks for your Linode API token, your Object Storage bucket (strongly recommended — it's what
+makes moving to a new host lossless), optionally a "Login with Linode" OAuth app, and a passphrase
+for the encrypted copy of the SSH key. It installs to `/opt/linode-instance-scheduler` and prints
+the deployment's SSH public key at the end — add that key to every instance you'll manage. For a
+non-interactive run, put the settings in a file and pass `--env-file <file> --passphrase-file
+<file> --yes`. Run `sudo ./install.sh --help` for every option.
+
+Re-running `install` on the same host is safe: it keeps the existing `.env`, SSH key and database,
+updates the code and dependencies, rebuilds the dashboard and restarts the services — so after a
+`git pull` it doubles as the upgrade command.
+
+| Command | What it does |
+|---|---|
+| `sudo ./install.sh install` | First-time install (or upgrade, when re-run) |
+| `sudo ./install.sh recover` | Set up a replacement host and restore everything — see §8.1 |
+| `sudo ./install.sh start` | Start the services (after `recover --no-start`) |
+| `sudo ./install.sh backup-now` | Back up right now |
+| `sudo ./install.sh status` | Services, latest backups, managed instances |
+
+The dashboard needs Node.js 20.19+ or 22.12+ to build. If the host's own Node.js is older or
+missing, the script downloads the official Node.js release from nodejs.org, checks it against the
+published SHA-256 checksums, uses it for the build, and removes it afterwards.
+
+---
+
 ## 1. Deployment model — what you're actually setting up
 
 This tool is **self-hosted, one deployment per Linode account** — there's no shared service, no
@@ -56,8 +95,9 @@ you want schedules to actually enforce themselves unattended.
   reachability check, and every stop reads the instance's current SSH keys. For an instance
   with only VPC/VLAN interfaces (no public IP), that means this host must sit inside the same
   VPC (or on the same VLAN), since the tool reaches it at its private address.
-- **Node.js 18+**, only if you're building the web dashboard (§7) — not needed for the CLI or
-  poller alone.
+- **Node.js 20.19+ or 22.12+**, only if you're building the web dashboard (§7) — not needed for
+  the CLI or poller alone. (`install.sh` fetches a suitable one for the build if the host's is
+  older.)
 - A **persistent, centralized machine** — not a laptop that sleeps or gets reimaged. A small,
   always-on Linode instance is a natural, if slightly self-referential, choice: nothing about
   running this tool's own host through this tool itself is required or recommended — keep the
@@ -264,8 +304,8 @@ login service any other deployment of this tool uses.
 
 ## 7. Building the web dashboard (optional)
 
-Only relevant if you're running the REST API (§6). Requires Node.js 18+ **on the machine doing the
-build** — this can be the deployment host itself, or your own laptop/CI, since only the build
+Only relevant if you're running the REST API (§6). Requires Node.js 20.19+ or 22.12+ **on the machine
+doing the build** — this can be the deployment host itself, or your own laptop/CI, since only the build
 *output* needs to reach the deployment host.
 
 **Building on the deployment host directly** (simplest):
@@ -295,43 +335,106 @@ Re-run the build (and restart the service) after pulling a new version of this r
 
 ## 8. Backups and disaster recovery
 
-`state/instances.db` is a real SQLite database and the source of truth for schedules, group
-membership, and which Linode resources (volumes, reserved IPs) belong to which logical name.
-Losing it isn't catastrophic — every managed instance's identity is *also* mirrored onto that
-instance's own Linode tags specifically so it can be reconstructed — but a routine backup makes
-the common case (accidental deletion, disk corruption) a fast restore instead of a full rebuild.
+Three things live only on the deployment host, and a replacement host needs all three:
 
-**Routine backup** — a safe, hot backup (works even while the poller/API are actively writing to
-the database), via a simple cron entry:
+| What | Where | How it's protected |
+|---|---|---|
+| The database (instances, schedules, groups, hooks, start order, API tokens, history) | `state/instances.db` | `backup`: a full snapshot to Object Storage and/or a local directory. Also, independently: Linode tags on every managed resource plus per-instance and per-group records in Object Storage, which `rebuild` reads |
+| The trusted SSH host keys of your instances | `state/known_hosts` | `backup` saves a copy to Object Storage and next to each local snapshot |
+| The deployment SSH private key | `keys/deploy_key` (or `LINODE_SSH_KEY_PATH`) | Your own copy, and/or `ssh-key-backup`: an encrypted copy in Object Storage that only your passphrase opens |
 
-```
-# /etc/cron.d/linode-scheduler-backup
-0 * * * * linode-scheduler sqlite3 /opt/linode-instance-scheduler/state/instances.db ".backup '/opt/linode-instance-scheduler/backups/instances-$(date +\%Y\%m\%dT\%H\%M).db'"
-```
-
-Adjust the frequency and retention (add a second line pruning old backups) to your own comfort
-level, and copy backups off this host periodically (a Linode Object Storage bucket, another
-instance) so they don't share a single point of failure with the deployment host itself.
-
-**If `state/` is lost or corrupted entirely** — restore your most recent backup file to
-`state/instances.db` and restart both services. **If no backup exists at all** (or you want to
-confirm reconstruction works before you ever need it), the tool's own `rebuild` command
-reconstructs the registry directly from tags already written onto your Linode resources:
+**Routine backups.** `install.sh` installs a timer that runs `backup --backup-dir
+/opt/linode-instance-scheduler/backups` every hour and keeps two weeks of local snapshots. By hand,
+or from your own cron:
 
 ```
+python instance_manager.py backup --backup-dir /opt/linode-instance-scheduler/backups
+```
+
+`backup` takes a consistent snapshot even while the poller and API are writing. With Object Storage
+configured it also re-uploads every instance and group record, a full database snapshot and the
+trusted host keys. Local snapshots alone are lost with the host — copy them elsewhere, or use Object
+Storage.
+
+**The SSH key.** Every managed instance trusts exactly one key, the deployment's own. A replacement
+host can't manage anything without it, and a new key would have to be added to every instance by
+hand. Store it encrypted in your bucket once:
+
+```
+python instance_manager.py ssh-key-backup        # asks for a passphrase (12+ characters)
+```
+
+The key is encrypted on this host (AES-256-GCM, with a key derived from your passphrase by scrypt)
+before it's uploaded; the passphrase is never stored anywhere. Keep it in your password manager —
+without it, the stored copy can't be opened. `install.sh install --backup-ssh-key` does this for
+you.
+
+### 8.1 Moving to a new host (the old one is lost)
+
+On a fresh host, with the old one shut down or gone:
+
+```
+git clone https://github.com/sandipgangdhar/linode-instance-scheduler.git
+cd linode-instance-scheduler
+sudo ./install.sh recover --ssh-key-from-backup
+```
+
+Give it the same API token and the **same bucket** the old host used, and the SSH key passphrase.
+It then, before starting anything:
+
+1. installs everything exactly as `install` does, but leaves the services stopped;
+2. fetches and decrypts the SSH key (or takes the original key file with `--ssh-key <path>`);
+3. restores the newest database snapshot from the bucket (`--snapshot <key>` for an older one,
+   `--from-file <path>` for a local snapshot) and the trusted host keys;
+4. runs `rebuild`, which reads Linode's tags and the bucket's instance and group records to add
+   anything onboarded or changed after that snapshot, without touching what the snapshot restored;
+5. starts the services and takes a fresh backup.
+
+Add `--no-start` to stop after step 4 and review `instance_manager.py list` first; then run
+`sudo ./install.sh start`.
+
+**With no snapshot at all** (`--rebuild-only`, or a bucket with none), `rebuild` alone still brings
+back every instance, its schedule, group membership, each group's schedule, hooks and start order
+(including groups with no members, from their Object Storage records), and a stopped instance's
+network and SSH settings. Two things exist only in the database and need redoing: API tokens (create
+new ones) and the audit history. A manual-override timer that was counting down is reported and
+not re-armed.
+
+**What to check afterwards:**
+
+- An instance shown as `needs_manual_recovery`: boot it once from Cloud Manager, then
+  `onboard --name <name> --instance-id <id> --force`.
+- An instance that refuses to start with a host-key warning was onboarded after the last backup
+  of the host keys — confirm it's really your instance, then `reset-host-key --name <name>`.
+- If the new host has a different address or name: point DNS and your reverse proxy at it, and
+  update the OAuth app's redirect URI and `LINODE_OAUTH_REDIRECT_URI` in `.env`.
+
+Never run the old and new hosts' pollers at the same time — two pollers acting on the same
+instances can race each other. `recover` asks you to confirm the old host is stopped.
+
+**Without `install.sh`**, the same steps by hand: install as in §3–§6 with the original SSH key in
+place and the services stopped, then:
+
+```
+python instance_manager.py ssh-key-restore      # if you stored it with ssh-key-backup
+python instance_manager.py restore              # newest snapshot + host keys (--list, --snapshot, --from-file)
 python instance_manager.py rebuild
+sudo systemctl start linode-scheduler-poll linode-scheduler-api
 ```
-
-This recovers instance identity, individual schedules, and group membership for every previously
-onboarded, still-existing resource — reach for it as the guaranteed last resort, not the routine
-path (a routine restore from a recent backup is faster and loses less). One real limitation worth
-knowing before you need it: a schedule **group with zero members** at the moment of data loss has
-no tag trace anywhere and can't be reconstructed this way — if that's a real concern, make sure
-groups keep at least one member, or lean on the routine backup above instead.
 
 ---
 
 ## 9. Upgrading
+
+With `install.sh`: pull the new version into your clone and re-run it — it updates the code and
+dependencies, rebuilds the dashboard and restarts the services, keeping `.env`, the SSH key and the
+database:
+
+```
+cd linode-instance-scheduler && git pull && sudo ./install.sh install
+```
+
+By hand:
 
 ```
 cd /opt/linode-instance-scheduler

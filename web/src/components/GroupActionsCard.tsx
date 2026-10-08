@@ -19,7 +19,8 @@ export function GroupActionsCard({ group, onChanged }: { group: ScheduleGroup; o
       mountedRef.current = false
     }
   }, [])
-  const hasChain = withDependencies && (group.depends_on || (group.dependents ?? []).length > 0)
+  const hasChain =
+    withDependencies && ((group.depends_on ?? []).length > 0 || (group.dependents ?? []).length > 0)
   const act = async (action: 'start' | 'stop') => {
     if (busyRef.current) return
     busyRef.current = true
@@ -64,7 +65,7 @@ export function GroupActionsCard({ group, onChanged }: { group: ScheduleGroup; o
       <div className="space-y-3 px-5 py-4 text-sm">
         {warnings && <WarningBanner messages={warnings} />}
         {error && <ErrorBanner message={error} />}
-        {(group.depends_on || (group.dependents ?? []).length > 0) && (
+        {((group.depends_on ?? []).length > 0 || (group.dependents ?? []).length > 0) && (
           <label className="flex items-center gap-2 text-slate-700">
             <input
               type="checkbox"

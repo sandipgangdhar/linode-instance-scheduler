@@ -287,7 +287,7 @@ export const api = {
     request<{
       deleted: boolean
     }>('DELETE', `/groups/${encodeURIComponent(name)}`),
-  setGroupDependency: (name: string, dependsOn: string | null) =>
+  setGroupDependencies: (name: string, dependsOn: string[]) =>
     request<ScheduleGroup>('PATCH', `/groups/${encodeURIComponent(name)}`, { depends_on: dependsOn }),
   setGroupSchedule: (name: string, schedule: Schedule) =>
     request<ScheduleGroup>('POST', `/groups/${encodeURIComponent(name)}/schedule`, schedule),
