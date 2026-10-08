@@ -30,15 +30,22 @@ script did.
 ```
 git clone https://github.com/sandipgangdhar/linode-instance-scheduler.git
 cd linode-instance-scheduler
-sudo ./install.sh install --backup-ssh-key
+sudo ./install.sh install --backup-ssh-key --domain scheduler.example.com
 ```
 
 It asks for your Linode API token, your Object Storage bucket (strongly recommended — it's what
 makes moving to a new host lossless), optionally a "Login with Linode" OAuth app, and a passphrase
-for the encrypted copy of the SSH key. It installs to `/opt/linode-instance-scheduler` and prints
+for the encrypted copy of the SSH key. With `--domain` (or when you answer the domain question),
+it also installs Caddy and serves the dashboard at `https://<domain>`, with a certificate Caddy
+obtains and renews on its own — the domain's A record must already point at this host's public
+IP, and ports 80 and 443 must be open (Cloud Firewall and any host firewall; the script opens ufw
+itself). Use the same domain in the OAuth app's callback URL: `https://<domain>/oauth/callback`.
+It installs to `/opt/linode-instance-scheduler` and prints
 the deployment's SSH public key at the end — add that key to every instance you'll manage. For a
 non-interactive run, put the settings in a file and pass `--env-file <file> --passphrase-file
-<file> --yes`. Run `sudo ./install.sh --help` for every option.
+<file> --yes`. Nothing is saved until every question is answered, so an interrupted
+run (Ctrl+C, a dropped SSH session) leaves no half-written configuration; re-running asks again
+for anything still missing, such as Object Storage or the "Login with Linode" settings. Run `sudo ./install.sh --help` for every option.
 
 Re-running `install` on the same host is safe: it keeps the existing `.env`, SSH key and database,
 updates the code and dependencies, rebuilds the dashboard and restarts the services — so after a
@@ -270,7 +277,8 @@ Linode" OAuth callback URLs must be `https://`) and so the API/dashboard aren't 
 attacker's port scan finds.
 
 **Example using Caddy** (simplest option — automatic HTTPS via Let's Encrypt, no manual
-certificate management):
+certificate management; `install.sh --domain <name>` sets this up for you, writing only its own
+marked block in `/etc/caddy/Caddyfile` and keeping any other sites there):
 
 ```
 your-deployment-host.example.com {

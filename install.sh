@@ -22,6 +22,10 @@ BACKUP_SSH_KEY=0
 PASSPHRASE_FILE=""
 WITH_API=1
 API_PORT=8000
+DOMAIN=""
+CADDYFILE="/etc/caddy/Caddyfile"
+CADDY_BEGIN="# BEGIN linode-instance-scheduler (managed by install.sh)"
+CADDY_END="# END linode-instance-scheduler"
 WITH_DASHBOARD=1
 SNAPSHOT=""
 FROM_FILE=""
@@ -38,7 +42,7 @@ NODE_BUILD_VERSION="22.12.0"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARNING:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; [[ -n "${ENV_STAGE:-}" ]] && rm -f "$ENV_STAGE"; exit 1; }
 
 usage() {
   cat <<'EOF'
@@ -71,6 +75,9 @@ Options:
   --passphrase-file PATH    Read that passphrase from a file instead of prompting
   --no-api                  Don't install the REST API / dashboard service
   --api-port PORT           API port on 127.0.0.1 (default 8000)
+  --domain NAME             Serve the dashboard at https://NAME: installs Caddy, which gets and
+                            renews the certificate. NAME's DNS must point at this host and ports
+                            80/443 must be open. Asked interactively if not given
   --no-dashboard            Don't build the web dashboard
   --snapshot KEY            recover: a specific Object Storage snapshot (default: the latest)
   --from-file PATH          recover: a local snapshot file instead of Object Storage
@@ -100,6 +107,7 @@ while [[ $# -gt 0 ]]; do
     --passphrase-file) PASSPHRASE_FILE="$2"; shift 2 ;;
     --no-api) WITH_API=0; shift ;;
     --api-port) API_PORT="$2"; shift 2 ;;
+    --domain) DOMAIN="$2"; shift 2 ;;
     --no-dashboard) WITH_DASHBOARD=0; shift ;;
     --snapshot) SNAPSHOT="$2"; shift 2 ;;
     --from-file) FROM_FILE="$2"; shift 2 ;;
@@ -191,51 +199,123 @@ install_code() {
 
 # --- credentials ----------------------------------------------------------------------------------
 
-set_env() {  # set_env KEY VALUE -- replace or append, never echo the value
-  local file="$INSTALL_DIR/.env" tmp
-  tmp=$(mktemp)
-  grep -v "^$1=" "$file" > "$tmp" 2>/dev/null || true
+# .env is written through a private staging copy and only replaced, in one rename, after every
+# question is answered -- an interrupted run (Ctrl+C, a lost SSH session) leaves the old file as
+# it was and no half-written configuration behind.
+ENV_STAGE=""
+cleanup_env_stage() { [[ -n "$ENV_STAGE" ]] && rm -f "$ENV_STAGE"; ENV_STAGE=""; }
+
+stage_set() {  # stage_set KEY VALUE -- replace or append in the staging file, never echo the value
+  local tmp
+  tmp=$(mktemp "$INSTALL_DIR/.env.tmp.XXXXXX")
+  grep -v "^$1=" "$ENV_STAGE" > "$tmp" 2>/dev/null || true
   printf '%s=%s\n' "$1" "$2" >> "$tmp"
-  cat "$tmp" > "$file"; rm -f "$tmp"
+  cat "$tmp" > "$ENV_STAGE"; rm -f "$tmp"
+}
+stage_has() { grep -Eq "^$1=.+" "$ENV_STAGE" 2>/dev/null; }
+
+ask_secret() {  # ask_secret "Prompt" [required] -> stdout
+  local v
+  while :; do
+    read -r -s -p "$1: " v </dev/tty; printf '\n' >/dev/tty
+    [[ -n "$v" || "${2:-}" != required ]] && break
+    printf '  (required)\n' >/dev/tty
+  done
+  printf '%s' "$v"
+}
+ask() {  # ask "Prompt" "default" [required] -> stdout
+  local v
+  while :; do
+    read -r -p "$1${2:+ [$2]}: " v </dev/tty
+    v="${v:-$2}"
+    [[ -n "$v" || "${3:-}" != required ]] && break
+    printf '  (required)\n' >/dev/tty
+  done
+  printf '%s' "$v"
 }
 
-ask_secret() {  # ask_secret "Prompt" -> stdout
-  local v; read -r -s -p "$1: " v </dev/tty; printf '\n' >/dev/tty; printf '%s' "$v"
+ask_object_storage() {
+  [[ "$MODE" == "recover" ]] && log "Object Storage: use the SAME bucket the old host backed up to"
+  stage_set LINODE_OBJ_STORAGE_BUCKET "$(ask 'Bucket name' '' required)"
+  stage_set LINODE_OBJ_STORAGE_ENDPOINT "$(ask 'Endpoint URL (e.g. https://in-maa-1.linodeobjects.com)' '' required)"
+  stage_set LINODE_OBJ_STORAGE_ACCESS_KEY "$(ask_secret 'Access key' required)"
+  stage_set LINODE_OBJ_STORAGE_SECRET_KEY "$(ask_secret 'Secret key' required)"
 }
-ask() {  # ask "Prompt" "default" -> stdout
-  local v; read -r -p "$1${2:+ [$2]}: " v </dev/tty; printf '%s' "${v:-$2}"
+
+ask_oauth() {
+  local uri
+  stage_set LINODE_OAUTH_CLIENT_ID "$(ask 'OAuth client ID' '' required)"
+  stage_set LINODE_OAUTH_CLIENT_SECRET "$(ask_secret 'OAuth client secret' required)"
+  while :; do
+    uri=$(ask 'OAuth callback URL (exactly as entered in the OAuth app)' "https://${DOMAIN:-$(hostname -f)}/oauth/callback" required)
+    [[ "$uri" =~ ^https:// || "$uri" =~ ^http://localhost(:[0-9]+)?/ ]] && break
+    printf '  Linode only accepts https:// callback URLs (http:// only for localhost).\n' >/dev/tty
+  done
+  stage_set LINODE_OAUTH_REDIRECT_URI "$uri"
+}
+
+stage_obj_complete() {
+  stage_has LINODE_OBJ_STORAGE_BUCKET && stage_has LINODE_OBJ_STORAGE_ENDPOINT \
+    && stage_has LINODE_OBJ_STORAGE_ACCESS_KEY && stage_has LINODE_OBJ_STORAGE_SECRET_KEY
+}
+stage_obj_partial() { grep -q "^LINODE_OBJ_STORAGE_" "$ENV_STAGE" 2>/dev/null && ! stage_obj_complete; }
+stage_oauth_complete() {
+  stage_has LINODE_OAUTH_CLIENT_ID && stage_has LINODE_OAUTH_CLIENT_SECRET && stage_has LINODE_OAUTH_REDIRECT_URI
 }
 
 configure_env() {
   local file="$INSTALL_DIR/.env"
   umask 077
+  ENV_STAGE=$(mktemp "$INSTALL_DIR/.env.new.XXXXXX")
+  trap 'cleanup_env_stage; exit 130' INT TERM
   if [[ -n "$ENV_FILE_IN" ]]; then
     [[ -f "$ENV_FILE_IN" ]] || die "no file at $ENV_FILE_IN"
     log "Using credentials from $ENV_FILE_IN"
-    cp "$ENV_FILE_IN" "$file"
-  elif [[ -f "$file" ]] && env_has LINODE_API_TOKEN; then
-    log "Keeping the existing $file"
+    cat "$ENV_FILE_IN" > "$ENV_STAGE"
+  elif [[ -f "$file" ]]; then
+    cat "$file" > "$ENV_STAGE"
+  fi
+
+  if stage_has LINODE_API_TOKEN; then
+    log "Keeping the existing credentials in $file"
   else
-    [[ $ASSUME_YES -eq 0 ]] || die "no .env yet -- pass --env-file with LINODE_API_TOKEN (and Object Storage settings) for a non-interactive run"
-    log "Credentials (stored in $file, readable only by $SERVICE_USER)"
-    touch "$file"
-    set_env LINODE_API_TOKEN "$(ask_secret 'Linode API token (Linodes, Volumes, IPs read/write; VPCs read)')"
-    if [[ "$MODE" == "recover" ]] || confirm "Configure Object Storage backups (strongly recommended)?"; then
-      [[ "$MODE" == "recover" ]] && log "Object Storage: use the SAME bucket the old host backed up to"
-      set_env LINODE_OBJ_STORAGE_BUCKET "$(ask 'Bucket name' '')"
-      set_env LINODE_OBJ_STORAGE_ENDPOINT "$(ask 'Endpoint URL (e.g. https://in-maa-1.linodeobjects.com)' '')"
-      set_env LINODE_OBJ_STORAGE_ACCESS_KEY "$(ask_secret 'Access key')"
-      set_env LINODE_OBJ_STORAGE_SECRET_KEY "$(ask_secret 'Secret key')"
+    [[ $ASSUME_YES -eq 0 ]] || { cleanup_env_stage; die "no LINODE_API_TOKEN -- pass --env-file with it (and Object Storage settings) for a non-interactive run"; }
+    log "Credentials (saved to $file, readable only by $SERVICE_USER, once every question is answered)"
+    stage_set LINODE_API_TOKEN "$(ask_secret 'Linode API token (Linodes, Volumes, IPs read/write; VPCs read)' required)"
+  fi
+
+  # Optional sections: asked when missing or half-filled (a re-run fills in what an earlier one
+  # skipped). Non-interactive runs never prompt.
+  if [[ $ASSUME_YES -eq 0 ]] && ! stage_obj_complete; then
+    if stage_obj_partial; then
+      warn "Object Storage settings are incomplete in $file"
     fi
-    if [[ $WITH_API -eq 1 ]] && confirm "Set up \"Login with Linode\" for the dashboard now (needs an OAuth app)?"; then
-      set_env LINODE_OAUTH_CLIENT_ID "$(ask 'OAuth client ID' '')"
-      set_env LINODE_OAUTH_CLIENT_SECRET "$(ask_secret 'OAuth client secret')"
-      set_env LINODE_OAUTH_REDIRECT_URI "$(ask 'OAuth redirect URI' "https://$(hostname -f)/oauth/callback")"
+    if [[ "$MODE" == "recover" ]] || confirm "Configure Object Storage backups (strongly recommended)?"; then
+      ask_object_storage
     fi
   fi
-  set_env LINODE_SSH_KEY_PATH "$KEY_PATH"
-  chown "$SERVICE_USER:$SERVICE_USER" "$file"; chmod 600 "$file"
-  env_has LINODE_API_TOKEN || die "LINODE_API_TOKEN is empty in $file"
+  if [[ $ASSUME_YES -eq 0 && $WITH_API -eq 1 && -z "$DOMAIN" ]]; then
+    DOMAIN=$(ask "Domain name for the dashboard, already pointing at this host (blank to skip HTTPS)" "$(caddy_managed_domain)")
+  fi
+  if [[ $ASSUME_YES -eq 0 && $WITH_API -eq 1 ]] && ! stage_oauth_complete; then
+    if confirm "Set up \"Login with Linode\" for the dashboard now (needs an OAuth app)?"; then
+      ask_oauth
+    fi
+  fi
+  if [[ -n "$DOMAIN" ]] && stage_has LINODE_OAUTH_REDIRECT_URI \
+      && ! grep -q "^LINODE_OAUTH_REDIRECT_URI=https://$DOMAIN/oauth/callback$" "$ENV_STAGE"; then
+    warn "LINODE_OAUTH_REDIRECT_URI doesn't match https://$DOMAIN/oauth/callback -- login only works when the OAuth app's callback URL, .env and the domain all agree."
+  fi
+  stage_set LINODE_SSH_KEY_PATH "$KEY_PATH"
+
+  stage_has LINODE_API_TOKEN || { cleanup_env_stage; die "LINODE_API_TOKEN is empty"; }
+  if stage_obj_partial; then
+    warn "Object Storage settings are incomplete -- backups go to the local directory only until all four LINODE_OBJ_STORAGE_* lines are set (or re-run install)."
+  fi
+  chown "$SERVICE_USER:$SERVICE_USER" "$ENV_STAGE"; chmod 600 "$ENV_STAGE"
+  mv -f "$ENV_STAGE" "$file"
+  ENV_STAGE=""
+  trap - INT TERM
 }
 
 obj_configured() {
@@ -245,7 +325,7 @@ obj_configured() {
 
 check_token() {
   log "Checking the API token"
-  (cd "$INSTALL_DIR" && runuser -u "$SERVICE_USER" -- "$PY" - <<'EOF') || die "the API token didn't work (see above)"
+  (cd "$INSTALL_DIR" && runuser -u "$SERVICE_USER" -- "$PY" - <<'EOF') || die "the API token didn't work (see above). Fix the LINODE_API_TOKEN line in $INSTALL_DIR/.env, or delete that file to be asked again, then re-run."
 from dotenv import load_dotenv
 load_dotenv(".env")
 import linode_engine as engine
@@ -339,6 +419,91 @@ build_dashboard() {
   fi
   [[ -n "$tmp" ]] && rm -rf "$tmp"
   chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/web"
+}
+
+# --- HTTPS for the dashboard (Caddy) ------------------------------------------------------------
+
+caddy_managed_domain() {  # the domain in this script's block of the Caddyfile, if any
+  [[ -f "$CADDYFILE" ]] || return 0
+  awk -v b="$CADDY_BEGIN" -v e="$CADDY_END" '$0==b{f=1;next} $0==e{f=0} f && /\{[[:space:]]*$/ {print $1; exit}' "$CADDYFILE"
+}
+
+caddyfile_is_stock() {  # the package's placeholder config (serves /usr/share/caddy on :80)
+  [[ -f "$CADDYFILE" ]] || return 0
+  local content
+  content=$(grep -vE '^[[:space:]]*(#|$)' "$CADDYFILE")
+  [[ -z "$content" ]] && return 0
+  grep -q '/usr/share/caddy' <<<"$content" && [[ $(grep -cE '\{[[:space:]]*$' <<<"$content") -le 1 ]]
+}
+
+setup_https() {
+  [[ -n "$DOMAIN" ]] || DOMAIN=$(caddy_managed_domain)  # a re-run keeps the earlier domain
+  [[ -n "$DOMAIN" ]] || return 0
+  [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]] \
+    || { warn "'$DOMAIN' isn't a valid domain name -- skipping HTTPS setup"; return 0; }
+  log "Setting up HTTPS for https://$DOMAIN (Caddy)"
+  if ! command -v caddy >/dev/null; then
+    if command -v apt-get >/dev/null; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq caddy >/dev/null
+    elif command -v dnf >/dev/null; then
+      dnf install -y -q caddy >/dev/null
+    elif command -v zypper >/dev/null; then
+      zypper -n -q install caddy >/dev/null
+    fi
+    command -v caddy >/dev/null || {
+      warn "couldn't install Caddy from the system packages -- install it (https://caddyserver.com/docs/install), then re-run with --domain $DOMAIN"
+      return 0
+    }
+  fi
+
+  # DNS should already point here, or the certificate request fails.
+  local resolved
+  resolved=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')
+  if [[ -z "$resolved" ]]; then
+    warn "$DOMAIN doesn't resolve yet -- create an A record pointing at this host's public IP; Caddy keeps retrying"
+  elif ! hostname -I | tr ' ' '\n' | grep -qx "$resolved"; then
+    warn "$DOMAIN resolves to $resolved, which isn't an address of this host -- point its A record here; Caddy keeps retrying"
+  fi
+
+  # Write only our own marked block; never clobber a site someone else configured.
+  local block backup="" tmp
+  block=$(printf '%s\n%s {\n    reverse_proxy 127.0.0.1:%s\n}\n%s\n' "$CADDY_BEGIN" "$DOMAIN" "$API_PORT" "$CADDY_END")
+  mkdir -p "$(dirname "$CADDYFILE")"
+  tmp=$(mktemp)
+  if [[ -f "$CADDYFILE" ]] && grep -qxF "$CADDY_BEGIN" "$CADDYFILE"; then
+    awk -v b="$CADDY_BEGIN" -v e="$CADDY_END" '$0==b{skip=1} !skip{print} $0==e{skip=0}' "$CADDYFILE" > "$tmp"
+    printf '%s\n' "$block" >> "$tmp"
+  elif caddyfile_is_stock; then
+    printf '%s\n' "$block" > "$tmp"
+  else
+    cat "$CADDYFILE" > "$tmp"
+    printf '\n%s\n' "$block" >> "$tmp"
+  fi
+  if [[ -f "$CADDYFILE" ]]; then
+    backup="$CADDYFILE.bak-$(date +%Y%m%d%H%M%S)"
+    cp -p "$CADDYFILE" "$backup"
+  fi
+  cat "$tmp" > "$CADDYFILE"; rm -f "$tmp"
+  if ! caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1; then
+    [[ -n "$backup" ]] && cp -p "$backup" "$CADDYFILE"
+    warn "the Caddy configuration didn't validate -- left $CADDYFILE as it was (try: caddy validate --config $CADDYFILE)"
+    return 0
+  fi
+
+  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null
+  fi
+  systemctl enable caddy >/dev/null 2>&1
+  systemctl reload caddy 2>/dev/null || systemctl restart caddy
+
+  for _ in $(seq 1 30); do
+    if curl -fsS -o /dev/null --max-time 5 "https://$DOMAIN/health" 2>/dev/null; then
+      log "Dashboard is live at https://$DOMAIN"
+      return 0
+    fi
+    sleep 3
+  done
+  warn "https://$DOMAIN isn't answering yet. Check: the A record points here, ports 80 and 443 are open in the Linode Cloud Firewall, and 'journalctl -u caddy -n 30' shows a certificate obtained. Caddy keeps retrying on its own."
 }
 
 # --- services -------------------------------------------------------------------------------------
@@ -448,6 +613,7 @@ do_install() {
   build_dashboard
   write_units
   start_services
+  setup_https
   run_backup
   log "Installed."
   cat <<EOF
@@ -458,7 +624,7 @@ do_install() {
 $(sed 's/^/    /' "$KEY_PATH.pub" 2>/dev/null)
 
   Next:  cd $INSTALL_DIR && sudo -u $SERVICE_USER .venv/bin/python instance_manager.py onboard --name <name> --instance-id <id>
-  API:   http://127.0.0.1:$API_PORT (put a TLS reverse proxy in front -- see DEPLOYMENT.md)
+  $(if [[ -n "$DOMAIN" ]]; then echo "Dashboard: https://$DOMAIN"; else echo "API:   http://127.0.0.1:$API_PORT (re-run with --domain NAME for HTTPS, or see DEPLOYMENT.md)"; fi)
   Logs:  journalctl -u $POLL_UNIT -f
 EOF
   obj_configured || warn "Object Storage isn't configured: only local snapshots in $BACKUP_DIR are kept, and they're lost with this host. Copy them off-host, or configure Object Storage and re-run install."
@@ -518,6 +684,7 @@ EOF
     echo "  Review the list above, then: sudo $0 start --dir $INSTALL_DIR"
   else
     start_services
+    setup_https
     run_backup
     log "Recovery complete. Managed instances:"
     im list || true

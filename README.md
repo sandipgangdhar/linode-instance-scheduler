@@ -537,6 +537,10 @@ interface) is fully supported — onboard, stop, start, schedules, groups, hooks
   configuration gives it. Whether it can reach the internet through that route depends on your
   VPC setup (for example a NAT gateway), exactly as before it was onboarded.
 - **There's no reserved IP**, so `status` shows none and `offboard` has nothing to release.
+- **Migrating one off local disk** (`migrate-start`/`migrate-resume`, or the dashboard's wizard)
+  works the same way: pre-flight and verification connect over the VPC/VLAN address, the new boot
+  config keeps the node's own VPC/VLAN interfaces (no public interface is added), and no IP is
+  reserved. The dashboard's "Test reachability" check also tests that address.
 - **VPC 1:1 NAT** (a public address mapped onto the VPC interface instead of a separate public
   interface) isn't supported yet — such a node is refused with a clear message.
 - A **VLAN-only** node gets no default route or DNS from the tool — a VLAN has no gateway — so

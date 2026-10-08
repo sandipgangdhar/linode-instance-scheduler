@@ -926,9 +926,20 @@ def migrate_start_instance(
                 f"instance {instance_id} is not running (status={instance.status!r}) -- must "
                 "be running for pre-flight checks."
             )
-        if not instance.ipv4:
-            raise engine.ConfigError("instance has no public IPv4 address.")
-        host = instance.ipv4[0]
+
+
+        try:
+            configs = list(instance.configs)
+        except (ApiError, requests.exceptions.RequestException) as e:
+            raise engine.ConfigError(f"could not read the instance's boot configs: {e}") from e
+        if not configs:
+            raise engine.ConfigError(f"Instance {instance.id} has no boot config.")
+        host = engine.live_ssh_address(instance, configs)
+        if not host:
+            raise engine.ConfigError(
+                "instance has no public interface and no static VPC/VLAN address -- nothing to "
+                "reach it by over SSH."
+            )
 
         if on_progress is not None:
             on_progress("Running pre-flight checks (cloud-init version, datasource, networking)...")
@@ -973,10 +984,6 @@ def migrate_start_instance(
             )
 
 
-        try:
-            configs = list(instance.configs)
-        except (ApiError, requests.exceptions.RequestException) as e:
-            raise engine.ConfigError(f"could not read the instance's boot configs: {e}") from e
         if len(configs) != 1:
             raise engine.ConfigError(
                 f"Instance {instance.id} has {len(configs)} boot configs -- can't tell which "
@@ -1328,7 +1335,7 @@ def cmd_migrate_resume(client, args) -> int:
     print(f"Migration complete for '{args.name}':")
     print(f"  instance: {result.instance_id}")
     print(f"  now booting from volume: {result.os_volume_id}")
-    print(f"  reserved ip: {result.reserved_ip}")
+    print(f"  reserved ip: {result.reserved_ip or 'none (no public interface; reached over its VPC/VLAN address)'}")
     if result.fstab_entries_disabled:
         print()
         print(f"  NOTE: {len(result.fstab_entries_disabled)} stale /etc/fstab entr"

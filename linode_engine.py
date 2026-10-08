@@ -542,6 +542,40 @@ def vpc_or_vlan_address(network_config: list[dict] | None, model: str | None) ->
     return vlan_address
 
 
+def _interface_list(value) -> list:
+
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _legacy_config_routes_public(config) -> bool:
+
+    interfaces = _interface_list(config.interfaces)
+    return not interfaces or any(iface.purpose == "public" for iface in interfaces)
+
+
+def live_ssh_address(instance, configs: list) -> str | None:
+
+    model = instance.interface_generation
+    if model != INTERFACE_MODEL_LINODE:
+        config = configs[0]
+        if _legacy_config_routes_public(config):
+            return instance.ipv4[0] if instance.ipv4 else None
+        return vpc_or_vlan_address(
+            [iface.dict for iface in _interface_list(config.interfaces)], INTERFACE_MODEL_LEGACY
+        )
+    interfaces = _interface_list(instance.linode_interfaces)
+    if any(iface.public is not None for iface in interfaces):
+        return instance.ipv4[0] if instance.ipv4 else None
+    return vpc_or_vlan_address(
+        [
+            {"vpc": iface.vpc.dict if iface.vpc else None,
+             "vlan": iface.vlan.dict if iface.vlan else None}
+            for iface in interfaces
+        ],
+        model,
+    )
+
+
 def build_create_kwargs(captured: dict) -> dict:
 
     model = captured["network_interface_model"]
@@ -2208,6 +2242,15 @@ def resume_path_b_migration(
         network_helper = old_config.helpers.network
 
 
+        if (
+            instance.interface_generation == INTERFACE_MODEL_LINODE
+            or _legacy_config_routes_public(old_config)
+        ):
+            new_interfaces = [{"purpose": "public", "primary": False}]
+        else:
+            new_interfaces = [iface.dict for iface in _interface_list(old_config.interfaces)]
+
+
         extra_devices = {}
 
 
@@ -2243,7 +2286,7 @@ def resume_path_b_migration(
                 label=expected_label,
                 devices={"sda": dest_volume, **extra_devices},
                 root_device="/dev/sda",
-                interfaces=[{"purpose": "public", "primary": False}],
+                interfaces=new_interfaces,
                 helpers={"network": network_helper},
             )
         _checkpoint("config_created", new_config_id=new_config.id)
@@ -2303,24 +2346,26 @@ def resume_path_b_migration(
         instance = poll_until_status(
             lambda: client.load(Instance, instance.id), ("running",), timeout_s=180
         )
-        if not instance.ipv4:
 
 
+        ssh_host = live_ssh_address(instance, [new_config])
+        if not ssh_host:
             raise RuntimeError(
-                f"instance {instance.id} has no public IPv4 address (it may have been "
-                "removed/reassigned out-of-band since migrate-start ran) -- can't determine "
-                "the reserved IP to finish this migration."
+                f"instance {instance.id} has no address this tool can reach it by (no public "
+                "IPv4, and no static VPC/VLAN address on its boot config) -- it may have been "
+                "changed out-of-band since migrate-start ran."
             )
-        reserved_ip = instance.ipv4[0]
+
+        reserved_ip = ssh_host if instance.ipv4 and ssh_host == instance.ipv4[0] else None
 
 
         check_cmd = _root_device_matches_volume_command(dest_volume.filesystem_path)
-        output = ssh_run(reserved_ip, ssh_key_path, check_cmd, retries=12, retry_delay_s=10)
+        output = ssh_run(ssh_host, ssh_key_path, check_cmd, retries=12, retry_delay_s=10)
         if "MIGRATED_VOLUME_CONFIRMED" not in output:
 
 
             raise ConfigError(
-                f"Migration for instance {instance.id}: SSH succeeded at {reserved_ip}, but "
+                f"Migration for instance {instance.id}: SSH succeeded at {ssh_host}, but "
                 f"the guest's root filesystem is not on the migrated destination volume "
                 f"(volume {dest_volume.id}, {dest_volume.filesystem_path}) -- {output.strip()!r}. "
                 "This can happen if the instance was already 'running'/'booting' when this "
@@ -2333,7 +2378,7 @@ def resume_path_b_migration(
 
 
         try:
-            disabled = harden_fstab_against_stale_devices(reserved_ip, ssh_key_path)
+            disabled = harden_fstab_against_stale_devices(ssh_host, ssh_key_path)
         except (ApiError, RuntimeError, requests.exceptions.RequestException):
             disabled = []
         _checkpoint("ssh_verified", reserved_ip=reserved_ip, fstab_entries_disabled=disabled)
@@ -2400,12 +2445,15 @@ def resume_path_b_migration(
         phase = "stale_config_cleaned_up"
 
     if phase == "stale_config_cleaned_up":
-        if on_progress is not None:
-            on_progress("Reserving the instance's public IP address...")
-        ip = client.load(IPAddress, state["reserved_ip"])
-        if not ip.reserved:
-            ip.reserved = True
-            ip.save()
+        if state.get("reserved_ip"):
+            if on_progress is not None:
+                on_progress("Reserving the instance's public IP address...")
+            ip = client.load(IPAddress, state["reserved_ip"])
+            if not ip.reserved:
+                ip.reserved = True
+                ip.save()
+        elif on_progress is not None:
+            on_progress("No public interface -- nothing to reserve (reached over its VPC/VLAN address).")
         _checkpoint("ip_reserved")
 
     return {

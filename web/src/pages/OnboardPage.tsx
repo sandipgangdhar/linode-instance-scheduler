@@ -55,7 +55,7 @@ export function OnboardPage() {
   const [blockerWarnings, setBlockerWarnings] = useState<string[] | null>(null)
   const [reserving, setReserving] = useState(false)
   const [forceConfirmName, setForceConfirmName] = useState('')
-  const ssh = useSshCredentials(selected?.ipv4[0])
+  const ssh = useSshCredentials(selected?.id)
   const lastForceRef = useRef(false)
   const currentAttemptKeyRef = useRef<string | null>(`${name}:${selected?.id ?? ''}`)
   const onboardingRef = useRef(false)

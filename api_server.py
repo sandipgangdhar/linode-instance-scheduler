@@ -754,10 +754,33 @@ def _reject_internal_network_target(host: str) -> None:
 
 
 @app.get("/linode/ssh-check")
-def api_ssh_check(host: str, port: int = 22, user: str = Depends(require_session)) -> dict:
+def api_ssh_check(
+    request: Request, host: str | None = None, instance_id: int | None = None, port: int = 22,
+    user: str = Depends(require_session),
+) -> dict:
 
+    if instance_id is not None:
+        client = _client(request)
+        try:
+            instance = engine.retry_transient(lambda: client.load(engine.Instance, instance_id))
+            configs = engine.retry_transient(lambda: list(instance.configs))
+        except ApiError as e:
+            if e.status == 404:
+                raise HTTPException(404, f"no instance {instance_id} in this account.") from e
+            raise
+        if not configs:
+            raise HTTPException(422, f"instance {instance_id} has no boot config.")
+        address = engine.live_ssh_address(instance, configs)
+        if not address:
+            raise HTTPException(
+                422, f"instance {instance_id} has no public interface and no static VPC/VLAN "
+                "address -- nothing to reach it by.",
+            )
+        return {**engine.check_ssh_port_reachable(address, port), "host": address}
+    if not host:
+        raise HTTPException(422, "pass instance_id (or host).")
     _reject_internal_network_target(host)
-    return engine.check_ssh_port_reachable(host, port)
+    return {**engine.check_ssh_port_reachable(host, port), "host": host}
 
 
 class TokenCreateRequest(BaseModel):

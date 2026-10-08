@@ -73,7 +73,7 @@ export function MigratePage() {
   const copyResetTimeoutRef = useRef<number | null>(null)
   const [onboardError, setOnboardError] = useState<string | null>(null)
   const [onboardErrorWarnings, setOnboardErrorWarnings] = useState<string[] | null>(null)
-  const ssh = useSshCredentials(undefined)
+  const ssh = useSshCredentials(instanceId ?? undefined)
   const currentKeyRef = useRef<string | null>(migrationKey)
   useEffect(() => {
     currentKeyRef.current = migrationKey

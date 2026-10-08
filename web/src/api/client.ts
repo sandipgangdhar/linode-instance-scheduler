@@ -125,11 +125,12 @@ export const api = {
     request<{
       reserved: boolean
     }>('POST', `/linode/ips/${encodeURIComponent(address)}/reserve`),
-  checkSshReachable: (host: string, port: number) =>
+  checkSshReachable: (instanceId: number, port: number) =>
     request<{
       reachable: boolean
       detail?: string
-    }>('GET', `/linode/ssh-check?host=${encodeURIComponent(host)}&port=${port}`),
+      host?: string
+    }>('GET', `/linode/ssh-check?instance_id=${instanceId}&port=${port}`),
   onboardInstance: (body: {
     name: string
     instance_id: number

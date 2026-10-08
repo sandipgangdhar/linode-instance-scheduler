@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import { api, ApiError } from '../api/client'
 import { Button } from '../components/ui'
-export function useSshCredentials(ipv4: string | undefined) {
+export function useSshCredentials(instanceId: number | undefined) {
   const [credMode, setCredMode] = useState<'none' | 'key' | 'password'>('none')
   const [credOpen, setCredOpen] = useState(false)
   const [sshPrivateKey, setSshPrivateKey] = useState('')
@@ -12,8 +12,9 @@ export function useSshCredentials(ipv4: string | undefined) {
     reachable: boolean
     detail?: string
     port: number
+    host?: string
   } | null>(null)
-  const checkedIpv4Ref = useRef<string | undefined>(undefined)
+  const checkedInstanceRef = useRef<number | undefined>(undefined)
   const checkedPortRef = useRef<number | undefined>(undefined)
   const reset = () => {
     setCredMode('none')
@@ -21,20 +22,21 @@ export function useSshCredentials(ipv4: string | undefined) {
     setSshPassword('')
     setSshCheckResult(null)
     setCheckingSsh(false)
-    checkedIpv4Ref.current = undefined
+    checkedInstanceRef.current = undefined
     checkedPortRef.current = undefined
   }
   const checkReachability = async () => {
-    if (!ipv4) return
-    const requestedIpv4 = ipv4
+    if (instanceId === undefined) return
+    const requestedInstance = instanceId
     const requestedPort = sshPort
-    checkedIpv4Ref.current = requestedIpv4
+    checkedInstanceRef.current = requestedInstance
     checkedPortRef.current = requestedPort
-    const isStale = () => checkedIpv4Ref.current !== requestedIpv4 || checkedPortRef.current !== requestedPort
+    const isStale = () =>
+      checkedInstanceRef.current !== requestedInstance || checkedPortRef.current !== requestedPort
     setCheckingSsh(true)
     setSshCheckResult(null)
     try {
-      const result = await api.checkSshReachable(requestedIpv4, requestedPort)
+      const result = await api.checkSshReachable(requestedInstance, requestedPort)
       if (isStale()) return
       setSshCheckResult({ ...result, port: requestedPort })
     } catch (e) {
@@ -106,7 +108,7 @@ export function useSshCredentials(ipv4: string | undefined) {
               <Button
                 variant="secondary"
                 className="!px-2.5 !py-1 text-xs"
-                disabled={checkingSsh || !ipv4}
+                disabled={checkingSsh || instanceId === undefined}
                 onClick={checkReachability}
               >
                 {checkingSsh ? 'Checking…' : 'Test reachability'}
@@ -114,7 +116,7 @@ export function useSshCredentials(ipv4: string | undefined) {
               {sshCheckResult && (
                 <span className={sshCheckResult.reachable ? 'text-emerald-700' : 'text-red-700'}>
                   {sshCheckResult.reachable
-                    ? `✓ Port ${sshCheckResult.port} is reachable`
+                    ? `✓ Port ${sshCheckResult.port} is reachable${sshCheckResult.host ? ` at ${sshCheckResult.host}` : ''}`
                     : `✗ ${sshCheckResult.detail ?? 'Not reachable'}`}
                 </span>
               )}
