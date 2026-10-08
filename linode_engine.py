@@ -1222,6 +1222,8 @@ def create_and_boot_instance(
     except (ApiError, requests.exceptions.RequestException) as e:
 
 
+        if isinstance(e, ApiError) and 400 <= (e.status or 0) < 500 and e.status != 408:
+            raise
         raise AmbiguousCreateError(
             f"instance_create() itself failed ({e}) -- this may or may not have actually "
             f"created a real, billing instance server-side despite the error. Check Cloud "
@@ -2242,13 +2244,15 @@ def resume_path_b_migration(
         network_helper = old_config.helpers.network
 
 
-        if (
-            instance.interface_generation == INTERFACE_MODEL_LINODE
-            or _legacy_config_routes_public(old_config)
-        ):
+        moved_interfaces = state.get("moved_interfaces")
+        old_interfaces = _interface_list(old_config.interfaces)
+        if moved_interfaces is not None:
+            new_interfaces = moved_interfaces
+        elif instance.interface_generation == INTERFACE_MODEL_LINODE or not old_interfaces:
             new_interfaces = [{"purpose": "public", "primary": False}]
         else:
-            new_interfaces = [iface.dict for iface in _interface_list(old_config.interfaces)]
+            new_interfaces = [iface.dict for iface in old_interfaces]
+            moved_interfaces = new_interfaces
 
 
         extra_devices = {}
@@ -2282,6 +2286,12 @@ def resume_path_b_migration(
                     "completes."
                 )
         else:
+            if moved_interfaces is not None and _interface_list(old_config.interfaces):
+                state["moved_interfaces"] = moved_interfaces
+                if persist_fn is not None:
+                    persist_fn(dict(state))
+                old_config.interfaces = []
+                retry_transient(old_config.save)
             new_config = instance.config_create(
                 label=expected_label,
                 devices={"sda": dest_volume, **extra_devices},

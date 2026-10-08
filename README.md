@@ -540,7 +540,16 @@ interface) is fully supported — onboard, stop, start, schedules, groups, hooks
 - **Migrating one off local disk** (`migrate-start`/`migrate-resume`, or the dashboard's wizard)
   works the same way: pre-flight and verification connect over the VPC/VLAN address, the new boot
   config keeps the node's own VPC/VLAN interfaces (no public interface is added), and no IP is
-  reserved. The dashboard's "Test reachability" check also tests that address.
+  reserved. The dashboard's "Test reachability" check also tests that address. (Every migration
+  keeps all of a node's interfaces — a public + VPC or public + VLAN node keeps both.)
+- **Keep a stopped node's VPC address free.** While a node is stopped its instance doesn't
+  exist, so Linode treats its VPC address as unused — another instance created in that subnet
+  with the same address (or handed it automatically) takes it. The node's next `start` then
+  fails cleanly with "The provided IP is already in use in the subnet": nothing is left behind,
+  the node stays `stopped`, and `start` works again once the address is free. Give other
+  instances in that subnet their own explicit addresses, or keep scheduled nodes in a range
+  nothing else is assigned from. (While a node is running — and during a migration — its
+  address is held and can't be taken.)
 - **VPC 1:1 NAT** (a public address mapped onto the VPC interface instead of a separate public
   interface) isn't supported yet — such a node is refused with a clear message.
 - A **VLAN-only** node gets no default route or DNS from the tool — a VLAN has no gateway — so
