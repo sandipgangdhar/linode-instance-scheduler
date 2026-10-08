@@ -481,6 +481,22 @@ pre.code .m{color:var(--code-mut)}
         <p>The poller is meant to run continuously under your own process supervisor (see Part IX.3 for a systemd example) &mdash; it doesn't need to be running for a manual start/stop to work, only for schedules and group memberships to actually be enforced automatically.</p>
       </section>
 
+      <section class="chapter" id="c3-4">
+        <h2><span class="chno">3.4</span> Start Order Between Groups</h2>
+        <p class="lede">A group can depend on one other group, so that applications start only after the services they need are up, and stop before those services go down.</p>
+        <p>Without an order, every instance due at the same time starts independently: an application server can finish booting before its database and fail to connect. Making the application group depend on the database group changes that. When the application group's members are due to start, the poller holds them &mdash; reported as <em>waiting on dependency</em> &mdash; until every member of the database group is running, is not mid-transition, and, where that group has a post-start check (Part IV.3), has passed that check since its latest start. On the way down the order reverses: the database group's members wait until every member of the application group is stopped.</p>
+        <p>The wait is re-evaluated on every poller cycle and is bounded by the same catch-up window as any other scheduled action (one hour by default). If the database group never becomes ready within that window, the dependent group is not started that day. A post-start check that has not reported back is given its own configured timeout plus two minutes before it stops holding dependents.</p>
+        <table><thead><tr><th>Rule</th><th>Behavior</th></tr></thead><tbody>
+          <tr><td>How many</td><td>A group depends on at most one other group; chains such as web &rarr; app &rarr; database are allowed</td></tr>
+          <tr><td>Refused</td><td>A group depending on itself, any change that would form a cycle, and deleting a group that others still depend on</td></tr>
+          <tr><td>Who is held</td><td>Every member of the dependent group, including a member that follows its own individual schedule &mdash; the order follows group membership, not which schedule fired</td></tr>
+          <tr><td>What counts as stopped</td><td>Stopped or awaiting manual recovery; an instance in <code>unreachable</code> still exists and still bills, so it holds the stop</td></tr>
+          <tr><td>Manual start or stop</td><td>Never blocked &mdash; a warning is shown when the dependency isn't satisfied</td></tr>
+          <tr><td>Disaster recovery</td><td>Recorded on every member's OS volume; restored by <code>rebuild</code> once both groups exist again</td></tr>
+        </tbody></table>
+        <p>Set it with <code>group-depends</code> on the command line, the <strong>Start order</strong> card on a group's dashboard page, or <code>PATCH /groups/{name}</code> with <code>{"depends_on": "&lt;group&gt;"}</code>.</p>
+      </section>
+
       <!-- ============ PART IV ============ -->
       <div class="part-open" id="part-4">
         <div class="part-num">Part IV</div>
@@ -526,6 +542,16 @@ pre.code .m{color:var(--code-mut)}
         <p>Every hook run and every hook change &mdash; who made it, when, and what it was changed to (an uploaded script identified by its size and fingerprint) &mdash; is recorded in the instance's hook history.</p>
       </section>
 
+      <section class="chapter" id="c4-4">
+        <h2><span class="chno">4.4</span> Manual-Only Nodes and Scripted Control</h2>
+        <p class="lede">Some instances shouldn't follow any schedule; they're started and stopped by people or by your own automation. The tool treats that as a first-class mode, with the pieces a script needs.</p>
+        <p><strong>Manual-only mode.</strong> An instance set to manual-only (<code>set-mode --manual</code>) is never started or stopped by the poller and never gets an auto-stop timer. To keep the two kinds of control from conflicting, a manual-only instance can't have its own schedule and can't belong to a group that has one; it can belong to a group with no schedule, for shared hooks or a start order. The mode is recorded on the instance's OS volume and restored by <code>rebuild</code>.</p>
+        <p><strong>Whole-group actions.</strong> <code>start</code>/<code>stop --group-name</code> (and <code>POST /groups/{name}/start|stop</code>) act on every member in parallel, each succeeding or failing independently. With dependencies included, a start brings up the groups the target depends on first and waits until they're ready &mdash; post-start checks included &mdash; and a stop brings the dependent groups down first. A stage that doesn't fully succeed stops the chain; later groups are reported as skipped rather than acted on out of order.</p>
+        <p><strong>Respecting start order.</strong> A one-off start or stop proceeds with a warning when the instance's start order isn't satisfied. With <code>--respect-dependencies</code> (or <code>"respect_dependencies": true</code> over the API) it's refused instead, before anything is touched &mdash; exit code 5 on the command line, HTTP 409 over the API.</p>
+        <p><strong>Predictable results.</strong> <code>start</code> and <code>stop</code> exit 0 when the instance is in the requested state (including already being there), 1 on failure, 3 when another operation holds the instance, 4 for a changed SSH host key, and 5 for a start-order refusal. <code>--json</code> prints one JSON object on standard output, with progress on standard error. Over the API, <code>?wait=true</code> returns the finished result in the same response instead of an operation id to poll.</p>
+      </section>
+
+
       <!-- ============ PART V ============ -->
       <div class="part-open" id="part-5">
         <div class="part-num">Part V</div>
@@ -552,7 +578,7 @@ pre.code .m{color:var(--code-mut)}
         <p>Two things are recoverable through <em>neither</em> mechanism, both by deliberate choice, described fully in 5.6: a manual-override auto-revert timer that happens to be armed at the exact moment local state is lost, and the audit/history log. Both are explained there, including exactly what's actually at stake in each case.</p>
         <div class="table-wrap"><table><thead><tr><th>What</th><th>Linode tags</th><th>Object Storage</th></tr></thead><tbody>
           <tr><td>Identity: OS volume, data volumes, reserved IP</td><td>Always</td><td>&mdash;</td></tr>
-          <tr><td>Individual schedule &amp; group membership</td><td>Always</td><td>&mdash;</td></tr>
+          <tr><td>Individual schedule, group membership &amp; start order</td><td>Always</td><td>&mdash;</td></tr>
           <tr><td>A simple, single public interface configuration</td><td>Yes</td><td>Also, as a fallback</td></tr>
           <tr><td>A more complex configuration (multiple interfaces, VPC, VLAN)</td><td>&mdash;</td><td>Yes, if configured</td></tr>
           <tr><td>An SSH key also registered on the Linode account</td><td>A reference to it</td><td>The key itself, as a fallback</td></tr>
@@ -619,7 +645,7 @@ pre.code .m{color:var(--code-mut)}
         <h2><span class="chno">6.1</span> Onboarding &amp; Lifecycle</h2>
         <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
           <tr><td><code>onboard</code></td><td>Brings an instance under management &mdash; Path A (clone from a template) or Path B (an already-migrated existing instance). Refuses cleanly if the instance is still on local disk or its public IP isn't reserved. Refuses again, separately, if the name is already onboarded &mdash; <code>--force</code> re-onboards anyway, showing exactly what identity details (volumes, IP, network config) would change first, and requiring confirmation before proceeding. Intended for correcting a record after a <code>needs_manual_recovery</code> partial recovery, not routine re-onboarding.</td></tr>
-          <tr><td><code>start</code></td><td>Creates (recreates) a managed instance from its saved configuration and waits for a genuine network reachability check before reporting success.</td></tr>
+          <tr><td><code>start</code></td><td>Creates (recreates) a managed instance from its saved configuration and waits for a genuine network reachability check before reporting success. <code>--group-name</code> starts every member of a group at once; <code>--with-dependencies</code> brings up its start-order chain first (Part IV.4).</td></tr>
           <tr><td><code>stop</code></td><td>Re-captures current configuration, then deletes the instance. Compute billing stops the moment this completes. <code>--skip-precapture</code> recovers an instance that's genuinely SSH-unreachable but still billing, by falling back to the last-known configuration instead of a fresh capture &mdash; see the callout below.</td></tr>
           <tr><td><code>offboard</code></td><td>Permanently decommissions a stopped instance &mdash; releases its reserved IP, and optionally deletes its volumes too. Requires typing the instance's name to confirm.</td></tr>
           <tr><td><code>deregister</code></td><td>Removes an instance from local tracking only, with no changes to the real Linode resources at all &mdash; the safety net for correcting a mistaken or corrupted local record.</td></tr>
@@ -667,6 +693,8 @@ pre.code .m{color:var(--code-mut)}
           <tr><td><code>group-show</code></td><td>Shows one group's schedule and current members.</td></tr>
           <tr><td><code>group-list</code></td><td>Lists every schedule group.</td></tr>
           <tr><td><code>group-delete</code></td><td>Deletes a group &mdash; refuses while it still has members.</td></tr>
+          <tr><td><code>set-mode</code></td><td>Makes an instance manual-only (<code>--manual</code>) or schedulable again (<code>--auto</code>) (Part IV.4).</td></tr>
+          <tr><td><code>group-depends</code></td><td>Makes a group start only after another group is up and ready, and stop only after it is down (Part III.4); <code>--clear</code> removes it.</td></tr>
         </tbody></table></div>
       </section>
 
@@ -677,6 +705,7 @@ pre.code .m{color:var(--code-mut)}
           <tr><td><code>backup</code></td><td>On-demand, whole-system backup &mdash; re-syncs every instance's Object Storage record and takes a full database snapshot (locally, to Object Storage, or both). Meant to be run on a schedule, not just invoked manually; see the Operations Guide.</td></tr>
           <tr><td><code>clear-lock</code></td><td>Clears a stuck per-instance operation lock &mdash; an administrative escape hatch, used rarely.</td></tr>
           <tr><td><code>reset-host-key</code></td><td>Deliberately rotates the trusted SSH host key recorded for an instance (see Part I.5) &mdash; the only sanctioned way to do this.</td></tr>
+          <tr><td><code>api-token-create</code> / <code>-list</code> / <code>-revoke</code></td><td>Manage API tokens for scripts (Part VII.2).</td></tr>
           <tr><td><code>serve-api</code></td><td>Starts the REST API server and, once built, the web dashboard (Part VII).</td></tr>
         </tbody></table></div>
       </section>
@@ -717,7 +746,8 @@ pre.code .m{color:var(--code-mut)}
         <h2><span class="chno">7.2</span> Authentication: Two Credentials, Two Jobs</h2>
         <p class="lede">The API supports "Login with Linode" &mdash; your team signs in with the exact same account credentials they already use for Cloud Manager, rather than a separate shared secret.</p>
         <p>This login token answers exactly one question &mdash; <em>who is calling right now</em> &mdash; and is never used to talk to Linode's own API directly. A completely separate Linode API token, configured once by whoever deploys the tool, is what actually performs every real operation. This separation is deliberate: the scheduler has to keep running and firing scheduled actions even when nobody is logged in, which only works if the credential doing the real work isn't tied to any one person's login session.</p>
-        <p>The session token produced by logging in isn't tied to a browser either &mdash; it's a plain bearer token, sent the same way (an <code>Authorization</code> header) whether the caller is the dashboard or a script. A team wanting to automate against this API directly, not through the browser UI, completes the same OAuth login flow once to obtain a token, then uses it exactly like any other bearer-token API client.</p>
+        <p>The session token produced by logging in isn't tied to a browser either &mdash; it's a plain bearer token, sent the same way (an <code>Authorization</code> header) whether the caller is the dashboard or a script. Scripts and pipelines use an API token instead.</p>
+        <p><strong>API tokens.</strong> A named token is created by an administrator (<code>api-token-create</code>, or the dashboard's API tokens page) and shown exactly once; only a hash of it is stored. Each token carries one or more scopes &mdash; <code>read</code> (lists, status, history, savings), <code>operate</code> (start, stop, extend, group start/stop), <code>configure</code> (schedules, groups, start order, manual-only mode) and <code>admin</code> (everything else, including hooks, which run as root, onboarding, migration and token management) &mdash; and can be limited to particular instances and groups, in which case lists show only what it covers and it can read only the operations it started. The scope a request needs is derived from the route itself, and any route not explicitly classified requires <code>admin</code>, so a narrower token can never reach new functionality by accident. Tokens can expire, can be revoked at any time, and every action taken with one is recorded in the instance's history under the token's name.</p>
       </section>
 
       <section class="chapter" id="c7-3">
@@ -909,11 +939,11 @@ pre.code .m{color:var(--code-mut)}
       ["c2-1","2.1 Path A &mdash; Greenfield"],["c2-2","2.2 Path B &mdash; Migration"],["c2-3","2.3 Supported Operating Systems"]
     ]},
     {label:"Part III", title:"Scheduling", chapters:[
-      ["c3-1","3.1 Individual &amp; Group"],["c3-2","3.2 Timezones"],["c3-3","3.3 The Poller"]
+      ["c3-1","3.1 Individual &amp; Group"],["c3-2","3.2 Timezones"],["c3-3","3.3 The Poller"],["c3-4","3.4 Start Order"]
     ]},
     {label:"Part IV", title:"Manual Control &amp; Savings", chapters:[
       ["c4-1","4.1 Override &amp; Auto-Revert"],["c4-2","4.2 Savings as a Percentage"],
-      ["c4-3","4.3 Hooks"]
+      ["c4-3","4.3 Hooks"],["c4-4","4.4 Manual-Only &amp; Scripting"]
     ]},
     {label:"Part V", title:"Disaster Recovery", chapters:[
       ["c5-1","5.1 The Registry"],["c5-2","5.2 What's Stored Where"],

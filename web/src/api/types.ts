@@ -18,6 +18,7 @@ export interface InstanceRecord {
   data_volumes: DataVolume[] | null
   reserved_ip: string | null
   group_id: number | null
+  schedule_mode?: 'auto' | 'manual'
   current_linode_id: number | null
   current_status: InstanceStatus
   transitioning: boolean
@@ -81,6 +82,8 @@ export interface ScheduleGroup {
   rules: ScheduleRule[]
   enabled: boolean
   members: string[]
+  depends_on?: string | null
+  dependents?: string[]
   warnings?: string[]
 }
 export interface ScheduleGroupSummary {
@@ -90,6 +93,7 @@ export interface ScheduleGroupSummary {
   rules: ScheduleRule[]
   enabled: boolean
   member_count: number
+  depends_on?: string | null
 }
 export interface ScheduleEvent {
   action: 'create' | 'delete'
@@ -216,4 +220,32 @@ export interface HookRunResult {
   exit_code: number | null
   output_tail: string | null
   attempts: number
+}
+export type ApiTokenScope = 'read' | 'operate' | 'configure' | 'admin'
+export interface ApiToken {
+  name: string
+  token_prefix: string
+  scopes: ApiTokenScope[]
+  instances: string[] | null
+  groups: string[] | null
+  created_by: string | null
+  created_at: string
+  expires_at: string | null
+  revoked_at: string | null
+  last_used_at: string | null
+}
+export interface GroupMemberResult {
+  name: string
+  group: string
+  outcome: string
+  ok: boolean
+  detail: string | null
+  security_warning: boolean
+}
+export interface GroupActionResult {
+  group: string
+  action: 'start' | 'stop'
+  stages: string[]
+  members: GroupMemberResult[]
+  ok: boolean
 }

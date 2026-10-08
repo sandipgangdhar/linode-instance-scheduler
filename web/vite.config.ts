@@ -11,6 +11,7 @@ export default defineConfig({
     proxy: {
       '/instances': 'http://127.0.0.1:8000',
       '/groups': 'http://127.0.0.1:8000',
+      '/tokens': 'http://127.0.0.1:8000',
       '/linode': 'http://127.0.0.1:8000',
       '/login': 'http://127.0.0.1:8000',
       '/logout': 'http://127.0.0.1:8000',

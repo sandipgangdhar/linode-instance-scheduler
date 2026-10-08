@@ -5,6 +5,7 @@ import { StatusBar } from '../components/StatusBar'
 const NAV_ITEMS = [
   { to: '/instances', label: 'Instances', icon: ServerIcon },
   { to: '/groups', label: 'Groups', icon: GroupIcon },
+  { to: '/tokens', label: 'API tokens', icon: KeyIcon },
 ]
 export function DashboardLayout() {
   const { logout } = useAuth()
@@ -76,6 +77,14 @@ function ServerIcon({ className }: { className?: string }) {
       <rect x="3" y="14" width="18" height="6" rx="1.5" />
       <circle cx="7" cy="7" r="0.8" fill="currentColor" />
       <circle cx="7" cy="17" r="0.8" fill="currentColor" />
+    </svg>
+  )
+}
+function KeyIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <circle cx="8" cy="15" r="4" />
+      <path d="M11 12l9-9M17 6l3 3M15 8l2 2" />
     </svg>
   )
 }

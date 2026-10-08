@@ -81,6 +81,11 @@ export function InstancesPage() {
                     </td>
                     <td className="px-5 py-3 text-sm">
                       <StatusBadge status={record.current_status} locked={record.transitioning} />
+                      {record.schedule_mode === 'manual' && (
+                        <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">
+                          Manual-only
+                        </span>
+                      )}
                     </td>
                     <td className="px-5 py-3 text-sm text-slate-600">{record.region ?? '—'}</td>
                     <td className="px-5 py-3 text-sm text-slate-600">{record.reserved_ip ?? '—'}</td>

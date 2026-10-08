@@ -262,8 +262,10 @@ Every command below is run from the repository root, with the virtual environmen
 | `migrate-resume` | Finishes what `migrate-start` began, after you've run that one manual command. Boots the node from its new Block Storage volume and reserves its IP. |
 | `migrate-orphans` | Lists (or `--cleanup`s) destination volumes left behind by a `migrate-start --force` restart — see §6.4. You'll rarely need this. |
 | `onboard` | Registers an already-running, already volume-based node with this tool by name. Pure capture — reads the node's current state, changes nothing on it. |
-| `start` | Brings a stopped node back online — recreated identically at the same IP. |
-| `stop` | Takes a running node offline — deletes the instance, keeps its data and IP. |
+| `start` | Brings a stopped node back online — recreated identically at the same IP. With `--group-name`, starts every member of a group at once. See §8.13. |
+| `stop` | Takes a running node offline — deletes the instance, keeps its data and IP. With `--group-name`, stops every member of a group at once. See §8.13. |
+| `set-mode` | Makes a node manual-only (`--manual`: the scheduler never starts or stops it) or schedulable again (`--auto`). See §8.13. |
+| `api-token-create` / `api-token-list` / `api-token-revoke` | Manage API tokens for scripts calling the REST API. See §8.13. |
 | `list` | Shows every node you've onboarded and its current status at a glance. |
 | `status` | Shows the full captured record for one node. |
 | `history` | Shows the audit trail (create/delete events) for one node — "why was my instance down at 9am?" Works even for a node you've since `offboard`ed. |
@@ -275,6 +277,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `group-show` | Shows a group's schedule and its current members. |
 | `group-list` | Lists every schedule group you've created. |
 | `group-delete` | Permanently deletes a schedule group. Refuses if it still has members. |
+| `group-depends` | Makes one group start only after another group is up and ready, and stop only after it is down (e.g. app servers after their database). See §8.6. |
 | `group-add` | Adds (or moves) a node into a schedule group. |
 | `group-remove` | Removes a node from its group — asks what to do about its schedule if it doesn't have one of its own. See §8.6. |
 | `poll` | Runs the scheduler — checks every node's individual AND group schedule and starts/stops it if due, and auto-reverts any expired manual override. Run it continuously (the normal way), or `--once` from cron. See §8.5/§8.6/§8.7. |
@@ -1042,6 +1045,47 @@ Run `poll` the same way as for individual schedules (§8.5) — one poller enfor
 and group schedules together, and a group also survives a total local database loss via
 `rebuild` (§8), the same tag-based disaster-recovery guarantee everything else in this tool has.
 
+#### Start order between groups (dependencies)
+
+Some nodes only work if another set of nodes is already up — application servers that need their
+database, for example. If both groups start at 9am, the app servers can finish booting first,
+fail to connect, and stay broken. Tell the tool about the dependency and it orders them for you:
+
+```
+python instance_manager.py group-depends --group-name app --on db
+```
+
+With that in place:
+
+- **Starting:** when `app`'s members are due to start, the scheduler holds them ("waiting on
+  dependency") until every member of `db` is running and, if `db` has a post-start hook (§8.12),
+  that check has succeeded since its latest start. They start on the next tick after that,
+  usually within a minute. Give the database group a readiness check such as `pg_isready -q` so
+  "up" means the database is really accepting connections, not just that the machine booted.
+- **Stopping:** the reverse — `db`'s members wait until every member of `app` is stopped.
+- The scheduler keeps rechecking every tick for as long as `poll`'s catch-up window allows
+  (an hour by default), so a slow database doesn't make the app servers miss their start. If the
+  database never becomes ready within that window, the app servers aren't started that day.
+- The rule follows **group membership**, so it applies even to a member of `app` that has its own
+  individual schedule.
+- A group depends on at most one other group, and chains are allowed (`web` → `app` → `db`).
+  A group can't depend on itself, cycles are refused, and a group that others depend on can't be
+  deleted until they stop depending on it.
+- **Manual `start`/`stop` is never blocked** — you're acting deliberately — but it prints a
+  warning when the dependency isn't satisfied (e.g. starting an app server while the database is
+  stopped).
+
+`group-show` lists what a group depends on and which groups depend on it; `group-list` shows each
+group's dependency. Remove it with:
+
+```
+python instance_manager.py group-depends --group-name app --clear
+```
+
+The dependency is saved in the disaster-recovery tags on each member's OS volume, so `rebuild`
+restores it once both groups are back. In the dashboard, set it from the group page's **Start
+order** card; over the API, `PATCH /groups/{name}` with `{"depends_on": "db"}` (or `null`).
+
 ### 8.7 Manual override — starting a node outside its own scheduled hours
 
 If a node has a schedule (individual, §8.5, or inherited from a group, §8.6) and you `start` it
@@ -1128,6 +1172,8 @@ One-time setup, per deployment:
 Each deployment registers its **own** OAuth App in its **own** Linode account — this tool doesn't
 operate a shared login service anyone else's deployment uses, matching how everything else here
 is self-hosted and independent per customer.
+
+**For scripts, use an API token instead** (§8.13) — a login session is meant for people in a browser.
 
 **Using it**: visiting `GET /login` in a browser starts the flow; after logging in with Linode,
 `GET /oauth/callback` redirects to `/ui/?session_token=...&expires_at=...` — the web dashboard
@@ -1377,6 +1423,123 @@ alongside schedules and groups (so `backup`, §8.10, covers them), and are also 
 Hooks are never stored on the node by this tool (an uploaded script only exists there while it
 runs), and the fingerprint check means a hook can't be swapped for different content in your bucket
 or by editing a tag without `rebuild` refusing to restore it.
+
+### 8.13 Manual-only nodes and scripting
+
+Some nodes shouldn't follow any schedule at all — you start and stop them yourself, or from your
+own scripts and pipelines. This section covers making a node manual-only, and everything a script
+needs: a credential, predictable results, and acting on a whole group in one call.
+
+#### Manual-only nodes
+
+```
+python instance_manager.py set-mode --name build-runner-1 --manual
+```
+
+A manual-only node is never started or stopped by the scheduler, and a manual start never arms an
+auto-stop timer. Start and stop it with `start`/`stop`, the dashboard, or the API. It shows as
+`[manual-only]` in `list` and has a "Manual-only" card on its dashboard page.
+
+A manual-only node can't have a schedule, and can't be in a group that has a schedule:
+
+- `set-mode --manual` refuses if the node has its own schedule (`schedule-clear` it first) or is in
+  a group with a schedule (`group-remove --keep-manual` it first).
+- `schedule-set`, `group-add` into a scheduled group, and `group-schedule-set` on a group with a
+  manual-only member are refused the same way.
+- It *can* be in a group without a schedule — useful for sharing hooks (§8.12) or a start order
+  (§8.6) with other nodes.
+
+Switch it back with `set-mode --name build-runner-1 --auto`. The setting is saved in the node's
+disaster-recovery tags, so `rebuild` restores it.
+
+#### Starting or stopping a whole group
+
+```
+python instance_manager.py start --group-name dev
+python instance_manager.py stop  --group-name dev --yes
+```
+
+Every member is acted on at once (up to `--max-parallel`, default 10), and each succeeds or fails
+on its own — the output lists every member and its outcome. If the group has a start order
+(§8.6), add `--with-dependencies` to bring up the whole chain in order — `start` starts the groups
+it depends on first and waits for them to be ready (post-start checks included) before starting
+this one; `stop` stops the groups that depend on it first. A stage that doesn't fully succeed stops
+the chain, and the later groups are reported as `skipped`.
+
+#### Start order for one-off actions
+
+By default a manual `start`/`stop` goes ahead even when the node's start order isn't satisfied,
+with a warning. Add `--respect-dependencies` to refuse instead — the right choice for unattended
+scripts:
+
+```
+python instance_manager.py start --name web-1 --respect-dependencies
+```
+
+#### Exit codes and JSON output
+
+`start` and `stop` (single node or group) exit with:
+
+| Code | Meaning |
+|---|---|
+| 0 | Done, or already in that state |
+| 1 | Failed (see the message) |
+| 2 | Command-line usage error |
+| 3 | Busy — another operation is running on this node; retry later |
+| 4 | Security warning — the node's SSH host key changed; don't retry blindly (see `reset-host-key`) |
+| 5 | Refused by `--respect-dependencies` — the start order isn't satisfied yet |
+
+Add `--json` to `start`, `stop` or `list` to get one JSON object on stdout (progress messages go
+to stderr). `stop --json` needs `--yes`. `status` already prints JSON.
+
+#### API tokens
+
+Scripts calling the REST API (§8.8) use an API token rather than a browser login:
+
+```
+python instance_manager.py api-token-create --name ci-deploy --scopes read,operate --groups dev \
+  --expires-days 90
+```
+
+The token is printed once — store it in your secret manager. Send it as
+`Authorization: Bearer <token>`. You can also create, list and revoke tokens on the dashboard's
+**API tokens** page. Only a hash of each token is kept, so a lost token can't be shown again;
+revoke it and create a new one.
+
+Scopes (combine as needed):
+
+| Scope | Allows |
+|---|---|
+| `read` | List, status, history, savings, schedules, hooks (view only) |
+| `operate` | Start, stop, extend, run a hook now, group start/stop |
+| `configure` | Schedules, groups, group membership, start order, manual-only mode |
+| `admin` | Everything, including changing hooks (they run as root), onboard/offboard, migration, and managing tokens |
+
+`--instances` and `--groups` limit a token to particular nodes and/or groups (a group covers its
+current members). A limited token only sees those nodes and groups in lists, and can only read
+operations it started itself. Every action taken with a token is recorded in `history` under
+`token:<name>`. `api-token-list` shows each token's scopes, limits, expiry and when it was last
+used; `api-token-revoke --name ci-deploy` stops it working immediately.
+
+#### Waiting for the result over the API
+
+`POST /instances/{name}/start` and `/stop` normally return at once with an operation id to poll
+(`GET /operations/{id}`). Add `?wait=true` to get the finished result in the same response —
+one call per action from a script:
+
+```
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"respect_dependencies": true}' \
+  "https://<your-host>/instances/web-1/start?wait=true"
+```
+
+The body is the same as a finished `GET /operations/{id}`: `status` (`done` or `error`), `result`
+(the outcome, e.g. `started`), and any `warnings`. An HTTP 409 means it was refused — busy, or the
+start order isn't satisfied with `respect_dependencies`. A wait longer than an hour returns 202
+with the still-running operation to keep polling. Group actions are
+`POST /groups/{name}/start|stop` with `{"with_dependencies": true}` (optional), and also accept
+`?wait=true`. Switch a node to manual-only over the API with `PATCH /instances/{name}` and
+`{"schedule_mode": "manual"}`.
 
 ## 9. Costs
 

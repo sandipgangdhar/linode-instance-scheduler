@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -16,9 +17,10 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
+from contextlib import suppress as contextlib_suppress
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dtime
 from pathlib import Path
@@ -51,6 +53,10 @@ class NotOnboardedError(engine.ConfigError):
 
 
 class NeedsManualRecoveryError(engine.ConfigError):
+    pass
+
+
+class DependencyNotSatisfiedError(engine.ConfigError):
     pass
 
 
@@ -227,6 +233,23 @@ def _migrate_add_schedule_events_actor_column(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_add_group_dependency_column(conn: sqlite3.Connection) -> None:
+
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schedule_groups'"
+    ).fetchone()
+    if row is None:
+        return
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(schedule_groups)").fetchall()}
+    if "depends_on_group_id" in columns:
+        return
+    conn.execute(
+        "ALTER TABLE schedule_groups ADD COLUMN depends_on_group_id INTEGER"
+        " REFERENCES schedule_groups(id)"
+    )
+    conn.commit()
+
+
 def _connect() -> sqlite3.Connection:
 
     REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -239,6 +262,7 @@ def _connect() -> sqlite3.Connection:
         _migrate_stale_schedule_groups_schema(conn)
         _migrate_add_manual_override_column(conn)
         _migrate_stale_instances_group_id_fk(conn)
+        _migrate_add_group_dependency_column(conn)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(SCHEMA_PATH.read_text())
     except sqlite3.DatabaseError as e:
@@ -2067,6 +2091,17 @@ def onboard_instance(
                     )
 
 
+        if get_schedule_mode(name) == "manual":
+            try:
+                _sync_schedule_mode_tag_locked(client, name, record, "manual")
+            except Exception as e:
+                if on_warning is not None:
+                    on_warning(
+                        f"  WARNING: could not tag '{name}' as manual-only on its OS volume ({e})"
+                        f" -- re-run `set-mode --name {name} --manual` to retry."
+                    )
+
+
         existing_schedule = get_instance_schedule(name)
         if existing_schedule is not None:
             try:
@@ -2267,9 +2302,15 @@ def start_instance(
     on_created: Callable[[int], None] | None = None,
     on_retry: Callable[[int, int, Exception], None] | None = None,
     skip_hooks: bool = False,
+    respect_dependencies: bool = False,
 ) -> StartResult:
 
     _validate_override_window_hours(override_window_hours)
+    if triggered_by != "schedule":
+        if respect_dependencies:
+            require_dependency(name, "start")
+        else:
+            _warn_about_dependency(name, "start", on_warning)
     result = _start_instance_locked(
         client, name, ssh_key, triggered_by=triggered_by, override_window_hours=override_window_hours,
         on_progress=on_progress, on_created=on_created, on_retry=on_retry, on_warning=on_warning,
@@ -2326,6 +2367,8 @@ def _compute_manual_override_expiry(
 ) -> str | None:
 
     if triggered_by == "schedule":
+        return None
+    if get_schedule_mode(name) == "manual":
         return None
     schedule, _via_group = resolve_effective_schedule(name, record)
 
@@ -2585,25 +2628,114 @@ def _print_to_stderr(message: str) -> None:
     print(message, file=sys.stderr)
 
 
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_BUSY = 3
+EXIT_SECURITY = 4
+EXIT_DEPENDENCY = 5
+
+
+def _flag(args, attr: str) -> bool:
+
+
+    return getattr(args, attr, False) is True
+
+
+def _cli_error_exit(e: Exception, as_json: bool, name: str) -> int:
+
+    if isinstance(e, InstanceLockedError):
+        code = EXIT_BUSY
+    elif isinstance(e, DependencyNotSatisfiedError):
+        code = EXIT_DEPENDENCY
+    else:
+        code = EXIT_FAILED
+    if as_json:
+        print(json.dumps({"name": name, "ok": False, "error": str(e),
+                          "error_type": type(e).__name__, "exit_code": code}))
+    else:
+        print(f"Configuration error: {e}", file=sys.stderr)
+    return code
+
+
+def _cli_result_exit(name: str, result, printer, as_json: bool) -> int:
+
+    if not as_json:
+        code = printer(name, result)
+    else:
+        with redirect_stdout(sys.stderr):
+            code = printer(name, result)
+    if getattr(result, "security_warning", False):
+        code = EXIT_SECURITY
+    if as_json:
+        print(json.dumps({"name": name, "ok": code == EXIT_OK, "exit_code": code,
+                          **asdict(result)}))
+    return code
+
+
+def cmd_group_action(client, args, action: Literal["start", "stop"]) -> int:
+    as_json = _flag(args, "json")
+    name = args.group_name
+    if action == "stop" and not args.yes:
+        if as_json:
+            print("Configuration error: --json needs --yes (there's no prompt in JSON mode).",
+                  file=sys.stderr)
+            return EXIT_FAILED
+        scope = " and every group that depends on it" if _flag(args, "with_dependencies") else ""
+        answer = input(f"Stop every member of group '{name}'{scope}? [y/N] ")
+        if answer.strip().lower() != "y":
+            print("Aborted.")
+            return EXIT_FAILED
+    max_parallel = args.max_parallel if isinstance(args.max_parallel, int) else 1
+    try:
+        result = group_action(
+            client, name, action, args.ssh_key,
+            include_dependencies=_flag(args, "with_dependencies"),
+            respect_dependencies=_flag(args, "respect_dependencies"),
+            skip_hooks=_flag(args, "skip_hooks"),
+            max_parallel=max_parallel,
+            client_factory=_per_thread_client_factory() if max_parallel > 1 else None,
+            on_progress=_print_to_stderr if as_json else print,
+            on_warning=_print_to_stderr,
+        )
+    except (InstanceLockedError, engine.ConfigError) as e:
+        return _cli_error_exit(e, as_json, name)
+    if any(m.security_warning for m in result.members):
+        code = EXIT_SECURITY
+    else:
+        code = EXIT_OK if result.ok else EXIT_FAILED
+    if as_json:
+        print(json.dumps({"group": name, "action": action, "ok": result.ok, "exit_code": code,
+                          "stages": result.stages,
+                          "members": [asdict(m) for m in result.members]}))
+        return code
+    for m in result.members:
+        mark = "ok  " if m.ok else "FAIL"
+        detail = f" -- {m.detail}" if m.detail and not m.ok else ""
+        print(f"  [{mark}] {m.group}/{m.name}: {m.outcome}{detail}")
+    done = sum(1 for m in result.members if m.ok)
+    print(f"{done} of {len(result.members)} member(s) {action}ed"
+          f"{'' if result.ok else ' -- see FAIL lines above'}.".replace("stoped", "stopped"))
+    return code
+
+
 def cmd_start(client, args) -> int:
+    if isinstance(getattr(args, "group_name", None), str):
+        return cmd_group_action(client, args, "start")
+    as_json = _flag(args, "json")
+    progress = _print_to_stderr if as_json else print
     try:
         result = start_instance(
             client, args.name, args.ssh_key,
             override_window_hours=args.override_window_hours,
-            on_progress=print, on_warning=_print_to_stderr,
-            on_created=lambda i: print(f"  instance created: {i} (booting...)"),
+            on_progress=progress, on_warning=_print_to_stderr,
+            on_created=lambda i: progress(f"  instance created: {i} (booting...)"),
             on_retry=_on_retry,
-
-
-            skip_hooks=getattr(args, "skip_hooks", False) is True,
+            skip_hooks=_flag(args, "skip_hooks"),
+            respect_dependencies=_flag(args, "respect_dependencies"),
         )
-    except InstanceLockedError as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
-        return 1
-    except engine.ConfigError as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
-        return 1
-    return _print_start_result(args.name, result)
+    except (InstanceLockedError, engine.ConfigError) as e:
+        return _cli_error_exit(e, as_json, args.name)
+    return _cli_result_exit(args.name, result, _print_start_result, as_json)
 
 
 def _print_start_result(name: str, result: StartResult) -> int:
@@ -2717,8 +2849,14 @@ def stop_instance(
     confirm: Callable[[dict], bool] | None = None,
     on_progress: Callable[[str], None] | None = None,
     on_warning: Callable[[str], None] | None = None,
+    respect_dependencies: bool = False,
 ) -> StopResult:
 
+    if triggered_by != "schedule":
+        if respect_dependencies:
+            require_dependency(name, "stop")
+        else:
+            _warn_about_dependency(name, "stop", on_warning)
     result = _stop_instance_locked(
         client, name, ssh_key,
         skip_precapture=skip_precapture, force=force, skip_hooks=skip_hooks,
@@ -2992,25 +3130,31 @@ def _stop_instance_locked(
 
 
 def cmd_stop(client, args) -> int:
+    if isinstance(getattr(args, "group_name", None), str):
+        return cmd_group_action(client, args, "stop")
+    as_json = _flag(args, "json")
+
     def _confirm(record: dict) -> bool:
         answer = input(f"Stop '{args.name}' (instance {record['current_linode_id']})? [y/N] ")
         return answer.strip().lower() == "y"
 
+    if as_json and not args.yes:
+        print("Configuration error: --json needs --yes (there's no prompt in JSON mode).",
+              file=sys.stderr)
+        return EXIT_FAILED
     try:
         result = stop_instance(
             client, args.name, args.ssh_key,
             skip_precapture=args.skip_precapture, force=args.force,
-            skip_hooks=getattr(args, "skip_hooks", False) is True,
-            confirm=None if args.yes else _confirm, on_progress=print,
+            skip_hooks=_flag(args, "skip_hooks"),
+            confirm=None if args.yes else _confirm,
+            on_progress=_print_to_stderr if as_json else print,
             on_warning=_print_to_stderr,
+            respect_dependencies=_flag(args, "respect_dependencies"),
         )
-    except InstanceLockedError as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
-        return 1
-    except engine.ConfigError as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
-        return 1
-    return _print_stop_result(args.name, result)
+    except (InstanceLockedError, engine.ConfigError) as e:
+        return _cli_error_exit(e, as_json, args.name)
+    return _cli_result_exit(args.name, result, _print_stop_result, as_json)
 
 
 def _print_stop_result(name: str, result: StopResult) -> int:
@@ -3281,6 +3425,8 @@ def _is_recovery_metadata_tag(tag: str) -> bool:
     return (_is_schedule_tag(tag)
             or _is_schedule_tag(tag, prefix=_GROUP_SCHEDULE_TAG_PREFIX)
             or tag.startswith(_GROUP_NAME_TAG_PREFIX)
+            or tag.startswith(_GROUP_DEP_TAG_PREFIX)
+            or tag == _SCHEDULE_MODE_MANUAL_TAG
             or _is_hook_tag(tag)
             or _is_extra_recovery_tag(tag))
 
@@ -3760,6 +3906,7 @@ def save_instance_schedule(
     with _instance_lock(name):
         if name not in load_registry():
             raise NotOnboardedError(f"'{name}' is not onboarded. Run `onboard` first.")
+        _refuse_if_manual_only(name, "have a schedule")
         _save_schedule_row(name, timezone, rules, enabled)
     _sync_schedule_tags(
         client, name, {"timezone": timezone, "rules": rules, "enabled": enabled},
@@ -4621,6 +4768,9 @@ MAX_GROUP_NAME_LENGTH = 41
 _GROUP_NAME_TAG_PREFIX = "grp-name:"
 
 
+_GROUP_DEP_TAG_PREFIX = "grp-dep:"
+
+
 def _group_id_for_name(conn: sqlite3.Connection, group_name: str) -> int:
 
     row = conn.execute("SELECT id FROM schedule_groups WHERE name = ?", (group_name,)).fetchone()
@@ -4635,19 +4785,76 @@ def _group_row_by_id(group_id: int) -> dict | None:
         conn = _connect()
         try:
             row = conn.execute(
-                "SELECT name, timezone, rules, enabled FROM schedule_groups WHERE id = ?",
+                "SELECT name, timezone, rules, enabled, depends_on_group_id FROM schedule_groups"
+                " WHERE id = ?",
                 (group_id,),
             ).fetchone()
             if row is None:
                 return None
             return {
                 "id": group_id, "name": row[0], "timezone": row[1], "rules": json.loads(row[2]),
-                "enabled": bool(row[3]),
+                "enabled": bool(row[3]), "depends_on": _group_name_by_id(conn, row[4]),
             }
         finally:
             conn.close()
 
     return _retry_db(_do)
+
+
+def _group_name_by_id(conn: sqlite3.Connection, group_id: int | None) -> str | None:
+    if group_id is None:
+        return None
+    row = conn.execute("SELECT name FROM schedule_groups WHERE id = ?", (group_id,)).fetchone()
+    return row[0] if row else None
+
+
+def set_group_dependency(
+    client, group_name: str, depends_on: str | None,
+    on_warning: Callable[[str], None] | None = None,
+) -> None:
+
+    def _do():
+        conn = _connect()
+        try:
+            group_id = _group_id_for_name(conn, group_name)
+            target_id = None
+            if depends_on is not None:
+                target_id = _group_id_for_name(conn, depends_on)
+                if target_id == group_id:
+                    raise engine.ConfigError(f"group '{group_name}' can't depend on itself.")
+
+                seen, cursor = {target_id}, target_id
+                while True:
+                    row = conn.execute(
+                        "SELECT depends_on_group_id FROM schedule_groups WHERE id = ?", (cursor,)
+                    ).fetchone()
+                    nxt = row[0] if row else None
+                    if nxt is None:
+                        break
+                    if nxt == group_id:
+                        raise engine.ConfigError(
+                            f"'{depends_on}' already depends (directly or indirectly) on "
+                            f"'{group_name}', so '{group_name}' can't depend on it -- that would "
+                            "be a cycle."
+                        )
+                    if nxt in seen:
+                        break
+                    seen.add(nxt)
+                    cursor = nxt
+            conn.execute(
+                "UPDATE schedule_groups SET depends_on_group_id = ? WHERE id = ?",
+                (target_id, group_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    _retry_db(_do)
+    group = get_schedule_group(group_name)
+    if group is None:
+        raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+    for member in group["members"]:
+        _sync_group_membership_tags(client, member, group, on_warning=on_warning)
 
 
 def create_schedule_group(group_name: str, timezone: str) -> int:
@@ -4687,7 +4894,8 @@ def get_schedule_group(group_name: str) -> dict | None:
         conn = _connect()
         try:
             row = conn.execute(
-                "SELECT id, name, timezone, rules, enabled FROM schedule_groups WHERE name = ?",
+                "SELECT id, name, timezone, rules, enabled, depends_on_group_id"
+                " FROM schedule_groups WHERE name = ?",
                 (group_name,),
             ).fetchone()
             if row is None:
@@ -4697,9 +4905,16 @@ def get_schedule_group(group_name: str) -> dict | None:
                     "SELECT name FROM instances WHERE group_id = ? ORDER BY name", (row[0],)
                 ).fetchall()
             ]
+            dependents = [
+                r[0] for r in conn.execute(
+                    "SELECT name FROM schedule_groups WHERE depends_on_group_id = ? ORDER BY name",
+                    (row[0],),
+                ).fetchall()
+            ]
             return {
                 "id": row[0], "name": row[1], "timezone": row[2], "rules": json.loads(row[3]),
                 "enabled": bool(row[4]), "members": members,
+                "depends_on": _group_name_by_id(conn, row[5]), "dependents": dependents,
             }
         finally:
             conn.close()
@@ -4713,8 +4928,10 @@ def list_schedule_groups() -> list[dict]:
         conn = _connect()
         try:
             groups = conn.execute(
-                "SELECT id, name, timezone, rules, enabled FROM schedule_groups ORDER BY name"
+                "SELECT id, name, timezone, rules, enabled, depends_on_group_id"
+                " FROM schedule_groups ORDER BY name"
             ).fetchall()
+            names_by_id = {g[0]: g[1] for g in groups}
             counts = dict(conn.execute(
                 "SELECT group_id, COUNT(*) FROM instances"
                 " WHERE group_id IS NOT NULL GROUP BY group_id"
@@ -4723,8 +4940,9 @@ def list_schedule_groups() -> list[dict]:
                 {
                     "id": gid, "name": name, "timezone": tz, "rules": json.loads(rules),
                     "enabled": bool(enabled), "member_count": counts.get(gid, 0),
+                    "depends_on": names_by_id.get(dep) if dep is not None else None,
                 }
-                for gid, name, tz, rules, enabled in groups
+                for gid, name, tz, rules, enabled, dep in groups
             ]
         finally:
             conn.close()
@@ -4746,12 +4964,15 @@ def _sync_group_membership_tags_locked(client, name: str, record: dict, group: d
     kept = [
         t for t in (os_volume.tags or [])
         if not t.startswith(_GROUP_NAME_TAG_PREFIX)
+        and not t.startswith(_GROUP_DEP_TAG_PREFIX)
         and not _is_schedule_tag(t, prefix=_GROUP_SCHEDULE_TAG_PREFIX)
     ]
     new_tags = kept
     if group is not None:
         new_tags = new_tags + [f"{_GROUP_NAME_TAG_PREFIX}{group['name']}"] + \
             _encode_schedule_as_tags(group, prefix=_GROUP_SCHEDULE_TAG_PREFIX)
+        if group.get("depends_on"):
+            new_tags.append(f"{_GROUP_DEP_TAG_PREFIX}{group['depends_on']}")
     if new_tags != (os_volume.tags or []):
         os_volume.tags = new_tags
         os_volume.save()
@@ -5062,6 +5283,16 @@ def set_group_schedule(
 
     _validate_schedule_rules(rules)
     _validate_schedule_timezone(timezone)
+    existing = get_schedule_group(group_name)
+    if existing is not None:
+        modes = get_schedule_modes()
+        manual = sorted(m for m in existing["members"] if modes.get(m) == "manual")
+        if manual:
+            raise engine.ConfigError(
+                f"group '{group_name}' has manual-only member(s) {', '.join(manual)}, and a "
+                "manual-only node can't be in a scheduled group. Remove them or switch them back "
+                "with `set-mode --auto` first."
+            )
     _set_group_schedule_row(group_name, timezone, rules, enabled)
 
     group = get_schedule_group(group_name)
@@ -5087,6 +5318,14 @@ def delete_schedule_group(group_name: str) -> None:
                     f"group '{group_name}' still has {len(members)} member(s): "
                     f"{', '.join(members)} -- run `group-remove` for each one first."
                 )
+            dependents = [r[0] for r in conn.execute(
+                "SELECT name FROM schedule_groups WHERE depends_on_group_id = ?", (group_id,)
+            ).fetchall()]
+            if dependents:
+                raise engine.ConfigError(
+                    f"group(s) {', '.join(dependents)} depend on '{group_name}' -- run "
+                    f"`group-depends --group-name <group> --clear` for each one first."
+                )
             try:
                 conn.execute("DELETE FROM schedule_groups WHERE id = ?", (group_id,))
                 conn.commit()
@@ -5104,6 +5343,117 @@ def delete_schedule_group(group_name: str) -> None:
     _retry_db(_do)
 
 
+SCHEDULE_MODES = ("auto", "manual")
+
+_SCHEDULE_MODE_MANUAL_TAG = "mode:manual"
+
+
+def _group_has_schedule(group: dict | None) -> bool:
+
+    return bool(group and group.get("rules"))
+
+
+def get_schedule_mode(name: str) -> str:
+
+    return get_schedule_modes().get(name, "auto")
+
+
+def get_schedule_modes() -> dict[str, str]:
+
+    def _do():
+        conn = _connect()
+        try:
+            return dict(conn.execute(
+                "SELECT instance_name, schedule_mode FROM instance_settings"
+            ).fetchall())
+        finally:
+            conn.close()
+
+    return _retry_db(_do)
+
+
+def _write_schedule_mode_row(name: str, mode: str) -> None:
+
+    def _do():
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO instance_settings (instance_name, schedule_mode) VALUES (?, ?)"
+                " ON CONFLICT(instance_name) DO UPDATE SET schedule_mode = excluded.schedule_mode",
+                (name, mode),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    _retry_db(_do)
+
+
+def _sync_schedule_mode_tag_locked(client, name: str, record: dict, mode: str) -> None:
+
+    if client is None or not record.get("os_volume_id"):
+        return
+    os_volume = engine.retry_transient(
+        lambda vol_id=record["os_volume_id"]: client.load(Volume, vol_id)
+    )
+    current = list(os_volume.tags or [])
+    new_tags = [t for t in current if t != _SCHEDULE_MODE_MANUAL_TAG]
+    if mode == "manual":
+        new_tags.append(_SCHEDULE_MODE_MANUAL_TAG)
+    if new_tags != current:
+        os_volume.tags = new_tags
+        engine.retry_transient(os_volume.save)
+        _verify_os_volume_tag_write(client, record["os_volume_id"], new_tags)
+
+
+def _refuse_if_manual_only(name: str, what: str) -> None:
+    if get_schedule_mode(name) == "manual":
+        raise engine.ConfigError(
+            f"'{name}' is manual-only, so it can't {what}. Switch it back with "
+            f"`set-mode --name {name} --auto` first."
+        )
+
+
+def set_schedule_mode(
+    client, name: str, mode: str, *, on_warning: Callable[[str], None] | None = None,
+) -> str:
+
+    if mode not in SCHEDULE_MODES:
+        raise engine.ConfigError(f"schedule mode must be one of {', '.join(SCHEDULE_MODES)}.")
+    with _instance_lock(name):
+        registry = load_registry()
+        record = registry.get(name)
+        if record is None:
+            raise NotOnboardedError(f"'{name}' is not onboarded. Run `onboard` first.")
+        if mode == "manual":
+            if get_instance_schedule(name) is not None:
+                raise engine.ConfigError(
+                    f"'{name}' has its own schedule. Clear it first (`schedule-clear --name "
+                    f"{name}`) -- a manual-only node has no schedule."
+                )
+            group = _group_row_by_id(record["group_id"]) if record.get("group_id") else None
+            if _group_has_schedule(group):
+                assert group is not None
+                raise engine.ConfigError(
+                    f"'{name}' is in group '{group['name']}', which has a schedule. Remove it from "
+                    f"the group first (`group-remove --name {name} --keep-manual`) -- a "
+                    "manual-only node can't be in a scheduled group."
+                )
+            if record.get("manual_override_expires_at"):
+                record["manual_override_expires_at"] = None
+                _save_one_record(name, record)
+        _write_schedule_mode_row(name, mode)
+        try:
+            _sync_schedule_mode_tag_locked(client, name, record, mode)
+        except Exception as e:
+            if on_warning is not None:
+                on_warning(
+                    f"WARNING: '{name}' is now {mode}, but its disaster-recovery tag couldn't be "
+                    f"updated: {e} -- `rebuild` after a database loss may not restore the mode."
+                )
+    return mode
+
+
 def assign_instance_to_group(
     client, name: str, group_name: str, on_warning: Callable[[str], None] | None = None
 ) -> int:
@@ -5112,6 +5462,14 @@ def assign_instance_to_group(
         registry = load_registry()
         if name not in registry:
             raise NotOnboardedError(f"'{name}' is not onboarded. Run `onboard` first.")
+        if get_schedule_mode(name) == "manual" and _group_has_schedule(
+            get_schedule_group(group_name)
+        ):
+            raise engine.ConfigError(
+                f"'{name}' is manual-only and group '{group_name}' has a schedule -- a "
+                f"manual-only node can't be in a scheduled group. Use `set-mode --name {name} "
+                "--auto` first, or a group without a schedule."
+            )
 
         def _do():
             conn = _connect()
@@ -5225,6 +5583,90 @@ def cmd_group_schedule_set(client, args) -> int:
     return 0
 
 
+def _csv(value) -> list[str] | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def cmd_api_token_create(args) -> int:
+    try:
+        created = create_api_token(
+            args.name, _csv(args.scopes) or [], instances=_csv(args.instances),
+            groups=_csv(args.groups), expires_days=args.expires_days, created_by="cli",
+        )
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    print(f"Created token '{created['name']}' (scopes: {', '.join(created['scopes'])}).")
+    if created["instances"] or created["groups"]:
+        print(f"  limited to nodes {created['instances'] or []} and groups {created['groups'] or []}")
+    if created["expires_at"]:
+        print(f"  expires {created['expires_at']}")
+    print("Store it now -- it is not shown again:")
+    print(f"  {created['token']}")
+    print("Use it as:  Authorization: Bearer <token>")
+    return 0
+
+
+def cmd_api_token_list(args) -> int:
+    tokens = list_api_tokens()
+    if not tokens:
+        print("No API tokens.")
+        return 0
+    for t in tokens:
+        state = "revoked" if t["revoked_at"] else ("expires " + t["expires_at"] if t["expires_at"]
+                                                    else "no expiry")
+        limits = ""
+        if t["instances"] or t["groups"]:
+            limits = f"  nodes={t['instances'] or []} groups={t['groups'] or []}"
+        print(f"{t['name']}  {t['token_prefix']}...  scopes={','.join(t['scopes'])}  {state}"
+              f"  last used {t['last_used_at'] or 'never'}{limits}")
+    return 0
+
+
+def cmd_api_token_revoke(args) -> int:
+    if not revoke_api_token(args.name):
+        print(f"Configuration error: no active token named '{args.name}'.", file=sys.stderr)
+        return 1
+    print(f"Token '{args.name}' revoked.")
+    return 0
+
+
+def cmd_set_mode(client, args) -> int:
+    mode = "manual" if args.manual else "auto"
+    try:
+        set_schedule_mode(client, args.name, mode, on_warning=_print_to_stderr)
+    except InstanceLockedError as e:
+        print(f"{e}", file=sys.stderr)
+        return 1
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    if mode == "manual":
+        print(f"'{args.name}' is now manual-only: the scheduler will never start or stop it, and "
+              "a manual start never arms an auto-stop timer.")
+    else:
+        print(f"'{args.name}' can be scheduled again (set a schedule or add it to a group).")
+    return 0
+
+
+def cmd_group_depends(client, args) -> int:
+    depends_on = None if args.clear else args.on
+    try:
+        set_group_dependency(client, args.group_name, depends_on, on_warning=_print_to_stderr)
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    if depends_on is None:
+        print(f"Group '{args.group_name}' no longer depends on another group.")
+    else:
+        print(f"Group '{args.group_name}' now depends on '{depends_on}': its members start only "
+              f"after every member of '{depends_on}' is running and ready, and '{depends_on}''s "
+              f"members stop only after every member of '{args.group_name}' is stopped.")
+    return 0
+
+
 def cmd_group_show(args) -> int:
     group = get_schedule_group(args.group_name)
     if group is None:
@@ -5241,8 +5683,9 @@ def cmd_group_list(args) -> int:
         return 0
     for g in groups:
         state = "enabled" if g["enabled"] else "disabled"
+        dep = f", depends on '{g['depends_on']}'" if g.get("depends_on") else ""
         print(f"{g['name']} (id {g['id']}, {g['timezone']}, {len(g['rules'])} rule(s), {state}, "
-              f"{g['member_count']} member(s))")
+              f"{g['member_count']} member(s){dep})")
     return 0
 
 
@@ -5335,6 +5778,7 @@ DEFAULT_POLL_CATCH_UP_SECONDS = 3600
 
 
 DEFAULT_POLL_MAX_PARALLEL = 10
+DEFAULT_GROUP_ACTION_MAX_PARALLEL = 10
 MAX_POLL_MAX_PARALLEL = 50
 
 
@@ -5510,6 +5954,7 @@ class PollTickInstanceResult:
         "no_schedule", "disabled", "not_due", "already_transitioning", "already_fired_today",
         "already_handled", "already_in_desired_state",
         "fired_success", "fired_noop", "fired_failure", "error", "auto_revert_window_reopened",
+        "waiting_on_dependency", "waiting_on_dependents", "manual_only",
     ]
     action: Literal["create", "delete"] | None = None
     detail: str | None = None
@@ -5517,6 +5962,17 @@ class PollTickInstanceResult:
 
 
     via_auto_revert: bool = False
+
+
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    worker: str | None = None
+
+    @property
+    def duration_s(self) -> float | None:
+        if self.started_at is None or self.finished_at is None:
+            return None
+        return (self.finished_at - self.started_at).total_seconds()
 
 
 @dataclass
@@ -5532,9 +5988,320 @@ class PollTickResult:
     def failed_count(self) -> int:
         return sum(1 for r in self.results if r.outcome in ("fired_failure", "error"))
 
+    @property
+    def waiting_count(self) -> int:
+        return sum(1 for r in self.results
+                   if r.outcome in ("waiting_on_dependency", "waiting_on_dependents"))
+
+    def _timed(self) -> list[PollTickInstanceResult]:
+        return [r for r in self.results if r.started_at is not None and r.finished_at is not None]
+
+    @property
+    def peak_concurrency(self) -> int:
+
+        edges: list[tuple[datetime, int]] = []
+        for r in self._timed():
+            if r.started_at is not None and r.finished_at is not None:
+                edges.append((r.started_at, 1))
+                edges.append((r.finished_at, -1))
+        peak = current = 0
+        for _, delta in sorted(edges, key=lambda e: (e[0], e[1])):
+            current += delta
+            peak = max(peak, current)
+        return peak
+
+    @property
+    def jobs_window(self) -> tuple[datetime, datetime] | None:
+        starts = [r.started_at for r in self._timed() if r.started_at is not None]
+        finishes = [r.finished_at for r in self._timed() if r.finished_at is not None]
+        if not starts or not finishes:
+            return None
+        return min(starts), max(finishes)
+
 
 _POLL_NOOP_START_OUTCOMES = frozenset({"already_running"})
 _POLL_NOOP_STOP_OUTCOMES = frozenset({"already_stopped", "aborted_by_user"})
+
+
+POST_START_SETTLE_MARGIN_S = 120
+
+
+def _group_dependency_map() -> dict[int, int]:
+
+    def _do():
+        conn = _connect()
+        try:
+            return dict(conn.execute(
+                "SELECT id, depends_on_group_id FROM schedule_groups"
+                " WHERE depends_on_group_id IS NOT NULL"
+            ).fetchall())
+        finally:
+            conn.close()
+
+    return _retry_db(_do)
+
+
+def _latest_start_and_post_start(name: str) -> tuple[datetime | None, tuple[str, datetime] | None]:
+
+    def _do():
+        conn = _connect()
+        try:
+            started = conn.execute(
+                "SELECT MAX(timestamp) FROM schedule_events WHERE instance_name = ?"
+                " AND action = 'create' AND result = 'success'", (name,)
+            ).fetchone()[0]
+            hook = conn.execute(
+                "SELECT result, timestamp FROM hook_events WHERE instance_name = ?"
+                " AND hook = 'post_start' ORDER BY timestamp DESC, id DESC LIMIT 1", (name,)
+            ).fetchone()
+            return started, hook
+        finally:
+            conn.close()
+
+    started, hook = _retry_db(_do)
+    return (
+        datetime.fromisoformat(started) if started else None,
+        (hook[0], datetime.fromisoformat(hook[1])) if hook else None,
+    )
+
+
+def _member_ready(name: str, record: dict, now: datetime) -> str | None:
+
+    status = record.get("current_status")
+    if status != "running":
+        return f"'{name}' is {status}"
+    if record.get("transitioning"):
+        return f"'{name}' is mid-transition"
+    hook = resolve_effective_hooks(name, record).get("post_start")
+    if hook is None:
+        return None
+    started, last_check = _latest_start_and_post_start(name)
+    if started is None:
+        return None
+    if last_check is not None and last_check[1] >= started:
+        if last_check[0] in ("success", "skipped"):
+            return None
+        return f"'{name}' post-start check failed"
+    timeout = int(hook.get("timeout_s") or 0)
+    if (now - started).total_seconds() <= timeout + POST_START_SETTLE_MARGIN_S:
+        return f"'{name}' post-start check still running"
+    return None
+
+
+def dependency_wait_reason(record: dict, registry: dict, dep_map: dict[int, int],
+                           now: datetime) -> str | None:
+
+    target = dep_map.get(record.get("group_id"))
+    if target is None:
+        return None
+    target_group = _group_row_by_id(target)
+    label = f"group '{target_group['name']}'" if target_group else f"group {target}"
+    for member, member_record in sorted(registry.items()):
+        if member_record.get("group_id") != target:
+            continue
+        reason = _member_ready(member, member_record, now)
+        if reason is not None:
+            return f"waiting for {label}: {reason}"
+    return None
+
+
+def dependents_wait_reason(record: dict, registry: dict, dep_map: dict[int, int]) -> str | None:
+
+    group_id = record.get("group_id")
+    if group_id is None:
+        return None
+    dependents = {gid for gid, target in dep_map.items() if target == group_id}
+    if not dependents:
+        return None
+    for member, member_record in sorted(registry.items()):
+        if member_record.get("group_id") in dependents and member_record.get(
+            "current_status"
+        ) not in ("stopped", "needs_manual_recovery"):
+            dep_group = _group_row_by_id(member_record["group_id"])
+            label = f"group '{dep_group['name']}'" if dep_group else "a dependent group"
+            return (f"waiting for {label} to stop first: '{member}' is "
+                    f"{member_record.get('current_status')}")
+    return None
+
+
+def _dependency_reason(name: str, action: Literal["start", "stop"]) -> str | None:
+
+    registry = load_registry()
+    record = registry.get(name)
+    if record is None:
+        return None
+    if record.get("current_status") == ("running" if action == "start" else "stopped"):
+        return None
+    dep_map = _group_dependency_map()
+    if action == "start":
+        return dependency_wait_reason(record, registry, dep_map, datetime.now(UTC))
+    return dependents_wait_reason(record, registry, dep_map)
+
+
+def _warn_about_dependency(name: str, action: Literal["start", "stop"],
+                           on_warning: Callable[[str], None] | None) -> None:
+
+    if on_warning is None:
+        return
+    try:
+        reason = _dependency_reason(name, action)
+    except Exception:
+        return
+    if reason is not None:
+        verb = "starting" if action == "start" else "stopping"
+        on_warning(f"WARNING: {verb} '{name}' anyway, though its group dependency isn't "
+                   f"satisfied ({reason}).")
+
+
+def require_dependency(name: str, action: Literal["start", "stop"]) -> None:
+
+    reason = _dependency_reason(name, action)
+    if reason is not None:
+        raise DependencyNotSatisfiedError(
+            f"not {'starting' if action == 'start' else 'stopping'} '{name}': its group "
+            f"dependency isn't satisfied ({reason}). Retry later, or leave out "
+            "--respect-dependencies to act anyway."
+        )
+
+
+_START_OK_OUTCOMES = ("started", "already_running")
+_STOP_OK_OUTCOMES = ("stopped", "already_stopped", "confirmed_gone_reset_to_stopped")
+
+
+@dataclass
+class GroupMemberResult:
+    name: str
+    group: str
+    outcome: str
+    ok: bool
+    detail: str | None = None
+    security_warning: bool = False
+
+
+@dataclass
+class GroupActionResult:
+    group: str
+    action: Literal["start", "stop"]
+    stages: list[str]
+    members: list[GroupMemberResult] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return all(m.ok for m in self.members)
+
+
+def _group_chain(group_name: str, action: Literal["start", "stop"]) -> list[str]:
+
+    groups = {g["name"]: g for g in list_schedule_groups()}
+    if group_name not in groups:
+        raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+    if action == "start":
+        chain = [group_name]
+        cursor = groups[group_name].get("depends_on")
+        while cursor and cursor not in chain:
+            chain.append(cursor)
+            cursor = groups.get(cursor, {}).get("depends_on")
+        return list(reversed(chain))
+    dependents: dict[str, list[str]] = {}
+    for g in groups.values():
+        if g.get("depends_on"):
+            dependents.setdefault(g["depends_on"], []).append(g["name"])
+    order: list[str] = []
+
+    def _visit(name: str) -> None:
+        for child in sorted(dependents.get(name, [])):
+            if child not in order:
+                _visit(child)
+        if name not in order:
+            order.append(name)
+
+    _visit(group_name)
+    return order
+
+
+def group_action(
+    client, group_name: str, action: Literal["start", "stop"], ssh_key: str, *,
+    include_dependencies: bool = False,
+    respect_dependencies: bool = False,
+    triggered_by: Literal["schedule", "manual", "api"] = "manual",
+    actor: str | None = None,
+    skip_hooks: bool = False,
+    max_parallel: int = DEFAULT_GROUP_ACTION_MAX_PARALLEL,
+    client_factory: Callable[[], object] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+    on_member_done: Callable[[GroupMemberResult], None] | None = None,
+) -> GroupActionResult:
+
+    if not 1 <= max_parallel <= MAX_POLL_MAX_PARALLEL:
+        raise engine.ConfigError(f"max_parallel must be between 1 and {MAX_POLL_MAX_PARALLEL}.")
+    stages = _group_chain(group_name, action) if include_dependencies else [group_name]
+    if not include_dependencies and get_schedule_group(group_name) is None:
+        raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+    result = GroupActionResult(group=group_name, action=action, stages=stages)
+    if respect_dependencies and not include_dependencies:
+        for member in get_schedule_group(group_name)["members"]:
+            require_dependency(member, action)
+    ok_outcomes = _START_OK_OUTCOMES if action == "start" else _STOP_OK_OUTCOMES
+
+    def _one(member: str, stage: str) -> GroupMemberResult:
+        worker_client = client if client_factory is None else client_factory()
+        try:
+            if action == "start":
+                r: StartResult | StopResult = start_instance(
+                    worker_client, member, ssh_key, triggered_by=triggered_by, actor=actor,
+                    on_progress=on_progress, on_warning=on_warning, skip_hooks=skip_hooks,
+                )
+            else:
+                r = stop_instance(
+                    worker_client, member, ssh_key, triggered_by=triggered_by, actor=actor,
+                    on_progress=on_progress, on_warning=on_warning, skip_hooks=skip_hooks,
+                )
+        except Exception as e:
+            done = GroupMemberResult(member, stage, "error", False, detail=str(e))
+        else:
+            done = GroupMemberResult(
+                member, stage, r.outcome, r.outcome in ok_outcomes, detail=r.detail,
+                security_warning=getattr(r, "security_warning", False),
+            )
+        if on_member_done is not None:
+            on_member_done(done)
+        return done
+
+    for index, stage in enumerate(stages):
+        group = get_schedule_group(stage)
+        members = group["members"] if group else []
+        if on_progress is not None:
+            on_progress(f"{'Starting' if action == 'start' else 'Stopping'} group '{stage}' "
+                        f"({len(members)} member(s))...")
+        if len(members) <= 1 or max_parallel <= 1:
+            stage_results = [_one(m, stage) for m in members]
+        else:
+            with ThreadPoolExecutor(max_workers=min(max_parallel, len(members))) as pool:
+                stage_results = list(pool.map(lambda m, st=stage: _one(m, st), members))
+        result.members.extend(stage_results)
+        if index == len(stages) - 1:
+            break
+        blocker = next((m for m in stage_results if not m.ok), None)
+        if blocker is None and action == "start":
+
+
+            registry = load_registry()
+            not_ready = [m for m in members
+                         if _member_ready(m, registry.get(m, {}), datetime.now(UTC)) is not None]
+            if not_ready:
+                blocker = GroupMemberResult(not_ready[0], stage, "not_ready", False)
+        if blocker is not None:
+            reason = (f"group '{stage}' didn't fully {action}: '{blocker.name}' "
+                      f"{blocker.outcome}")
+            if on_warning is not None:
+                on_warning(f"WARNING: {reason} -- not continuing to the next group.")
+            for later in stages[index + 1:]:
+                later_group = get_schedule_group(later)
+                for m in (later_group["members"] if later_group else []):
+                    result.members.append(GroupMemberResult(m, later, "skipped", False, detail=reason))
+            break
+    return result
 
 
 def poll_tick(
@@ -5556,9 +6323,15 @@ def poll_tick(
         jobs.append((len(results) - 1, job_name, fn, job_action, job_via_group, job_via_revert))
 
     registry = load_registry()
+    dep_map = _group_dependency_map()
+    schedule_modes = get_schedule_modes()
     for name, record in registry.items():
         action: Literal["create", "delete"] | None = None
         via_group: str | None = None
+        if schedule_modes.get(name) == "manual":
+
+            results.append(PollTickInstanceResult(name, "manual_only"))
+            continue
 
 
         via_auto_revert = False
@@ -5631,6 +6404,13 @@ def poll_tick(
                         "this tick.",
                     ))
                     continue
+                wait = dependents_wait_reason(record, registry, dep_map)
+                if wait is not None:
+                    results.append(PollTickInstanceResult(
+                        name, "waiting_on_dependents", action="delete", via_auto_revert=True,
+                        detail=wait,
+                    ))
+                    continue
                 if on_progress is not None:
                     on_progress(f"'{name}': manual override expired, auto-reverting (stop)...")
 
@@ -5685,6 +6465,16 @@ def poll_tick(
                 ))
                 continue
 
+
+            wait = (dependency_wait_reason(record, registry, dep_map, tick_now)
+                    if action == "create" else dependents_wait_reason(record, registry, dep_map))
+            if wait is not None:
+                results.append(PollTickInstanceResult(
+                    name, "waiting_on_dependency" if action == "create" else "waiting_on_dependents",
+                    action=action, via_group=via_group, detail=wait,
+                ))
+                continue
+
             if on_progress is not None:
                 via = f" via group '{via_group}'" if via_group else ""
                 on_progress(f"'{name}': {action} due{via}, firing (triggered_by=schedule)...")
@@ -5733,14 +6523,18 @@ def poll_tick(
 
     def _run(job) -> tuple[int, PollTickInstanceResult]:
         index, job_name, fn, job_action, job_via_group, job_via_revert = job
+        started = datetime.now(UTC)
         try:
             worker_client = client if client_factory is None else client_factory()
-            return index, fn(worker_client)
+            result = fn(worker_client)
         except Exception as e:
-            return index, PollTickInstanceResult(
+            result = PollTickInstanceResult(
                 job_name, "error", action=job_action, detail=str(e), via_group=job_via_group,
                 via_auto_revert=job_via_revert,
             )
+        result.started_at, result.finished_at = started, datetime.now(UTC)
+        result.worker = threading.current_thread().name
+        return index, result
 
     if max_parallel <= 1 or len(jobs) <= 1:
         outcomes = [_run(job) for job in jobs]
@@ -5766,19 +6560,34 @@ def _per_thread_client_factory() -> Callable[[], object]:
     return _client
 
 
+def _hms(moment: datetime) -> str:
+    return moment.astimezone(UTC).strftime("%H:%M:%S.%f")[:-3]
+
+
 def cmd_poll(client, args) -> int:
     def _report_tick(tick: PollTickResult) -> None:
         for r in tick.results:
             if r.outcome in (
                 "fired_success", "fired_failure", "error", "auto_revert_window_reopened",
+                "waiting_on_dependency", "waiting_on_dependents",
             ):
                 detail = f" ({r.detail})" if r.detail else ""
                 via = f" via_group={r.via_group}" if r.via_group else ""
                 revert = " auto_revert=true" if r.via_auto_revert else ""
-                print(f"  {r.name}: {r.outcome} action={r.action}{via}{revert}{detail}")
+                timing = ""
+                if r.started_at is not None and r.finished_at is not None:
+                    timing = (f" started={_hms(r.started_at)} finished={_hms(r.finished_at)} "
+                              f"took={r.duration_s:.1f}s worker={r.worker}")
+                print(f"  {r.name}: {r.outcome} action={r.action}{via}{revert}{timing}{detail}")
         if tick.results:
-            print(f"Tick complete: {tick.fired_count} fired, {tick.failed_count} failed, "
+            waiting = f", {tick.waiting_count} waiting on a dependency" if tick.waiting_count else ""
+            print(f"Tick complete: {tick.fired_count} fired, {tick.failed_count} failed{waiting}, "
                   f"{len(tick.results)} instance(s) checked.")
+            window = tick.jobs_window
+            if window is not None:
+                print(f"  Jobs ran {_hms(window[0])} -> {_hms(window[1])} "
+                      f"({(window[1] - window[0]).total_seconds():.1f}s), "
+                      f"peak concurrency {tick.peak_concurrency} of max {args.max_parallel}.")
 
     max_parallel = getattr(args, "max_parallel", 1)
     if isinstance(max_parallel, bool) or not isinstance(max_parallel, int):
@@ -5850,11 +6659,18 @@ def cmd_serve_api(args) -> int:
 
 def list_instances() -> dict:
 
-    return load_registry()
+    registry = load_registry()
+    modes = get_schedule_modes()
+    for name, record in registry.items():
+        record["schedule_mode"] = modes.get(name, "auto")
+    return registry
 
 
 def cmd_list(args) -> int:
     registry = list_instances()
+    if _flag(args, "json"):
+        print(json.dumps(registry, default=str))
+        return 0
     if not registry:
         print("No instances onboarded yet.")
         return 0
@@ -5863,7 +6679,8 @@ def cmd_list(args) -> int:
         override = ""
         if record.get("manual_override_expires_at"):
             override = f"  [override expires {_format_override_expiry(record['manual_override_expires_at'])}]"
-        print(f"{name}: {record['current_status']}{lock}  "
+        manual = "  [manual-only]" if record.get("schedule_mode") == "manual" else ""
+        print(f"{name}: {record['current_status']}{lock}{manual}  "
               f"ip={record['reserved_ip']}  region={record['region']}  "
               f"linode_id={record['current_linode_id']}{override}")
     return 0
@@ -5875,6 +6692,7 @@ def get_instance_status(name: str) -> dict:
     record = registry.get(name)
     if record is None:
         raise NotOnboardedError(f"'{name}' is not onboarded.")
+    record["schedule_mode"] = get_schedule_mode(name)
     return record
 
 
@@ -6180,6 +6998,36 @@ class RebuildResult:
         return not (self.failed or self.incomplete or self.ambiguous or self.invalid or self.conflicts)
 
 
+def _restore_group_dependencies(
+    client, pending: dict[str, str],
+    on_progress: Callable[[str], None] | None,
+    on_warning: Callable[[str], None] | None,
+) -> None:
+
+    for group_name, dep in sorted(pending.items()):
+        try:
+            group = get_schedule_group(group_name)
+            if group is None or group.get("depends_on"):
+                continue
+            if get_schedule_group(dep) is None:
+                if on_warning is not None:
+                    on_warning(
+                        f"  WARNING: group '{group_name}' depended on '{dep}', but '{dep}' could "
+                        "not be recovered (it had no surviving members) -- recreate it and run "
+                        f"group-depends --group-name {group_name} --on {dep}."
+                    )
+                continue
+            set_group_dependency(client, group_name, dep, on_warning=on_warning)
+            if on_progress is not None:
+                on_progress(f"  restored group '{group_name}''s dependency on '{dep}' from tags.")
+        except Exception as e:
+            if on_warning is not None:
+                on_warning(
+                    f"  WARNING: could not restore group '{group_name}''s dependency on "
+                    f"'{dep}': {e} -- run group-depends --group-name {group_name} --on {dep}."
+                )
+
+
 def rebuild_instances(
     client, ssh_key: str, *,
     vpc_id: int | None = None, force: bool = False,
@@ -6199,6 +7047,9 @@ def rebuild_instances(
 
     recovered, partial, skipped, incomplete, failed, invalid = [], [], [], [], [], []
     ambiguous: list[tuple[str, dict]] = []
+
+
+    pending_dependencies: dict[str, str] = {}
 
     for name, resources in found.items():
 
@@ -6356,12 +7207,37 @@ def rebuild_instances(
                                     f"  restored '{name}''s membership in group "
                                     f"'{group_name}' from tags."
                                 )
+                            dep = next(
+                                (
+                                    t[len(_GROUP_DEP_TAG_PREFIX):]
+                                    for t in (os_volume.tags or [])
+                                    if t.startswith(_GROUP_DEP_TAG_PREFIX)
+                                ),
+                                None,
+                            )
+                            if dep:
+                                pending_dependencies.setdefault(group_name, dep)
                     except Exception as e:
                         if on_warning is not None:
                             on_warning(
                                 f"  WARNING: '{name}' recovered, but its group membership tags "
                                 f"could not be restored: {e} -- re-run group-add for it "
                                 "manually if it belonged to a group."
+                            )
+                if os_volume is not None:
+                    try:
+                        vol_tags = os_volume.tags if isinstance(os_volume.tags, list) else []
+                        if _SCHEDULE_MODE_MANUAL_TAG in vol_tags and name not in (
+                            get_schedule_modes()
+                        ):
+                            _write_schedule_mode_row(name, "manual")
+                            if on_progress is not None:
+                                on_progress(f"  restored '{name}' as manual-only from tags.")
+                    except Exception as e:
+                        if on_warning is not None:
+                            on_warning(
+                                f"  WARNING: '{name}' was manual-only, but that couldn't be "
+                                f"restored: {e} -- run `set-mode --name {name} --manual`."
                             )
 
 
@@ -6400,6 +7276,8 @@ def rebuild_instances(
             recovered.append(name)
         else:
             partial.append(name)
+
+    _restore_group_dependencies(client, pending_dependencies, on_progress, on_warning)
 
     if on_progress is not None:
         on_progress(f"Scanned tags: {len(found)} name(s) found.")
@@ -6731,6 +7609,169 @@ def delete_api_session(token: str) -> None:
     _retry_db(_do)
 
 
+API_TOKEN_SCOPES = ("read", "operate", "configure", "admin")
+_API_TOKEN_PREFIX = "lis_"
+_API_TOKEN_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
+
+
+def _hash_api_token(token: str) -> str:
+
+
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _token_row_to_dict(row: tuple) -> dict:
+    (name, prefix, scopes, instances, groups, created_by, created_at, expires_at, revoked_at,
+     last_used_at) = row
+    return {
+        "name": name, "token_prefix": prefix, "scopes": json.loads(scopes),
+        "instances": json.loads(instances) if instances else None,
+        "groups": json.loads(groups) if groups else None,
+        "created_by": created_by, "created_at": created_at, "expires_at": expires_at,
+        "revoked_at": revoked_at, "last_used_at": last_used_at,
+    }
+
+
+_TOKEN_COLUMNS = ("name, token_prefix, scopes, instances, groups, created_by, created_at,"
+                  " expires_at, revoked_at, last_used_at")
+
+
+def create_api_token(
+    name: str, scopes: list[str], *, instances: list[str] | None = None,
+    groups: list[str] | None = None, expires_days: float | None = None,
+    created_by: str | None = None,
+) -> dict:
+
+    if not _API_TOKEN_NAME_RE.fullmatch(name or ""):
+        raise engine.ConfigError(
+            "token name must be 1-48 characters: lowercase letters, digits, '.', '_' or '-'."
+        )
+    scopes = sorted(set(scopes))
+    if not scopes or any(sc not in API_TOKEN_SCOPES for sc in scopes):
+        raise engine.ConfigError(
+            f"scopes must be one or more of {', '.join(API_TOKEN_SCOPES)}."
+        )
+    for group_name in groups or []:
+        if get_schedule_group(group_name) is None:
+            raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+    if expires_days is not None and not (0 < expires_days <= 3650):
+        raise engine.ConfigError("expiry must be between 0 and 3650 days.")
+    token = _API_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    now = datetime.now(UTC)
+    expires_at = (now + timedelta(days=expires_days)).isoformat() if expires_days else None
+
+    def _do():
+        conn = _connect()
+        try:
+            try:
+                conn.execute(
+                    "INSERT INTO api_tokens (name, token_hash, token_prefix, scopes, instances,"
+                    " groups, created_by, created_at, expires_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (name, _hash_api_token(token), token[:10], json.dumps(scopes),
+                     json.dumps(sorted(set(instances))) if instances else None,
+                     json.dumps(sorted(set(groups))) if groups else None,
+                     created_by, now.isoformat(), expires_at),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as e:
+                raise engine.ConfigError(f"a token named '{name}' already exists.") from e
+        finally:
+            conn.close()
+
+    _retry_db(_do)
+    meta = next(t for t in list_api_tokens() if t["name"] == name)
+    return {**meta, "token": token}
+
+
+def list_api_tokens() -> list[dict]:
+
+    def _do():
+        conn = _connect()
+        try:
+            return conn.execute(
+                f"SELECT {_TOKEN_COLUMNS} FROM api_tokens ORDER BY created_at DESC, name"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    return [_token_row_to_dict(r) for r in _retry_db(_do)]
+
+
+def revoke_api_token(name: str) -> bool:
+
+    def _do():
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "UPDATE api_tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL",
+                (datetime.now(UTC).isoformat(), name),
+            )
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
+    return bool(_retry_db(_do))
+
+
+def verify_api_token(token: str) -> dict | None:
+
+    if not token.startswith(_API_TOKEN_PREFIX):
+        return None
+    token_hash = _hash_api_token(token)
+
+    def _do():
+        conn = _connect()
+        try:
+            return conn.execute(
+                f"SELECT {_TOKEN_COLUMNS} FROM api_tokens WHERE token_hash = ?", (token_hash,)
+            ).fetchone()
+        finally:
+            conn.close()
+
+    row = _retry_db(_do)
+    if row is None:
+        return None
+    meta = _token_row_to_dict(row)
+    if meta["revoked_at"] is not None:
+        return None
+    if meta["expires_at"] and datetime.fromisoformat(meta["expires_at"]) <= datetime.now(UTC):
+        return None
+
+    def _touch():
+        conn = _connect()
+        try:
+            conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE name = ?",
+                         (datetime.now(UTC).isoformat(), meta["name"]))
+            conn.commit()
+        finally:
+            conn.close()
+
+    with contextlib_suppress(Exception):
+        _retry_db(_touch)
+    return meta
+
+
+def api_token_allows_instance(meta: dict, name: str) -> bool:
+
+    if meta.get("instances") is None and meta.get("groups") is None:
+        return True
+    if name in (meta.get("instances") or []):
+        return True
+    record = load_registry().get(name)
+    if record and record.get("group_id") is not None and meta.get("groups"):
+        group = _group_row_by_id(record["group_id"])
+        return bool(group and group["name"] in meta["groups"])
+    return False
+
+
+def api_token_allows_group(meta: dict, group_name: str) -> bool:
+    if meta.get("instances") is None and meta.get("groups") is None:
+        return True
+    return group_name in (meta.get("groups") or [])
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
 
 
@@ -6820,7 +7861,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
 
     start_parser = subparsers.add_parser("start", help="Start (create) an onboarded instance.")
-    start_parser.add_argument("--name", required=True, type=validate_instance_name)
+    start_target = start_parser.add_mutually_exclusive_group(required=True)
+    start_target.add_argument("--name", type=validate_instance_name)
+    start_target.add_argument(
+        "--group-name", help="Start every member of this group at once (in parallel).",
+    )
+    start_parser.add_argument(
+        "--with-dependencies", action="store_true",
+        help="With --group-name: also start the groups in its dependency chain, in order.",
+    )
+    start_parser.add_argument(
+        "--max-parallel", type=int, default=DEFAULT_GROUP_ACTION_MAX_PARALLEL,
+        help="With --group-name: members acted on at once (default "
+        f"{DEFAULT_GROUP_ACTION_MAX_PARALLEL}, max {MAX_POLL_MAX_PARALLEL}).",
+    )
+    start_parser.add_argument(
+        "--respect-dependencies", action="store_true",
+        help="Refuse (exit code 5) instead of warning when the node's group dependency isn't "
+        "satisfied.",
+    )
+    start_parser.add_argument(
+        "--json", action="store_true",
+        help="Print the result as one JSON object on stdout (progress goes to stderr).",
+    )
     start_parser.add_argument("--ssh-key", default=default_ssh_key)
     start_parser.add_argument(
         "--override-window-hours", type=float, default=None,
@@ -6835,7 +7898,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
 
     stop_parser = subparsers.add_parser("stop", help="Stop (delete) an onboarded instance.")
-    stop_parser.add_argument("--name", required=True, type=validate_instance_name)
+    stop_target = stop_parser.add_mutually_exclusive_group(required=True)
+    stop_target.add_argument("--name", type=validate_instance_name)
+    stop_target.add_argument(
+        "--group-name", help="Stop every member of this group at once (in parallel).",
+    )
+    stop_parser.add_argument(
+        "--with-dependencies", action="store_true",
+        help="With --group-name: also stop the groups in its dependency chain, in order.",
+    )
+    stop_parser.add_argument(
+        "--max-parallel", type=int, default=DEFAULT_GROUP_ACTION_MAX_PARALLEL,
+        help="With --group-name: members acted on at once (default "
+        f"{DEFAULT_GROUP_ACTION_MAX_PARALLEL}, max {MAX_POLL_MAX_PARALLEL}).",
+    )
+    stop_parser.add_argument(
+        "--respect-dependencies", action="store_true",
+        help="Refuse (exit code 5) instead of warning when the node's group dependency isn't "
+        "satisfied.",
+    )
+    stop_parser.add_argument(
+        "--json", action="store_true",
+        help="Print the result as one JSON object on stdout (progress goes to stderr).",
+    )
     stop_parser.add_argument("--ssh-key", default=default_ssh_key)
     stop_parser.add_argument("--yes", action="store_true", help="Skip the interactive confirmation prompt.")
     stop_parser.add_argument(
@@ -6911,7 +7996,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     serve_api_parser.add_argument("--host", default="127.0.0.1")
     serve_api_parser.add_argument("--port", type=int, default=8000)
 
-    subparsers.add_parser("list", help="List all onboarded instances and their current status.")
+    list_parser = subparsers.add_parser(
+        "list", help="List all onboarded instances and their current status.",
+    )
+    list_parser.add_argument("--json", action="store_true", help="Print as one JSON object.")
 
     status_parser = subparsers.add_parser("status", help="Show one onboarded instance's full record.")
     status_parser.add_argument("--name", required=True, type=validate_instance_name)
@@ -7105,6 +8193,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("group-list", help="List every schedule group.")
 
+    token_create_parser = subparsers.add_parser(
+        "api-token-create", help="Create an API token for scripts (shown once).",
+    )
+    token_create_parser.add_argument("--name", required=True)
+    token_create_parser.add_argument(
+        "--scopes", required=True,
+        help="Comma-separated: read (list/status/history), operate (start/stop/extend), "
+        "configure (schedules, groups, dependencies), admin (everything, incl. hooks, onboard, "
+        "offboard, tokens).",
+    )
+    token_create_parser.add_argument("--instances", help="Comma-separated node names it may act on.")
+    token_create_parser.add_argument("--groups", help="Comma-separated groups it may act on.")
+    token_create_parser.add_argument("--expires-days", type=float, help="Default: no expiry.")
+    subparsers.add_parser("api-token-list", help="List API tokens (never the tokens themselves).")
+    token_revoke_parser = subparsers.add_parser("api-token-revoke", help="Revoke an API token.")
+    token_revoke_parser.add_argument("--name", required=True)
+
+    set_mode_parser = subparsers.add_parser(
+        "set-mode",
+        help="Make a node manual-only (never started or stopped by the scheduler) or schedulable "
+        "again.",
+    )
+    set_mode_parser.add_argument("--name", required=True, type=validate_instance_name)
+    which_mode = set_mode_parser.add_mutually_exclusive_group(required=True)
+    which_mode.add_argument("--manual", action="store_true", help="Manual-only.")
+    which_mode.add_argument("--auto", action="store_true", help="Schedulable (the default).")
+
+    group_depends_parser = subparsers.add_parser(
+        "group-depends",
+        help="Make a group's members start only after another group's members are running and "
+        "ready (post-start hooks included), and stop only after this group's are down.",
+    )
+    group_depends_parser.add_argument("--group-name", required=True)
+    depends_target = group_depends_parser.add_mutually_exclusive_group(required=True)
+    depends_target.add_argument("--on", help="The group this group depends on.")
+    depends_target.add_argument("--clear", action="store_true", help="Remove the dependency.")
+
     group_delete_parser = subparsers.add_parser(
         "group-delete",
         help="Permanently delete a schedule group. Refuses if it still has members -- "
@@ -7253,6 +8378,12 @@ def _route(args) -> int:
         return cmd_group_list(args)
     if args.command == "group-delete":
         return cmd_group_delete(args)
+    if args.command == "api-token-create":
+        return cmd_api_token_create(args)
+    if args.command == "api-token-list":
+        return cmd_api_token_list(args)
+    if args.command == "api-token-revoke":
+        return cmd_api_token_revoke(args)
     if args.command == "clear-lock":
         return cmd_clear_lock(args)
     if args.command == "deregister":
@@ -7303,6 +8434,10 @@ def _route(args) -> int:
         return cmd_schedule_clear(client, args)
     if args.command == "group-schedule-set":
         return cmd_group_schedule_set(client, args)
+    if args.command == "group-depends":
+        return cmd_group_depends(client, args)
+    if args.command == "set-mode":
+        return cmd_set_mode(client, args)
     if args.command == "group-add":
         return cmd_group_add(client, args)
     if args.command == "group-remove":

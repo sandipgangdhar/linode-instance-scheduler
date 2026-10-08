@@ -522,6 +522,16 @@ a week, rehearse at your real scale, then onboard production in waves.
 - [ ] **Groups**: `group-create`, `group-schedule-set --group-name <group> --timezone <tz> ...`,
       `group-add --name <name> --group-name <group>`. A window crossing midnight is one
       overnight rule (a stop time earlier than the start time stops the next morning).
+- [ ] **Manual-only nodes**: for anything that should never follow a schedule,
+      `set-mode --name <name> --manual` (not in a group with a schedule).
+- [ ] **Scripts and pipelines**: an API token per consumer with the narrowest scopes and limits
+      (`api-token-create --name <name> --scopes read,operate --groups <group> --expires-days 90`);
+      scripts check `start`/`stop` exit codes (3 = busy, retry; 5 = start order not satisfied) or
+      use `?wait=true` over the API. Review `api-token-list` (last used) periodically and revoke
+      what's unused.
+- [ ] **Start order**: where one group needs another up first (applications and their
+      database), `group-depends --group-name <app-group> --on <db-group>`, and give the database
+      group a post-start readiness check so "up" means accepting connections.
 - [ ] **Hooks**: `hooks-set --name <name>` (or `--group-name <group>`) with `--pre-stop` /
       `--post-start` commands or `--pre-stop-script` / `--post-start-script` uploads. Verify with
       `hooks-run`.
@@ -558,6 +568,9 @@ a week, rehearse at your real scale, then onboard production in waves.
 | Symptom | Most likely cause | What to check / do |
 |---|---|---|
 | Instance shows `unreachable` | Created successfully but the network reachability check hasn't yet succeeded, or the instance was powered off out-of-band (e.g. directly via Cloud Manager, not through this tool) | Run `start` again — the tool detects a confirmed-gone or genuinely powered-off instance and recovers automatically; a second `start` completes the recovery rather than creating a duplicate |
+| A node never starts or stops on its schedule, and `poll` shows nothing for it | It's manual-only | `list` shows `[manual-only]`; `set-mode --name <name> --auto` to let schedules govern it again |
+| An API call returns 403 with an API token | The token lacks the scope this route needs, or the node/group is outside its limits | `api-token-list` for the token's scopes and limits; create a new token with the right ones (tokens can't be edited) |
+| An API call returns 401 with an API token | The token was revoked, has expired, or was mistyped | `api-token-list`; create a new one if needed |
 | A scheduled action didn't fire | The scheduler process (`poll`) wasn't running for longer than the catch-up window (default one hour), the instance's effective schedule isn't what you expect, or a manual start/stop after the scheduled time took precedence (by design) | `systemctl is-active instance-scheduler-poll`; `python instance_manager.py schedule-show --name <name>`; `history --name <name>` shows whether a manual action came after the scheduled time; confirm whether an individual schedule is silently overriding a group's (Part III.1 of the Definitive Guide) |
 | A scheduled start keeps failing (e.g. "insufficient capacity") | The region is temporarily short of that plan | Nothing to do while it's inside the catch-up window — `poll` retries it every cycle, and each failure is in `history` and makes `poll --once` exit non-zero. If it persists, start it on another plan or spread the fleet's start times |
 | `poll` output shows many "429 Too Many Requests" responses, or a large fleet's starts run slower than expected | Parallel workers are hitting the Linode API rate limit; every worker is pausing for the time the API asks | Usually nothing — requests resume on their own and anything that still fails is retried within the catch-up window. If it's persistent, lower `poll --max-parallel` (default 10) or `LINODE_API_MAX_REQUESTS_PER_SECOND` (default 10), and check nothing else is using the same API token heavily |
@@ -568,6 +581,7 @@ a week, rehearse at your real scale, then onboard production in waves.
 | `onboard` refuses with "IP not reserved" | The instance's public IP is still an ordinary, ephemeral one | Reserve it first via Cloud Manager, or use the one-time in-flow "reserve and retry" option on the dashboard's onboarding screen |
 | A stop/start command refuses with "already operating on" | A per-instance lock is held — normally released automatically when the holding process exits | Confirm nothing is actually mid-operation on that instance, then `clear-lock --name <name>` |
 | `rebuild` recovered an instance as `needs_manual_recovery` instead of `stopped` | Neither tags nor Object Storage had a complete-enough record for it at the moment of loss — most commonly, Object Storage wasn't configured yet, or that specific instance hadn't been stopped/onboarded since it was | See "Recovering from a lost or corrupted registry" above for the manual-boot recovery steps, and Part 5.6 of the Definitive Guide for the full edge-case table |
+| A group's members show "waiting on dependency" or "waiting on dependents" and never act | The group it depends on isn't fully running and ready (or, on the way down, a dependent group isn't fully stopped) — often a member that failed to start, is `unreachable`, or whose post-start check failed | `group-show --group-name <group>` to see the dependency; `list` for each member's status; `history --name <member>` and `hooks-run --name <member> --post-start` for a failing readiness check. Fix the blocking member, or `group-depends --group-name <group> --clear` to remove the order |
 | Group's timezone or schedule doesn't seem to apply | An individual schedule exists and is silently overriding the group entirely (working as designed, not a bug) | `schedule-show --name <name>` to check for an individual schedule; clear it if the group should govern instead |
 | A stop fails with "pre-stop hook ... Stop aborted" and the instance stays running | The instance's pre-stop hook exited non-zero, timed out, or couldn't be reached over SSH, and its failure policy is `abort` (the default) — by design, nothing was shut down or deleted | Read the hook output printed with the error (also in the Hooks card and `hook-events`), fix the cause, and stop again. To stop without the hook, use `stop --skip-hooks` (dashboard: "Stop anyway, without the pre-stop hook"). A manual-override auto-stop retries the stop on every poll tick until it succeeds |
 | A start reports "post-start check still failing" | The instance started and is running, but its readiness check never passed within its timeout | The instance is deliberately left running. Check the service on the instance, then re-run the check with `hooks-run --name <name> --post-start`. If the check needs longer on a cold boot, raise `--post-start-timeout` |

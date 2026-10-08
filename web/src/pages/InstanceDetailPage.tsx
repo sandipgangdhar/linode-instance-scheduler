@@ -437,49 +437,97 @@ export function InstanceDetailPage() {
             )}
           </Card>
 
-          <Card>
-            <CardHeader
-              title="Schedule"
-              subtitle={
-                hasActiveIndividualSchedule
-                  ? 'Automatic start/stop for this instance.'
-                  : currentGroup
-                    ? `No individual schedule — following group "${currentGroup.name}".`
-                    : 'No schedule set — manual control only.'
-              }
-              action={
-                schedule && (
+          {record.schedule_mode === 'manual' ? (
+            <Card>
+              <CardHeader
+                title="Manual-only"
+                subtitle="The scheduler never starts or stops this instance, and a manual start never arms an auto-stop timer."
+                action={
                   <Button
                     variant="ghost"
                     disabled={busy !== null}
                     onClick={() =>
-                      run('clear schedule', async (_onProgress, onWarning) => {
-                        const result = await api.clearSchedule(name)
+                      run('set schedulable', async (_onProgress, onWarning) => {
+                        const result = await api.setScheduleMode(name, 'auto')
                         if (result.warnings) onWarning(result.warnings)
                         return result
                       })
                     }
                   >
-                    Clear
+                    Allow scheduling
                   </Button>
-                )
-              }
-            />
-            <div className="px-5 py-4">
-              <ScheduleEditor
-                key={JSON.stringify(schedule)}
-                initial={schedule}
-                saving={busy === 'save schedule'}
-                onSave={(s) =>
-                  run('save schedule', async (_onProgress, onWarning) => {
-                    const result = await api.setSchedule(name, s)
-                    if (result.warnings) onWarning(result.warnings)
-                    return result
-                  })
                 }
               />
-            </div>
-          </Card>
+              <p className="px-5 py-4 text-sm text-slate-500">
+                Start and stop it from here, the CLI, or the API. It can stay in a group that has no schedule
+                (for shared hooks or start order), but not in a group with a schedule.
+              </p>
+            </Card>
+          ) : (
+            <>
+              <Card>
+                <CardHeader
+                  title="Schedule"
+                  subtitle={
+                    hasActiveIndividualSchedule
+                      ? 'Automatic start/stop for this instance.'
+                      : currentGroup
+                        ? `No individual schedule — following group "${currentGroup.name}".`
+                        : 'No schedule set — manual control only.'
+                  }
+                  action={
+                    schedule && (
+                      <Button
+                        variant="ghost"
+                        disabled={busy !== null}
+                        onClick={() =>
+                          run('clear schedule', async (_onProgress, onWarning) => {
+                            const result = await api.clearSchedule(name)
+                            if (result.warnings) onWarning(result.warnings)
+                            return result
+                          })
+                        }
+                      >
+                        Clear
+                      </Button>
+                    )
+                  }
+                />
+                <div className="px-5 py-4">
+                  <ScheduleEditor
+                    key={JSON.stringify(schedule)}
+                    initial={schedule}
+                    saving={busy === 'save schedule'}
+                    onSave={(s) =>
+                      run('save schedule', async (_onProgress, onWarning) => {
+                        const result = await api.setSchedule(name, s)
+                        if (result.warnings) onWarning(result.warnings)
+                        return result
+                      })
+                    }
+                  />
+                </div>
+              </Card>
+
+              {!schedule && !(currentGroup && currentGroup.rules.length > 0) && (
+                <div className="-mt-3 flex justify-end">
+                  <Button
+                    variant="ghost"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      run('set manual-only', async (_onProgress, onWarning) => {
+                        const result = await api.setScheduleMode(name, 'manual')
+                        if (result.warnings) onWarning(result.warnings)
+                        return result
+                      })
+                    }
+                  >
+                    Make manual-only
+                  </Button>
+                </div>
+              )}
+            </>
+          )}
 
           <HooksCard
             key={name}

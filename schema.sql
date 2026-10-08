@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS schedule_groups (
     name TEXT NOT NULL UNIQUE,
     timezone TEXT NOT NULL,
     rules TEXT NOT NULL DEFAULT '[]',
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    depends_on_group_id INTEGER REFERENCES schedule_groups(id)
 );
 
 CREATE TABLE IF NOT EXISTS instances (
@@ -69,11 +70,30 @@ CREATE TABLE IF NOT EXISTS orphaned_migration_attempts (
     detail TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS api_tokens (
+    name TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,
+    scopes TEXT NOT NULL,
+    instances TEXT,
+    groups TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    revoked_at TEXT,
+    last_used_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS api_sessions (
     token TEXT PRIMARY KEY,
     linode_username TEXT NOT NULL,
     created_at TIMESTAMP NOT NULL,
     expires_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS instance_settings (
+    instance_name TEXT PRIMARY KEY REFERENCES instances(name) ON DELETE CASCADE,
+    schedule_mode TEXT NOT NULL DEFAULT 'auto' CHECK (schedule_mode IN ('auto', 'manual'))
 );
 
 CREATE TABLE IF NOT EXISTS instance_hooks (

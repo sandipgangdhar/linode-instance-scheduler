@@ -188,15 +188,85 @@ def _bearer_token(authorization: str | None) -> str | None:
     return authorization[len("Bearer "):]
 
 
-def require_session(authorization: str | None = Header(default=None)) -> str:
+_ROUTE_SCOPES: dict[tuple[str, str], str] = {
+    ("POST", "/instances/{name}/start"): "operate",
+    ("POST", "/instances/{name}/stop"): "operate",
+    ("POST", "/instances/{name}/extend"): "operate",
+    ("POST", "/instances/{name}/hooks/run"): "operate",
+    ("POST", "/groups/{group_name}/start"): "operate",
+    ("POST", "/groups/{group_name}/stop"): "operate",
+    ("POST", "/instances/{name}/schedule"): "configure",
+    ("DELETE", "/instances/{name}/schedule"): "configure",
+    ("PATCH", "/instances/{name}"): "configure",
+    ("POST", "/groups"): "configure",
+    ("PATCH", "/groups/{group_name}"): "configure",
+    ("DELETE", "/groups/{group_name}"): "configure",
+    ("POST", "/groups/{group_name}/schedule"): "configure",
+
+    ("PUT", "/instances/{name}/hooks"): "admin",
+    ("DELETE", "/instances/{name}/hooks"): "admin",
+    ("PUT", "/groups/{group_name}/hooks"): "admin",
+    ("DELETE", "/groups/{group_name}/hooks"): "admin",
+}
+
+_ADMIN_READ_PREFIXES = ("/linode/", "/tokens")
+
+
+_LIMITED_TOKEN_OPEN_ROUTES = {
+    ("GET", "/instances"), ("GET", "/groups"), ("GET", "/operations/{op_id}"),
+}
+
+
+def _required_scope(method: str, path: str) -> str:
+    if (method, path) in _ROUTE_SCOPES:
+        return _ROUTE_SCOPES[(method, path)]
+    if method == "GET":
+        return "admin" if path.startswith(_ADMIN_READ_PREFIXES) else "read"
+    return "admin"
+
+
+def _token_is_limited(meta: dict) -> bool:
+    return meta.get("instances") is not None or meta.get("groups") is not None
+
+
+def require_session(
+    request: Request, authorization: str | None = Header(default=None),
+) -> str:
 
     token = _bearer_token(authorization)
     if token is None:
         raise HTTPException(401, "missing or malformed Authorization header -- log in at /login.")
     username = im.get_api_session(token)
-    if username is None:
+    if username is not None:
+        request.state.api_token = None
+        return username
+    meta = im.verify_api_token(token)
+    if meta is None:
         raise HTTPException(401, "session token is invalid or has expired -- log in again at /login.")
-    return username
+    route = request.scope.get("route")
+    path = getattr(route, "path", request.url.path)
+    method = request.method
+    needed = _required_scope(method, path)
+    if needed not in meta["scopes"] and "admin" not in meta["scopes"]:
+        raise HTTPException(403, f"this token doesn't have the '{needed}' scope.")
+    if _token_is_limited(meta):
+        params = request.path_params
+        if "name" in params and not im.api_token_allows_instance(meta, params["name"]):
+            raise HTTPException(403, f"this token isn't allowed to act on '{params['name']}'.")
+        if "group_name" in params and not im.api_token_allows_group(meta, params["group_name"]):
+            raise HTTPException(
+                403, f"this token isn't allowed to act on group '{params['group_name']}'.")
+        if (not {"name", "group_name"} & set(params)
+                and (method, path) not in _LIMITED_TOKEN_OPEN_ROUTES):
+            raise HTTPException(
+                403, "this token is limited to particular nodes/groups and can't use this route.")
+    request.state.api_token = meta
+    return f"token:{meta['name']}"
+
+
+def _limited_token(request: Request) -> dict | None:
+    meta = getattr(request.state, "api_token", None)
+    return meta if meta is not None and _token_is_limited(meta) else None
 
 
 @app.get("/health")
@@ -217,6 +287,11 @@ def _handle_group_not_found(request: Request, exc: im.GroupNotFoundError):
 
 @app.exception_handler(im.NeedsManualRecoveryError)
 def _handle_needs_manual_recovery(request: Request, exc: im.NeedsManualRecoveryError):
+    return _error_response(409, exc)
+
+
+@app.exception_handler(im.DependencyNotSatisfiedError)
+def _handle_dependency_not_satisfied(request: Request, exc: im.DependencyNotSatisfiedError):
     return _error_response(409, exc)
 
 
@@ -371,6 +446,7 @@ class _Operation:
 
 
     finished_at: datetime | None = None
+    actor: str | None = None
 
 
 _operations: OrderedDict[str, _Operation] = OrderedDict()
@@ -390,7 +466,7 @@ def _classify_exception(e: Exception) -> tuple[int, dict]:
     if isinstance(e, (im.NotOnboardedError, im.GroupNotFoundError)):
         return 404, {"detail": str(e)}
     if isinstance(
-        e, (im.NeedsManualRecoveryError, im.InstanceLockedError,
+        e, (im.NeedsManualRecoveryError, im.InstanceLockedError, im.DependencyNotSatisfiedError,
             engine.ResourceOwnershipConflict, engine.TagVerificationError),
     ):
         return 409, {"detail": str(e)}
@@ -414,12 +490,13 @@ def _sweep_old_operations_locked() -> None:
         del _operations[op_id]
 
 
-def _start_operation(action: str, total_steps: int | None = None) -> str:
+def _start_operation(action: str, total_steps: int | None = None, actor: str | None = None) -> str:
     op_id = uuid.uuid4().hex
     with _operations_lock:
         _sweep_old_operations_locked()
         _operations[op_id] = _Operation(
             action=action, total_steps=total_steps if total_steps is not None else _TOTAL_STEPS[action],
+            actor=actor,
         )
     return op_id
 
@@ -485,8 +562,27 @@ def _run_job(op_id: str, fn: Callable[[], object]) -> None:
                 op.finished_at = datetime.now(UTC)
 
 
-@app.get("/operations/{op_id}")
-def api_get_operation(op_id: str, user: str = Depends(require_session)) -> JSONResponse:
+WAIT_MAX_SECONDS = 3600
+
+
+def _kickoff(
+    action: str, total_steps: int, fn: Callable[[str], object], wait: bool,
+    actor: str | None = None,
+) -> JSONResponse:
+
+    op_id = _start_operation(action, total_steps=total_steps, actor=actor)
+    thread = threading.Thread(target=_run_job, args=(op_id, lambda: fn(op_id)), daemon=True)
+    thread.start()
+    if not wait:
+        return JSONResponse({"operation_id": op_id, "total_steps": total_steps})
+    thread.join(timeout=WAIT_MAX_SECONDS)
+    response = _operation_response(op_id)
+    if thread.is_alive():
+        response.status_code = 202
+    return response
+
+
+def _operation_response(op_id: str) -> JSONResponse:
     with _operations_lock:
         op = _operations.get(op_id)
         if op is None:
@@ -497,7 +593,7 @@ def api_get_operation(op_id: str, user: str = Depends(require_session)) -> JSONR
         )
         body: dict = {
             "status": op.status, "action": op.action, "percent": percent,
-            "current_step": op.current_step, "warnings": op.warnings,
+            "current_step": op.current_step, "warnings": op.warnings, "operation_id": op_id,
         }
         if op.status == "done":
             body["result"] = op.result
@@ -507,6 +603,18 @@ def api_get_operation(op_id: str, user: str = Depends(require_session)) -> JSONR
             body.update(op.error_body)
             return JSONResponse(status_code=op.error_status, content=body)
         return JSONResponse(status_code=200, content=body)
+
+
+@app.get("/operations/{op_id}")
+def api_get_operation(
+    op_id: str, request: Request, user: str = Depends(require_session),
+) -> JSONResponse:
+    if _limited_token(request) is not None:
+        with _operations_lock:
+            op = _operations.get(op_id)
+            if op is not None and op.actor != user:
+                raise HTTPException(404, "unknown or expired operation id.")
+    return _operation_response(op_id)
 
 
 class ScheduleRule(BaseModel):
@@ -525,11 +633,14 @@ class StartRequest(BaseModel):
     override_window_hours: float | None = None
     skip_hooks: bool = False
 
+    respect_dependencies: bool = False
+
 
 class StopRequest(BaseModel):
     skip_precapture: bool = False
     force: bool = False
     skip_hooks: bool = False
+    respect_dependencies: bool = False
 
 
 class HookConfigRequest(BaseModel):
@@ -579,6 +690,9 @@ class GroupPatchInstanceRequest(BaseModel):
 
     group_name: str | None = None
     copy_group_rules_as_individual: bool | None = None
+
+
+    schedule_mode: Literal["auto", "manual"] | None = None
 
 
 def _rules_as_dicts(rules: list[ScheduleRule]) -> list[dict]:
@@ -646,9 +760,42 @@ def api_ssh_check(host: str, port: int = 22, user: str = Depends(require_session
     return engine.check_ssh_port_reachable(host, port)
 
 
+class TokenCreateRequest(BaseModel):
+    name: str
+    scopes: list[str]
+    instances: list[str] | None = None
+    groups: list[str] | None = None
+    expires_days: float | None = None
+
+
+@app.post("/tokens")
+def api_create_token(body: TokenCreateRequest, user: str = Depends(require_session)) -> dict:
+
+    return im.create_api_token(
+        body.name, body.scopes, instances=body.instances, groups=body.groups,
+        expires_days=body.expires_days, created_by=user,
+    )
+
+
+@app.get("/tokens")
+def api_list_tokens(user: str = Depends(require_session)) -> list[dict]:
+    return im.list_api_tokens()
+
+
+@app.delete("/tokens/{token_name}")
+def api_revoke_token(token_name: str, user: str = Depends(require_session)) -> dict:
+    if not im.revoke_api_token(token_name):
+        raise HTTPException(404, f"no active token named '{token_name}'.")
+    return {"revoked": True}
+
+
 @app.get("/instances")
-def api_list_instances(user: str = Depends(require_session)) -> dict:
-    return im.list_instances()
+def api_list_instances(request: Request, user: str = Depends(require_session)) -> dict:
+    instances = im.list_instances()
+    meta = _limited_token(request)
+    if meta is not None:
+        instances = {n: r for n, r in instances.items() if im.api_token_allows_instance(meta, n)}
+    return instances
 
 
 def _write_temp_ssh_key(key_text: str) -> str:
@@ -770,44 +917,47 @@ def api_get_history(name: str, limit: int = 50, user: str = Depends(require_sess
 
 @app.post("/instances/{name}/start")
 def api_start(
-    name: str, body: StartRequest, request: Request, user: str = Depends(require_session),
-) -> dict:
+    name: str, body: StartRequest, request: Request, wait: bool = False,
+    user: str = Depends(require_session),
+) -> JSONResponse:
     client, ssh_key = _client(request), _ssh_key(request)
+    if body.respect_dependencies:
+        im.require_dependency(name, "start")
     total_steps = _TOTAL_STEPS["start"] + _hook_progress_steps(name, "post_start", body.skip_hooks)
-    op_id = _start_operation("start", total_steps=total_steps)
 
-    def _do() -> im.StartResult:
+    def _do(op_id: str) -> im.StartResult:
         return im.start_instance(
             client, name, ssh_key, triggered_by="api",
             override_window_hours=body.override_window_hours, actor=user,
             on_progress=_make_progress_reporter(op_id), on_warning=_make_warning_reporter(op_id),
-            skip_hooks=body.skip_hooks,
+            skip_hooks=body.skip_hooks, respect_dependencies=body.respect_dependencies,
         )
 
-    threading.Thread(target=_run_job, args=(op_id, _do), daemon=True).start()
-    return {"operation_id": op_id, "total_steps": total_steps}
+    return _kickoff("start", total_steps, _do, wait, actor=user)
 
 
 @app.post("/instances/{name}/stop")
 def api_stop(
-    name: str, body: StopRequest, request: Request, user: str = Depends(require_session),
-) -> dict:
+    name: str, body: StopRequest, request: Request, wait: bool = False,
+    user: str = Depends(require_session),
+) -> JSONResponse:
     client, ssh_key = _client(request), _ssh_key(request)
+    if body.respect_dependencies:
+        im.require_dependency(name, "stop")
     total_steps = _TOTAL_STEPS["stop"] + _hook_progress_steps(
         name, "pre_stop", body.skip_hooks or body.skip_precapture,
     )
-    op_id = _start_operation("stop", total_steps=total_steps)
 
-    def _do() -> im.StopResult:
+    def _do(op_id: str) -> im.StopResult:
         return im.stop_instance(
             client, name, ssh_key,
             skip_precapture=body.skip_precapture, force=body.force, skip_hooks=body.skip_hooks,
             triggered_by="api", actor=user,
             on_progress=_make_progress_reporter(op_id), on_warning=_make_warning_reporter(op_id),
+            respect_dependencies=body.respect_dependencies,
         )
 
-    threading.Thread(target=_run_job, args=(op_id, _do), daemon=True).start()
-    return {"operation_id": op_id, "total_steps": total_steps}
+    return _kickoff("stop", total_steps, _do, wait, actor=user)
 
 
 def _hook_progress_steps(name: str, hook_type: str, skipped: bool) -> int:
@@ -1049,6 +1199,17 @@ def api_patch_instance(
     name: str, body: GroupPatchInstanceRequest, request: Request,
     user: str = Depends(require_session),
 ) -> dict:
+    if body.schedule_mode is not None and "group_name" not in body.model_fields_set:
+        mode: str = body.schedule_mode
+        _, warnings = _call_collecting_warnings(
+            lambda on_warning: im.set_schedule_mode(
+                _client(request), name, mode, on_warning=on_warning,
+            )
+        )
+        result: dict = {"schedule_mode": mode}
+        if warnings:
+            result["warnings"] = warnings
+        return result
     if body.group_name is not None:
 
 
@@ -1058,7 +1219,7 @@ def api_patch_instance(
                 _client(request), name, group_name, on_warning=on_warning,
             )
         )
-        result: dict = {"group_id": group_id}
+        result = {"group_id": group_id}
         if warnings:
             result["warnings"] = warnings
         return result
@@ -1095,8 +1256,12 @@ def api_create_group(body: GroupCreateRequest, user: str = Depends(require_sessi
 
 
 @app.get("/groups")
-def api_list_groups(user: str = Depends(require_session)) -> list[dict]:
-    return im.list_schedule_groups()
+def api_list_groups(request: Request, user: str = Depends(require_session)) -> list[dict]:
+    groups = im.list_schedule_groups()
+    meta = _limited_token(request)
+    if meta is not None:
+        groups = [g for g in groups if im.api_token_allows_group(meta, g["name"])]
+    return groups
 
 
 @app.get("/groups/{group_name}")
@@ -1105,6 +1270,97 @@ def api_get_group(group_name: str, user: str = Depends(require_session)) -> dict
     if group is None:
         raise HTTPException(404, f"no schedule group named '{group_name}' exists.")
     return group
+
+
+class GroupActionRequest(BaseModel):
+
+
+    with_dependencies: bool = False
+    respect_dependencies: bool = False
+    skip_hooks: bool = False
+    max_parallel: int = im.DEFAULT_GROUP_ACTION_MAX_PARALLEL
+
+
+def _group_action_route(
+    group_name: str, action: str, body: GroupActionRequest, request: Request, wait: bool,
+    user: str,
+) -> JSONResponse:
+    client, ssh_key = _client(request), _ssh_key(request)
+    act: Literal["start", "stop"] = "start" if action == "start" else "stop"
+    stages = im._group_chain(group_name, act) if body.with_dependencies else [group_name]
+    if not body.with_dependencies and im.get_schedule_group(group_name) is None:
+        raise im.GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+    if body.respect_dependencies and not body.with_dependencies:
+        for member in im.get_schedule_group(group_name)["members"]:
+            im.require_dependency(member, act)
+    total = sum(len((im.get_schedule_group(g) or {}).get("members", [])) for g in stages)
+
+    def _do(op_id: str) -> im.GroupActionResult:
+        def _step(message: str) -> None:
+            with _operations_lock:
+                op = _operations.get(op_id)
+                if op is not None:
+                    op.current_step = message
+
+        def _member_done(member: im.GroupMemberResult) -> None:
+            with _operations_lock:
+                op = _operations.get(op_id)
+                if op is not None:
+                    op.completed_steps += 1
+                    op.current_step = f"{member.group}/{member.name}: {member.outcome}"
+
+        return im.group_action(
+            client, group_name, act, ssh_key,
+            include_dependencies=body.with_dependencies,
+            respect_dependencies=body.respect_dependencies,
+            triggered_by="api", actor=user, skip_hooks=body.skip_hooks,
+            max_parallel=body.max_parallel,
+            client_factory=im._per_thread_client_factory() if body.max_parallel > 1 else None,
+            on_progress=_step, on_warning=_make_warning_reporter(op_id),
+            on_member_done=_member_done,
+        )
+
+    return _kickoff(f"group_{act}", max(total, 1), _do, wait, actor=user)
+
+
+@app.post("/groups/{group_name}/start")
+def api_group_start(
+    group_name: str, body: GroupActionRequest, request: Request, wait: bool = False,
+    user: str = Depends(require_session),
+) -> JSONResponse:
+    return _group_action_route(group_name, "start", body, request, wait, user)
+
+
+@app.post("/groups/{group_name}/stop")
+def api_group_stop(
+    group_name: str, body: GroupActionRequest, request: Request, wait: bool = False,
+    user: str = Depends(require_session),
+) -> JSONResponse:
+    return _group_action_route(group_name, "stop", body, request, wait, user)
+
+
+class GroupPatchRequest(BaseModel):
+
+    depends_on: str | None
+
+
+@app.patch("/groups/{group_name}")
+def api_patch_group(
+    group_name: str, body: GroupPatchRequest, request: Request,
+    user: str = Depends(require_session),
+) -> dict:
+    _, warnings = _call_collecting_warnings(
+        lambda on_warning: im.set_group_dependency(
+            _client(request), group_name, body.depends_on, on_warning=on_warning,
+        )
+    )
+    group = im.get_schedule_group(group_name)
+    if group is None:
+        raise im.GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+    result: dict = dict(group)
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 @app.delete("/groups/{group_name}")
@@ -1207,7 +1463,10 @@ def api_group_savings(
 
 def _asdict(result) -> dict:
 
-    return dataclasses.asdict(result)
+    data = dataclasses.asdict(result)
+    if isinstance(result, im.GroupActionResult):
+        data["ok"] = result.ok
+    return data
 
 
 _WEB_DIST = engine.BASE_DIR / "web" / "dist"

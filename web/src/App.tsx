@@ -11,6 +11,7 @@ import { InstancesPage } from './pages/InstancesPage'
 import { LoginPage } from './pages/LoginPage'
 import { MigratePage } from './pages/MigratePage'
 import { OnboardPage } from './pages/OnboardPage'
+import { TokensPage } from './pages/TokensPage'
 import { StatusBarProvider } from './status/StatusBarContext'
 function RequireAuth({ children }: { children: ReactElement }) {
   const { isAuthenticated } = useAuth()
@@ -38,6 +39,7 @@ function AppRoutes() {
         <Route path="/instances/:name" element={<InstanceDetailPage />} />
         <Route path="/groups" element={<GroupsPage />} />
         <Route path="/groups/:name" element={<GroupDetailPage />} />
+        <Route path="/tokens" element={<TokensPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/instances" replace />} />
     </Routes>

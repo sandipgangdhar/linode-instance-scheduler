@@ -4,6 +4,8 @@ import { api, ApiError, errorWarnings } from '../api/client'
 import type { InstanceRecord, Savings, ScheduleGroup, ScheduleGroupSummary } from '../api/types'
 import { SavingsCard } from '../components/SavingsCard'
 import { HooksCard } from '../components/HooksCard'
+import { DependencyCard } from '../components/DependencyCard'
+import { GroupActionsCard } from '../components/GroupActionsCard'
 import { ScheduleEditor } from '../components/ScheduleEditor'
 import {
   Button,
@@ -324,6 +326,8 @@ export function GroupDetailPage() {
               />
             </div>
           </Card>
+          <GroupActionsCard key={`actions:${group.name}`} group={group} onChanged={reload} />
+          <DependencyCard key={`dependency:${group.name}`} group={group} onChanged={reload} />
           <HooksCard key={group.name} target={{ kind: 'group', name: group.name }} />
         </div>
         <div className="space-y-6">

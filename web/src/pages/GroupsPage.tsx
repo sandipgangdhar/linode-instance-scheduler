@@ -106,7 +106,7 @@ export function GroupsPage() {
             <table className="min-w-full divide-y divide-slate-200">
               <thead className="bg-slate-50">
                 <tr>
-                  {['Name', 'Timezone', 'Rules', 'Members', 'Status'].map((h) => (
+                  {['Name', 'Timezone', 'Rules', 'Members', 'Starts after', 'Status'].map((h) => (
                     <th
                       key={h}
                       className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500"
@@ -130,6 +130,7 @@ export function GroupsPage() {
                     <td className="px-5 py-3 text-sm text-slate-600">{g.timezone}</td>
                     <td className="px-5 py-3 text-sm text-slate-600">{g.rules.length}</td>
                     <td className="px-5 py-3 text-sm text-slate-600">{g.member_count}</td>
+                    <td className="px-5 py-3 text-sm text-slate-600">{g.depends_on ?? '—'}</td>
                     <td className="px-5 py-3 text-sm text-slate-600">
                       {!g.enabled ? 'Disabled' : g.rules.length === 0 ? 'No schedule yet' : 'Enabled'}
                     </td>

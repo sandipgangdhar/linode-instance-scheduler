@@ -20,6 +20,9 @@ import type {
   ScheduleGroupSummary,
   StartResult,
   StopResult,
+  ApiToken,
+  ApiTokenScope,
+  GroupActionResult,
 } from './types'
 export class ApiError extends Error {
   status: number
@@ -236,6 +239,44 @@ export const api = {
       copy_group_rules_as_individual?: boolean
     },
   ) => request<PatchInstanceGroupResult>('PATCH', `/instances/${encodeURIComponent(name)}`, body),
+  setScheduleMode: (name: string, mode: 'auto' | 'manual') =>
+    request<{
+      schedule_mode: 'auto' | 'manual'
+      warnings?: string[]
+    }>('PATCH', `/instances/${encodeURIComponent(name)}`, { schedule_mode: mode }),
+  listTokens: () => request<ApiToken[]>('GET', '/tokens'),
+  createToken: (body: {
+    name: string
+    scopes: ApiTokenScope[]
+    instances?: string[] | null
+    groups?: string[] | null
+    expires_days?: number | null
+  }) =>
+    request<
+      ApiToken & {
+        token: string
+      }
+    >('POST', '/tokens', body),
+  revokeToken: (name: string) =>
+    request<{
+      revoked: boolean
+    }>('DELETE', `/tokens/${encodeURIComponent(name)}`),
+  groupAction: async (
+    name: string,
+    action: 'start' | 'stop',
+    opts: {
+      withDependencies?: boolean
+    },
+    onProgress?: (percent: number, currentStep: string | null) => void,
+    onWarning?: (warnings: string[]) => void,
+  ) => {
+    const kickoff = await request<{
+      operation_id: string
+    }>('POST', `/groups/${encodeURIComponent(name)}/${action}`, {
+      with_dependencies: opts.withDependencies ?? false,
+    })
+    return pollOperation<GroupActionResult>(kickoff.operation_id, onProgress, onWarning)
+  },
   getInstanceSavings: (name: string, days = 7) =>
     request<Savings>('GET', `/instances/${encodeURIComponent(name)}/savings?days=${days}`),
   listGroups: () => request<ScheduleGroupSummary[]>('GET', '/groups'),
@@ -246,6 +287,8 @@ export const api = {
     request<{
       deleted: boolean
     }>('DELETE', `/groups/${encodeURIComponent(name)}`),
+  setGroupDependency: (name: string, dependsOn: string | null) =>
+    request<ScheduleGroup>('PATCH', `/groups/${encodeURIComponent(name)}`, { depends_on: dependsOn }),
   setGroupSchedule: (name: string, schedule: Schedule) =>
     request<ScheduleGroup>('POST', `/groups/${encodeURIComponent(name)}/schedule`, schedule),
   getGroupSavings: (name: string, days = 7) =>
