@@ -29,6 +29,7 @@ from typing import Literal, TypeGuard
 from zoneinfo import ZoneInfo
 
 import ipaddress
+import subprocess
 import requests.exceptions
 from dotenv import load_dotenv
 from linode_api4 import Instance, Volume
@@ -2235,6 +2236,15 @@ def onboard_instance(
                         f"`reset-host-key --ip {old_reserved_ip}` first."
                     )
 
+
+        if on_warning is not None:
+            try:
+                findings = unmanaged_network_neighbours(client, name, record, load_registry())
+            except Exception:
+                findings = []
+            if findings:
+                on_warning(_neighbour_warning(name, findings))
+
         return OnboardResult(outcome="onboarded", record=record)
 
 
@@ -2594,6 +2604,17 @@ def _start_instance_locked(
 
         if on_progress is not None:
             on_progress(f"Starting '{name}'...")
+        trust_new_once = False
+        try:
+            trust_new_once = _reclaim_vpc_addresses_locked(
+                client, name, record, registry, on_progress, on_warning,
+            )
+        except Exception as e:
+            if on_warning is not None:
+                on_warning(
+                    f"WARNING: could not check whether '{name}''s VPC address is still free ({e}); "
+                    "starting anyway."
+                )
         try:
 
 
@@ -2651,7 +2672,13 @@ def _start_instance_locked(
                 on_progress("  running -- verifying real network reachability...")
 
 
-            engine.ssh_run(_ssh_target(record, name), ssh_key, "echo ok", retries=12, retry_delay_s=10)
+            if trust_new_once:
+                engine.ssh_run(
+                    _ssh_target(record, name), ssh_key, "echo ok", retries=12, retry_delay_s=10,
+                    trust_new=True,
+                )
+            else:
+                engine.ssh_run(_ssh_target(record, name), ssh_key, "echo ok", retries=12, retry_delay_s=10)
         except (
             ApiError, RuntimeError, TimeoutError, requests.exceptions.RequestException,
         ) as e:
@@ -7287,6 +7314,17 @@ def cmd_status(args) -> int:
     for line in _hook_status_lines(args.name, record):
         print(line)
     print(json.dumps(record, indent=2, default=str))
+    if getattr(args, "check_network", False) is True:
+        try:
+            client = engine.build_client(engine.load_token())
+            findings = unmanaged_network_neighbours(client, args.name, record, load_registry())
+        except (engine.ConfigError, ApiError, requests.exceptions.RequestException) as e:
+            print(f"Could not check '{args.name}''s network neighbours: {e}", file=sys.stderr)
+            return 1
+        if findings:
+            print(_neighbour_warning(args.name, findings), file=sys.stderr)
+        else:
+            print(f"'{args.name}''s VPC subnet(s) and VLAN(s) have no instances outside this tool's management.")
     return 0
 
 
@@ -7420,6 +7458,186 @@ def _records_using_vpc_address(
     return names
 
 
+def _local_ipv4_addresses() -> set[str]:
+
+    try:
+        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {a for a in out.split() if "." in a}
+
+
+def _vlan_labels(network_config: list[dict] | None, model: str | None) -> list[str]:
+    labels = []
+    for iface in network_config or []:
+        if model == engine.INTERFACE_MODEL_LEGACY:
+            if iface.get("purpose") == "vlan" and iface.get("label"):
+                labels.append(iface["label"])
+        elif iface.get("vlan") and iface["vlan"].get("vlan_label"):
+            labels.append(iface["vlan"]["vlan_label"])
+    return labels
+
+
+def unmanaged_network_neighbours(client, name: str, record: dict, registry: dict) -> list[str]:
+
+    managed = {rec.get("current_linode_id") for rec in registry.values()} | {record.get("current_linode_id")}
+    managed.discard(None)
+    local = _local_ipv4_addresses()
+    instances = {i.id: i for i in engine.retry_transient(lambda: list(client.linode.instances()))}
+    own = {iid for iid, inst in instances.items() if local & set(inst.ipv4 or [])}
+    findings = []
+    pairs = engine.vpc_interface_addresses(record.get("network_config"), record.get("network_interface_model"))
+    if pairs:
+        live = engine.retry_transient(lambda: list(client.vpcs.ips()))
+        own |= {ip.linode_id for ip in live if ip.address in local}
+        for subnet_id in sorted({sid for sid, _ in pairs}):
+            others = sorted({
+                (ip.linode_id, ip.address) for ip in live
+                if ip.subnet_id == subnet_id and ip.linode_id and ip.linode_id not in managed
+                and ip.linode_id not in own
+            })
+            if others:
+                listed = ", ".join(
+                    f"{getattr(instances.get(lid), 'label', lid)} ({addr})" for lid, addr in others
+                )
+                findings.append(
+                    f"VPC subnet {subnet_id} also has instance(s) not managed by this tool: {listed}."
+                )
+    labels = _vlan_labels(record.get("network_config"), record.get("network_interface_model"))
+    if labels:
+        region = record.get("region")
+        for vlan in engine.retry_transient(lambda: list(client.networking.vlans())):
+            vregion = getattr(vlan.region, "id", vlan.region)
+            if vlan.label not in labels or (region and vregion != region):
+                continue
+            others = sorted(lid for lid in (vlan.linodes or []) if lid not in managed and lid not in own)
+            if others:
+                listed = ", ".join(str(getattr(instances.get(lid), "label", lid)) for lid in others)
+                findings.append(
+                    f"VLAN '{vlan.label}' also has instance(s) not managed by this tool: {listed}."
+                )
+    return findings
+
+
+def _neighbour_warning(name: str, findings: list[str]) -> str:
+    return (
+        f"WARNING: '{name}' shares its private network with instances this tool doesn't manage:\n  "
+        + "\n  ".join(findings)
+        + "\nRecommended: give the instances this tool schedules their own VPC subnet and VLAN "
+        "label, and don't create other instances there by hand. While a node is stopped, another "
+        "instance can be given its VPC address (its next start then moves it to a free one), and "
+        "an instance given the same VLAN address conflicts with it silently."
+    )
+
+
+def _move_vpc_address_locked(
+    name: str, record: dict, registry: dict, subnet_id, old: str, address: str,
+    on_warning: Callable[[str], None] | None,
+) -> bool:
+
+    record["network_config"] = engine.replace_vpc_address(
+        record["network_config"], record.get("network_interface_model"), old, address,
+    )
+    _save_one_record(name, record)
+    registry[name] = record
+    shared = bool(_records_using_vpc_address(registry, subnet_id, old, exclude=name))
+    carried = False
+    try:
+        old_entry = None if shared else engine.read_known_host_entry(old)
+        if old_entry:
+            moved = "".join(
+                f"{address} {line.split(None, 1)[1]}\n"
+                for line in old_entry.splitlines() if len(line.split(None, 1)) == 2
+            )
+            engine.restore_known_host_entry(address, moved)
+            carried = True
+        else:
+            engine.reset_known_host(address)
+        if not shared:
+            engine.reset_known_host(old)
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(
+                f"WARNING: could not move the trusted SSH host key from {old} to {address} "
+                f"({e}). If the next start reports a host-key problem, run "
+                f"`reset-host-key --name {name}` once."
+            )
+    return carried
+
+
+def _free_vpc_address(registry: dict, subnet_id, current: str, prefix, live: list) -> str | None:
+
+    if not prefix:
+        return None
+    network = ipaddress.ip_network(f"{current}/{prefix}", strict=False)
+    if network.num_addresses > 65536 or network.num_addresses < 8:
+        return None
+    hosts = list(network.hosts())
+    used = {ip.address for ip in live if ip.subnet_id == subnet_id}
+    for rec in registry.values():
+        for sid, addr in engine.vpc_interface_addresses(
+            rec.get("network_config"), rec.get("network_interface_model")
+        ):
+            if sid == subnet_id:
+                used.add(addr)
+    for host in reversed(hosts[2:-2]):
+        if str(host) not in used:
+            return str(host)
+    return None
+
+
+def _reclaim_vpc_addresses_locked(
+    client, name: str, record: dict, registry: dict,
+    on_progress: Callable[[str], None] | None, on_warning: Callable[[str], None] | None,
+) -> bool:
+
+    pairs = engine.vpc_interface_addresses(
+        record.get("network_config"), record.get("network_interface_model")
+    )
+    live = engine.retry_transient(lambda: list(client.vpcs.ips())) if pairs else []
+    trust_new_once = False
+    for subnet_id, address in pairs:
+        holder = next(
+            (ip for ip in live if ip.subnet_id == subnet_id and ip.address == address), None
+        )
+        if holder is None:
+            continue
+        new_address = _free_vpc_address(registry, subnet_id, address, record.get("vpc_prefix"), live)
+        if new_address is None:
+            if on_warning is not None:
+                on_warning(
+                    f"WARNING: '{name}''s VPC address {address} is in use by instance "
+                    f"{holder.linode_id} and no free address was found to move it to -- the start "
+                    "will fail. Free an address in the subnet, or move it with set-vpc-address."
+                )
+            continue
+        carried = _move_vpc_address_locked(
+            name, record, registry, subnet_id, address, new_address, on_warning,
+        )
+        trust_new_once = trust_new_once or not carried
+        if on_warning is not None:
+            on_warning(
+                f"WARNING: '{name}''s VPC address {address} was taken by instance "
+                f"{holder.linode_id} while it was stopped; moved '{name}' to {new_address}. "
+                "Anything that reaches it by its VPC address needs the new one."
+            )
+        live.append(type("_Held", (), {"subnet_id": subnet_id, "address": new_address})())
+    target = _ssh_target(record, name)
+    for subnet_id, address in engine.vpc_interface_addresses(
+        record.get("network_config"), record.get("network_interface_model")
+    ):
+        if address == target and _records_using_vpc_address(registry, subnet_id, address, exclude=name):
+
+
+            engine.reset_known_host(address)
+            trust_new_once = True
+
+
+    if not record.get("reserved_ip") and engine.read_known_host_entry(target) is None:
+        trust_new_once = True
+    return trust_new_once
+
+
 def set_vpc_address(
     client, name: str, address: str, *, current: str | None = None,
     on_warning: Callable[[str], None] | None = None,
@@ -7481,31 +7699,14 @@ def set_vpc_address(
             raise engine.ConfigError(
                 f"{address} is in use in this subnet right now (instance {holder.linode_id})."
             )
-        record["network_config"] = engine.replace_vpc_address(
-            record["network_config"], model, old, address,
+        carried = _move_vpc_address_locked(
+            name, record, registry, subnet_id, old, address, on_warning,
         )
-        _save_one_record(name, record)
-
-
-        try:
-            old_entry = engine.read_known_host_entry(old)
-            if old_entry:
-                moved = "".join(
-                    f"{address} {line.split(None, 1)[1]}\n"
-                    for line in old_entry.splitlines() if len(line.split(None, 1)) == 2
-                )
-                engine.restore_known_host_entry(address, moved)
-            else:
-                engine.reset_known_host(address)
-            if not _records_using_vpc_address(registry, subnet_id, old, exclude=name):
-                engine.reset_known_host(old)
-        except Exception as e:
-            if on_warning is not None:
-                on_warning(
-                    f"WARNING: could not move the trusted SSH host key from {old} to {address} "
-                    f"({e}). If the next start reports a host-key problem, run "
-                    f"`reset-host-key --name {name}` once."
-                )
+        if not carried and on_warning is not None:
+            on_warning(
+                f"WARNING: no trusted SSH host key could be carried to {address}; the next "
+                "start accepts the node's key on first contact."
+            )
     osb.sync_object_storage_backup(name, _backup_payload(name, record), on_warning=on_warning)
     return old
 
@@ -8766,6 +8967,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status", help="Show one onboarded instance's full record.")
     status_parser.add_argument("--name", required=True, type=validate_instance_name)
+    status_parser.add_argument(
+        "--check-network", action="store_true",
+        help="Also list instances this tool doesn't manage in the node's VPC subnet(s) or VLAN(s).",
+    )
 
     history_parser = subparsers.add_parser(
         "history",

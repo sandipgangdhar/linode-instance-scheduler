@@ -543,24 +543,51 @@ interface) is fully supported — onboard, stop, start, schedules, groups, hooks
   config keeps the node's own VPC/VLAN interfaces (no public interface is added), and no IP is
   reserved. The dashboard's "Test reachability" check also tests that address. (Every migration
   keeps all of a node's interfaces — a public + VPC or public + VLAN node keeps both.)
-- **Keep a stopped node's VPC address free.** While a node is stopped its instance doesn't
-  exist, so Linode treats its VPC address as unused — another instance created in that subnet
-  with the same address (or handed it automatically) takes it. The node's next `start` then
-  fails cleanly with "The provided IP is already in use in the subnet": nothing is left behind,
-  the node stays `stopped`, and `start` works again once the address is free. If the other
-  instance should keep that address, move the stopped node to a free one instead:
+- **Golden rule: give scheduled nodes their own private network.** Put the instances this tool
+  schedules in their own VPC subnet and on their own VLAN label, and don't create other instances
+  in that subnet or on that VLAN by hand. A stopped node's instance doesn't exist, so nothing holds
+  its private address while it's stopped:
+  - **VPC:** another instance in the subnet can be given the address. The tool notices before the
+    next start and moves the node to a free address, so it still starts, but it comes back on a
+    different address.
+  - **VLAN:** Linode doesn't check VLAN addresses at all. An instance given the same VLAN address
+    as a stopped node starts normally, and once both run, traffic goes to whichever answers first.
+    Nothing fails, so neither Linode nor this tool can catch it; a dedicated VLAN label is the only
+    protection.
+  - **Public IPs** never collide: every managed node's public IP is reserved and stays with your
+    account while the node is stopped.
+
+  If a subnet has to be shared, give every other instance an explicit address from the bottom of
+  the range (the tool moves nodes to addresses at the top). Onboarding warns when a node's subnet
+  or VLAN already holds instances this tool doesn't manage, and
+  `python instance_manager.py status --name db-1 --check-network` runs the same check at any time.
+  The scheduler's own host is expected in the subnet (it has to reach the nodes) and isn't counted.
+- **A stopped node's VPC address can be taken — and is reclaimed automatically.** While a node
+  is stopped its instance doesn't exist, so Linode treats its VPC address as unused, and an
+  instance created in that subnet can be given it (Linode hands out the lowest free address).
+  Before every start — scheduled, manual or API — the tool checks the node's recorded VPC
+  addresses against what is actually in use. If another instance holds one, the node is moved to
+  a free address in the same subnet (taken from the top of the subnet, which new instances are
+  least likely to get) and started there, with nothing for anyone to run; the start's output and
+  the poller's log say which address it moved from and to, so you can update anything that
+  reaches it by address. Its trusted SSH host key moves with it, so the usual strict host-key
+  check still applies. To choose the new address yourself instead, move the stopped node first:
 
   ```
   python instance_manager.py set-vpc-address --name db-1 --address 10.24.1.40
   ```
 
-  (or "Change" on the node's **VPC address** card in the dashboard). The new address is used
-  from the next `start`; its trusted SSH host key moves with it. It refuses an address outside
+  (or "Change" on the node's **VPC address** card in the dashboard). It refuses an address outside
   the subnet, the subnet's gateway, one another managed node is recorded with, or one a running
-  instance holds. To avoid this altogether, give other instances in that subnet their own
-  explicit addresses, or keep scheduled nodes in a range nothing else is assigned from. (While a
-  node is running — and during a migration — its address is held and can't be taken.)
-  Onboarding refuses an instance whose VPC address is already recorded for another managed node.
+  instance holds. Onboarding refuses an instance whose VPC address is already recorded for another
+  managed node. To keep addresses stable, give other instances in that subnet their own explicit
+  addresses, or keep scheduled nodes in a range nothing else is assigned from. (While a node is
+  running — and during a migration — its address is held and can't be taken.)
+- **SSH host keys on private addresses.** A node reached over a VPC/VLAN address with no host key
+  on record for that address — after an automatic move, or if the tool's `known_hosts` file was
+  lost — accepts the node's key on first contact at its next start, as onboarding does. A key
+  that differs from one already on record is still refused. Nodes reached over a public reserved
+  IP always use the strict check.
 - **VPC 1:1 NAT** (a public address mapped onto the VPC interface instead of a separate public
   interface) isn't supported yet — such a node is refused with a clear message.
 - A **VLAN-only** node gets no default route or DNS from the tool — a VLAN has no gateway — so

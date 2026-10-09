@@ -79,7 +79,7 @@ export function VpcAddressCard({
     <Card>
       <CardHeader
         title="VPC address"
-        subtitle="Linode can't reserve a VPC address, so while this instance is stopped a new instance can be given it. If start fails with “already in use”, move it to a free address here."
+        subtitle="Linode can't reserve a VPC address, so while this instance is stopped a new instance can be given it. If that happens, the next start moves it to a free address automatically; to choose the address yourself, change it here while it's stopped."
       />
       <div className="space-y-3 px-5 pb-5">
         {error && <ErrorBanner message={error} />}

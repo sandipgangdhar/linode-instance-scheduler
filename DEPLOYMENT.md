@@ -91,6 +91,17 @@ you want schedules to actually enforce themselves unattended.
 
 ---
 
+### Network layout for VPC and VLAN nodes
+
+If the instances you'll schedule use a VPC or VLAN, give them their own VPC subnet and their own
+VLAN label, and don't create other instances there by hand. While a node is stopped nothing holds
+its private address: in a VPC another instance can be given it (the node is then moved to a free
+address at its next start), and on a VLAN an instance given the same address conflicts with it
+silently once both run, because Linode doesn't check VLAN addresses. Place this host in that same
+subnet (or on that VLAN) so it can reach the nodes; the tool doesn't count its own host as a
+conflict. Onboarding warns about any other instances it finds there, and
+`instance_manager.py status --name <node> --check-network` repeats the check.
+
 ## 2. Choosing and preparing a host
 
 **Requirements:**
