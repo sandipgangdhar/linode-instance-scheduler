@@ -188,29 +188,54 @@ def _bearer_token(authorization: str | None) -> str | None:
     return authorization[len("Bearer "):]
 
 
-_ROUTE_SCOPES: dict[tuple[str, str], str] = {
-    ("POST", "/instances/{name}/start"): "operate",
-    ("POST", "/instances/{name}/stop"): "operate",
-    ("POST", "/instances/{name}/extend"): "operate",
-    ("POST", "/instances/{name}/hooks/run"): "operate",
-    ("POST", "/groups/{group_name}/start"): "operate",
-    ("POST", "/groups/{group_name}/stop"): "operate",
-    ("POST", "/instances/{name}/schedule"): "configure",
-    ("DELETE", "/instances/{name}/schedule"): "configure",
-    ("PATCH", "/instances/{name}"): "configure",
-    ("POST", "/instances/{name}/vpc-address"): "configure",
-    ("POST", "/groups"): "configure",
-    ("PATCH", "/groups/{group_name}"): "configure",
-    ("DELETE", "/groups/{group_name}"): "configure",
-    ("POST", "/groups/{group_name}/schedule"): "configure",
-
-    ("PUT", "/instances/{name}/hooks"): "admin",
-    ("DELETE", "/instances/{name}/hooks"): "admin",
-    ("PUT", "/groups/{group_name}/hooks"): "admin",
-    ("DELETE", "/groups/{group_name}/hooks"): "admin",
+_BODY_CHECKED = "<checked in handler>"
+_ROUTE_SCOPES: dict[tuple[str, str], str | None] = {
+    ("GET", "/operations/{op_id}"): None,
+    ("GET", "/instances"): "instances:list",
+    ("GET", "/instances/{name}/status"): "instances:status",
+    ("GET", "/instances/{name}/history"): "instances:history",
+    ("GET", "/instances/{name}/savings"): "savings:read",
+    ("GET", "/groups/{group_name}/savings"): "savings:read",
+    ("GET", "/activity"): "activity:read",
+    ("POST", "/instances/{name}/start"): "instances:start",
+    ("POST", "/instances/{name}/stop"): "instances:stop",
+    ("POST", "/instances/{name}/extend"): "instances:extend",
+    ("POST", "/groups/{group_name}/start"): "groups:start",
+    ("POST", "/groups/{group_name}/stop"): "groups:stop",
+    ("GET", "/instances/{name}/schedule"): "schedules:read",
+    ("POST", "/instances/{name}/schedule"): "schedules:write",
+    ("DELETE", "/instances/{name}/schedule"): "schedules:write",
+    ("GET", "/groups"): "groups:read",
+    ("GET", "/groups/{group_name}"): "groups:read",
+    ("POST", "/groups"): "groups:write",
+    ("DELETE", "/groups/{group_name}"): "groups:write",
+    ("POST", "/groups/{group_name}/schedule"): "groups:write",
+    ("PATCH", "/groups/{group_name}"): "dependencies:write",
+    ("PATCH", "/instances/{name}"): _BODY_CHECKED,
+    ("GET", "/instances/{name}/hooks"): "hooks:read",
+    ("GET", "/instances/{name}/hook-events"): "hooks:read",
+    ("GET", "/groups/{group_name}/hooks"): "hooks:read",
+    ("PUT", "/instances/{name}/hooks"): "hooks:write",
+    ("DELETE", "/instances/{name}/hooks"): "hooks:write",
+    ("PUT", "/groups/{group_name}/hooks"): "hooks:write",
+    ("DELETE", "/groups/{group_name}/hooks"): "hooks:write",
+    ("POST", "/instances/{name}/hooks/run"): "hooks:run",
+    ("GET", "/linode/instances"): "instances:onboard",
+    ("GET", "/linode/ssh-check"): "instances:onboard",
+    ("POST", "/linode/ips/{address}/reserve"): "instances:onboard",
+    ("POST", "/instances"): "instances:onboard",
+    ("POST", "/instances/{name}/migrate-start"): "instances:migrate",
+    ("POST", "/instances/{name}/migrate-resume"): "instances:migrate",
+    ("GET", "/instances/{name}/migrate-status"): "instances:migrate",
+    ("POST", "/instances/{name}/offboard"): "instances:offboard",
+    ("POST", "/instances/{name}/deregister"): "instances:offboard",
+    ("POST", "/instances/{name}/vpc-address"): "instances:vpc-address",
+    ("POST", "/tokens"): "tokens:manage",
+    ("GET", "/tokens"): "tokens:manage",
+    ("DELETE", "/tokens/{token_name}"): "tokens:manage",
+    ("GET", "/logs"): "logs:read",
+    ("GET", "/logs/{service}"): "logs:read",
 }
-
-_ADMIN_READ_PREFIXES = ("/linode/", "/tokens", "/logs", "/console")
 
 
 _LIMITED_TOKEN_OPEN_ROUTES = {
@@ -219,12 +244,22 @@ _LIMITED_TOKEN_OPEN_ROUTES = {
 }
 
 
-def _required_scope(method: str, path: str) -> str:
-    if (method, path) in _ROUTE_SCOPES:
-        return _ROUTE_SCOPES[(method, path)]
-    if method == "GET":
-        return "admin" if path.startswith(_ADMIN_READ_PREFIXES) else "read"
-    return "admin"
+def _required_scope(method: str, path: str) -> str | None:
+
+    return _ROUTE_SCOPES.get((method, path), "admin")
+
+
+def _token_grants(meta: dict, scope: str) -> bool:
+    if "admin" in meta["scopes"]:
+        return True
+    return scope != "admin" and scope in im.expand_token_scopes(meta["scopes"])
+
+
+def _require_token_scope(request: Request, scope: str) -> None:
+
+    meta = getattr(request.state, "api_token", None)
+    if meta is not None and not _token_grants(meta, scope):
+        raise HTTPException(403, f"this token doesn't have the '{scope}' scope.")
 
 
 def _token_is_limited(meta: dict) -> bool:
@@ -249,7 +284,7 @@ def require_session(
     path = getattr(route, "path", request.url.path)
     method = request.method
     needed = _required_scope(method, path)
-    if needed not in meta["scopes"] and "admin" not in meta["scopes"]:
+    if needed is not None and needed != _BODY_CHECKED and not _token_grants(meta, needed):
         raise HTTPException(403, f"this token doesn't have the '{needed}' scope.")
     if _token_is_limited(meta):
         params = request.path_params
@@ -796,9 +831,22 @@ class TokenCreateRequest(BaseModel):
     expires_days: float | None = None
 
 
-@app.post("/tokens")
-def api_create_token(body: TokenCreateRequest, user: str = Depends(require_session)) -> dict:
+def _check_token_not_wider(request: Request, scopes: list[str]) -> None:
 
+    meta = getattr(request.state, "api_token", None)
+    if meta is None or "admin" in meta["scopes"]:
+        return
+    if "admin" in scopes or not im.expand_token_scopes(scopes) <= im.expand_token_scopes(
+            meta["scopes"]):
+        raise HTTPException(403, "a token can't create or revoke a token wider than itself.")
+
+
+@app.post("/tokens")
+def api_create_token(
+    body: TokenCreateRequest, request: Request, user: str = Depends(require_session),
+) -> dict:
+
+    _check_token_not_wider(request, body.scopes)
     warnings: list[str] = []
     created = im.create_api_token(
         body.name, body.scopes, instances=body.instances, groups=body.groups,
@@ -813,7 +861,12 @@ def api_list_tokens(user: str = Depends(require_session)) -> list[dict]:
 
 
 @app.delete("/tokens/{token_name}")
-def api_revoke_token(token_name: str, user: str = Depends(require_session)) -> dict:
+def api_revoke_token(
+    token_name: str, request: Request, user: str = Depends(require_session),
+) -> dict:
+    target = next((t for t in im.list_api_tokens() if t["name"] == token_name), None)
+    if target is not None:
+        _check_token_not_wider(request, target["scopes"])
     warnings: list[str] = []
     if not im.revoke_api_token(token_name, on_warning=warnings.append):
         raise HTTPException(404, f"no active token named '{token_name}'.")
@@ -1251,6 +1304,7 @@ def api_patch_instance(
     user: str = Depends(require_session),
 ) -> dict:
     if body.schedule_mode is not None and "group_name" not in body.model_fields_set:
+        _require_token_scope(request, "mode:write")
         mode: str = body.schedule_mode
         _, warnings = _call_collecting_warnings(
             lambda on_warning: im.set_schedule_mode(
@@ -1261,6 +1315,7 @@ def api_patch_instance(
         if warnings:
             result["warnings"] = warnings
         return result
+    _require_token_scope(request, "groups:membership")
     if body.group_name is not None:
 
 
@@ -1667,7 +1722,8 @@ CONSOLE_COMMANDS = (
     "migrate-start", "migrate-resume", "migrate-orphans", "schedule-set", "schedule-show",
     "schedule-clear", "hooks-set", "hooks-show", "hooks-clear", "hooks-run", "set-mode",
     "group-create", "group-schedule-set", "group-show", "group-list", "group-depends",
-    "group-delete", "group-add", "group-remove", "api-token-list", "api-token-revoke",
+    "group-delete", "group-add", "group-remove", "api-token-list", "api-token-scopes",
+    "api-token-revoke",
     "clear-lock", "set-vpc-address", "reset-host-key", "rebuild", "backup",
 )
 CONSOLE_MAX_RUNTIME_S = 3 * 3600

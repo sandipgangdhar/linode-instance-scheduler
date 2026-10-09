@@ -555,7 +555,7 @@ a week, rehearse at your real scale, then onboard production in waves.
 - [ ] **Manual-only nodes**: for anything that should never follow a schedule,
       `set-mode --name <name> --manual` (not in a group with a schedule).
 - [ ] **Scripts and pipelines**: an API token per consumer with the narrowest scopes and limits
-      (`api-token-create --name <name> --scopes read,operate --groups <group> --expires-days 90`);
+      (`api-token-create --name <name> --scopes read,operate --groups <group> --expires-days 90`, or single operations such as `--scopes instances:stop` for a job that should only stop nodes; `api-token-scopes` lists them);
       scripts check `start`/`stop` exit codes (3 = busy, retry; 5 = start order not satisfied) or
       use `?wait=true` over the API. Review `api-token-list` (last used) periodically and revoke
       what's unused.

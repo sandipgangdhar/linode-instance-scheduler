@@ -1630,14 +1630,49 @@ so tokens survive a lost database and a restore from an older snapshot never bri
 token back. If that write fails you'll see a warning; run `backup`, or revoke the token again, to
 retry.
 
-Scopes (combine as needed):
+Scopes come in two sizes. The four **bundles** cover common roles:
 
-| Scope | Allows |
+| Bundle | Allows |
 |---|---|
-| `read` | List, status, history, savings, schedules, hooks (view only) |
+| `read` | List, status, history, savings, activity, schedules, groups, hooks (view only) |
 | `operate` | Start, stop, extend, run a hook now, group start/stop |
-| `configure` | Schedules, groups, group membership, start order, manual-only mode |
-| `admin` | Everything, including changing hooks (they run as root), onboard/offboard, migration, and managing tokens |
+| `configure` | Schedules, groups, group membership, start order, manual-only mode, VPC address |
+| `admin` | Everything, including changing hooks (they run as root), onboard/offboard, migration, logs, and managing tokens |
+
+For a token that should do exactly one thing, give it **single operations** instead (or as
+well) — for example a nightly job that may only stop nodes in one group:
+
+```
+python instance_manager.py api-token-create --name nightly-stop --scopes instances:stop \
+  --groups dev
+```
+
+| Operation | Allows |
+|---|---|
+| `instances:list` | List nodes |
+| `instances:status` | One node's status |
+| `instances:history` | One node's history |
+| `savings:read` | Savings figures (node or group) |
+| `activity:read` | The activity log |
+| `logs:read` | Service log files |
+| `instances:start` / `instances:stop` | Start / stop a node |
+| `instances:extend` | Extend a manual-override timer |
+| `groups:start` / `groups:stop` | Start / stop a whole group |
+| `schedules:read` / `schedules:write` | Read / set or clear a node's schedule |
+| `groups:read` | List and view groups |
+| `groups:write` | Create or delete groups, set a group's schedule |
+| `groups:membership` | Add a node to, or remove it from, a group |
+| `dependencies:write` | Set a group's start order |
+| `mode:write` | Make a node manual-only or schedulable |
+| `hooks:read` / `hooks:write` / `hooks:run` | Read hooks / set or clear them (they run as root) / run one now |
+| `instances:onboard` | List account instances, reserve an IP, onboard |
+| `instances:migrate` | Migrate a node off local disk |
+| `instances:offboard` | Offboard a node or remove it from tracking |
+| `instances:vpc-address` | Move a stopped node to another VPC address |
+| `tokens:manage` | Create, list and revoke tokens — never one wider than itself |
+
+`python instance_manager.py api-token-scopes` prints this list. A request without the scope it
+needs is refused with `403` naming the missing scope; anything not on this list needs `admin`.
 
 `--instances` and `--groups` limit a token to particular nodes and/or groups (a group covers its
 current members). A limited token only sees those nodes and groups in lists, and can only read

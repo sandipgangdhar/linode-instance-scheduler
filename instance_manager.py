@@ -6558,6 +6558,17 @@ def cmd_api_token_list(args) -> int:
     return 0
 
 
+def cmd_api_token_scopes(args) -> int:
+    print("Per-operation scopes:")
+    for scope, what in API_TOKEN_FINE_SCOPES.items():
+        print(f"  {scope:<22} {what}")
+    print("Bundles:")
+    for bundle, members in API_TOKEN_SCOPE_BUNDLES.items():
+        shown = "everything above" if bundle == "admin" else ", ".join(members)
+        print(f"  {bundle:<22} {shown}")
+    return 0
+
+
 def cmd_api_token_revoke(args) -> int:
     if not revoke_api_token(args.name, on_warning=_print_to_stderr):
         if _token_record(args.name) is not None:
@@ -7681,9 +7692,10 @@ def cmd_status(args) -> int:
 
         print(f"'{args.name}': manually started outside its scheduled hours, auto-stops at "
               f"{_format_override_expiry(record['manual_override_expires_at'])} unless extended "
-              f"(`extend --name {args.name}`).")
+              f"(`extend --name {args.name}`).", file=sys.stderr)
+
     for line in _hook_status_lines(args.name, record):
-        print(line)
+        print(line, file=sys.stderr)
     print(json.dumps(record, indent=2, default=str))
     if getattr(args, "check_network", False) is True:
         try:
@@ -7695,7 +7707,7 @@ def cmd_status(args) -> int:
         if findings:
             print(_neighbour_warning(args.name, findings), file=sys.stderr)
         else:
-            print(f"'{args.name}''s VPC subnet(s) and VLAN(s) have no instances outside this tool's management.")
+            print(f"'{args.name}''s VPC subnet(s) and VLAN(s) have no instances outside this tool's management.", file=sys.stderr)
     return 0
 
 
@@ -9019,7 +9031,52 @@ def delete_api_session(token: str) -> None:
     _retry_db(_do)
 
 
-API_TOKEN_SCOPES = ("read", "operate", "configure", "admin")
+API_TOKEN_FINE_SCOPES: dict[str, str] = {
+    "instances:list": "list instances",
+    "instances:status": "instance status (and migration status)",
+    "instances:history": "start/stop history",
+    "savings:read": "savings for instances and groups",
+    "activity:read": "activity log",
+    "instances:start": "start an instance",
+    "instances:stop": "stop an instance",
+    "instances:extend": "extend a manual-override window",
+    "groups:start": "start a whole group",
+    "groups:stop": "stop a whole group",
+    "schedules:read": "read an instance's schedule",
+    "schedules:write": "set or clear an instance's schedule",
+    "groups:read": "list and show groups",
+    "groups:write": "create/delete groups and set a group's schedule",
+    "groups:membership": "add an instance to a group or remove it",
+    "dependencies:write": "set a group's start order",
+    "mode:write": "switch an instance between manual-only and schedulable",
+    "hooks:read": "read hooks and hook run history",
+    "hooks:write": "set or clear hooks (they run as root)",
+    "hooks:run": "run a hook now",
+    "instances:onboard": "list account instances, reserve an IP and onboard",
+    "instances:migrate": "move an instance off local disk (migrate-start/resume/status)",
+    "instances:offboard": "offboard or deregister an instance",
+    "instances:vpc-address": "move a stopped instance to another VPC address",
+    "tokens:manage": "create, list and revoke API tokens (never wider than its own)",
+    "logs:read": "service log files",
+}
+API_TOKEN_SCOPE_BUNDLES: dict[str, tuple[str, ...]] = {
+    "read": ("instances:list", "instances:status", "instances:history", "savings:read",
+             "activity:read", "schedules:read", "groups:read", "hooks:read"),
+    "operate": ("instances:start", "instances:stop", "instances:extend", "groups:start",
+                "groups:stop", "hooks:run"),
+    "configure": ("schedules:write", "groups:write", "groups:membership", "dependencies:write",
+                  "mode:write", "instances:vpc-address"),
+    "admin": tuple(API_TOKEN_FINE_SCOPES),
+}
+API_TOKEN_SCOPES = tuple(API_TOKEN_SCOPE_BUNDLES) + tuple(API_TOKEN_FINE_SCOPES)
+
+
+def expand_token_scopes(scopes: list[str] | tuple[str, ...]) -> set[str]:
+
+    granted: set[str] = set()
+    for scope in scopes:
+        granted.update(API_TOKEN_SCOPE_BUNDLES.get(scope, (scope,)))
+    return granted
 _API_TOKEN_PREFIX = "lis_"
 _API_TOKEN_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
 
@@ -9098,7 +9155,8 @@ def create_api_token(
     scopes = sorted(set(scopes))
     if not scopes or any(sc not in API_TOKEN_SCOPES for sc in scopes):
         raise engine.ConfigError(
-            f"scopes must be one or more of {', '.join(API_TOKEN_SCOPES)}."
+            "scopes must be one or more of: " + ", ".join(API_TOKEN_SCOPES)
+            + " (see `api-token-scopes`)."
         )
     for group_name in groups or []:
         if get_schedule_group(group_name) is None:
@@ -9731,14 +9789,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     token_create_parser.add_argument("--name", required=True)
     token_create_parser.add_argument(
         "--scopes", required=True,
-        help="Comma-separated: read (list/status/history), operate (start/stop/extend), "
-        "configure (schedules, groups, dependencies), admin (everything, incl. hooks, onboard, "
-        "offboard, tokens).",
+        help="Comma-separated scopes: per-operation ones (e.g. instances:start,savings:read) "
+        "and/or the bundles read, operate, configure, admin. `api-token-scopes` lists them all.",
     )
     token_create_parser.add_argument("--instances", help="Comma-separated node names it may act on.")
     token_create_parser.add_argument("--groups", help="Comma-separated groups it may act on.")
     token_create_parser.add_argument("--expires-days", type=float, help="Default: no expiry.")
     subparsers.add_parser("api-token-list", help="List API tokens (never the tokens themselves).")
+    subparsers.add_parser("api-token-scopes", help="List the scopes an API token can have.")
     token_revoke_parser = subparsers.add_parser("api-token-revoke", help="Revoke an API token.")
     token_revoke_parser.add_argument("--name", required=True)
 
@@ -10047,6 +10105,8 @@ def _route(args) -> int:
         return cmd_api_token_create(args)
     if args.command == "api-token-list":
         return cmd_api_token_list(args)
+    if args.command == "api-token-scopes":
+        return cmd_api_token_scopes(args)
     if args.command == "api-token-revoke":
         return cmd_api_token_revoke(args)
     if args.command == "clear-lock":

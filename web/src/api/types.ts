@@ -221,7 +221,35 @@ export interface HookRunResult {
   output_tail: string | null
   attempts: number
 }
-export type ApiTokenScope = 'read' | 'operate' | 'configure' | 'admin'
+export type ApiTokenBundle = 'read' | 'operate' | 'configure' | 'admin'
+export type ApiTokenOperation =
+  | 'instances:list'
+  | 'instances:status'
+  | 'instances:history'
+  | 'savings:read'
+  | 'activity:read'
+  | 'instances:start'
+  | 'instances:stop'
+  | 'instances:extend'
+  | 'groups:start'
+  | 'groups:stop'
+  | 'schedules:read'
+  | 'schedules:write'
+  | 'groups:read'
+  | 'groups:write'
+  | 'groups:membership'
+  | 'dependencies:write'
+  | 'mode:write'
+  | 'hooks:read'
+  | 'hooks:write'
+  | 'hooks:run'
+  | 'instances:onboard'
+  | 'instances:migrate'
+  | 'instances:offboard'
+  | 'instances:vpc-address'
+  | 'tokens:manage'
+  | 'logs:read'
+export type ApiTokenScope = ApiTokenBundle | ApiTokenOperation
 export interface ApiToken {
   name: string
   token_prefix: string

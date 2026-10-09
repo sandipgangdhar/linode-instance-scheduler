@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { ApiToken, ApiTokenScope } from '../api/types'
+import type { ApiToken, ApiTokenBundle, ApiTokenOperation, ApiTokenScope } from '../api/types'
 import { Button, Card, CardHeader, EmptyState, ErrorBanner, Spinner, WarningBanner } from '../components/ui'
 import { PageHeader } from './DashboardLayout'
 const SCOPES: {
-  value: ApiTokenScope
+  value: ApiTokenBundle
   label: string
   help: string
 }[] = [
@@ -12,6 +12,65 @@ const SCOPES: {
   { value: 'operate', label: 'Operate', help: 'start, stop, extend, group start/stop' },
   { value: 'configure', label: 'Configure', help: 'schedules, groups, dependencies, manual-only' },
   { value: 'admin', label: 'Admin', help: 'everything: hooks, onboard/offboard, tokens' },
+]
+const OPERATIONS: {
+  group: string
+  items: {
+    value: ApiTokenOperation
+    label: string
+  }[]
+}[] = [
+  {
+    group: 'View',
+    items: [
+      { value: 'instances:list', label: 'List nodes' },
+      { value: 'instances:status', label: 'Node status' },
+      { value: 'instances:history', label: 'Node history' },
+      { value: 'savings:read', label: 'Savings' },
+      { value: 'activity:read', label: 'Activity log' },
+      { value: 'logs:read', label: 'Service logs' },
+    ],
+  },
+  {
+    group: 'Run',
+    items: [
+      { value: 'instances:start', label: 'Start a node' },
+      { value: 'instances:stop', label: 'Stop a node' },
+      { value: 'instances:extend', label: 'Extend an override' },
+      { value: 'groups:start', label: 'Start a group' },
+      { value: 'groups:stop', label: 'Stop a group' },
+    ],
+  },
+  {
+    group: 'Schedules & groups',
+    items: [
+      { value: 'schedules:read', label: 'Read schedules' },
+      { value: 'schedules:write', label: 'Set/clear schedules' },
+      { value: 'groups:read', label: 'Read groups' },
+      { value: 'groups:write', label: 'Create/delete groups, group schedules' },
+      { value: 'groups:membership', label: 'Add/remove group members' },
+      { value: 'dependencies:write', label: 'Start order (dependencies)' },
+      { value: 'mode:write', label: 'Manual-only mode' },
+    ],
+  },
+  {
+    group: 'Hooks',
+    items: [
+      { value: 'hooks:read', label: 'Read hooks' },
+      { value: 'hooks:write', label: 'Set/clear hooks (runs as root)' },
+      { value: 'hooks:run', label: 'Run a hook now' },
+    ],
+  },
+  {
+    group: 'Lifecycle & admin',
+    items: [
+      { value: 'instances:onboard', label: 'Onboard' },
+      { value: 'instances:migrate', label: 'Migrate to a volume' },
+      { value: 'instances:offboard', label: 'Offboard / remove from tracking' },
+      { value: 'instances:vpc-address', label: 'Change VPC address' },
+      { value: 'tokens:manage', label: 'Manage tokens (no wider than itself)' },
+    ],
+  },
 ]
 function splitList(text: string): string[] | null {
   const items = text
@@ -158,8 +217,31 @@ export function TokensPage() {
                   </label>
                 ))}
               </div>
+              <details className="mt-3">
+                <summary className="cursor-pointer text-slate-700">Or pick single operations</summary>
+                <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {OPERATIONS.map((g) => (
+                    <div key={g.group}>
+                      <div className="text-xs font-semibold uppercase text-slate-500">{g.group}</div>
+                      {g.items.map((op) => (
+                        <label key={op.value} className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            aria-label={op.value}
+                            checked={scopes.includes(op.value)}
+                            onChange={() => toggleScope(op.value)}
+                          />
+                          <span>
+                            {op.label} <code className="text-xs text-slate-500">{op.value}</code>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </details>
             </fieldset>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <label className="block">
                 <span className="text-slate-700">Only these nodes</span>
                 <input
