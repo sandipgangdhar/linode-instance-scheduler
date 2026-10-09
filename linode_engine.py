@@ -542,6 +542,44 @@ def vpc_or_vlan_address(network_config: list[dict] | None, model: str | None) ->
     return vlan_address
 
 
+def vpc_interface_addresses(network_config: list[dict] | None, model: str | None) -> list[tuple]:
+
+    out: list[tuple] = []
+    for iface in network_config or []:
+        if model == INTERFACE_MODEL_LEGACY:
+            if iface.get("purpose") == "vpc":
+                address = (iface.get("ipv4") or {}).get("vpc")
+                if address:
+                    out.append((iface.get("subnet_id"), address))
+        elif iface.get("vpc"):
+            addresses = ((iface["vpc"].get("ipv4") or {}).get("addresses")) or []
+            if addresses:
+                primary = next((a for a in addresses if a.get("primary")), addresses[0])
+                out.append((iface["vpc"].get("subnet_id"), primary["address"]))
+    return out
+
+
+def replace_vpc_address(
+    network_config: list[dict], model: str | None, old: str, new: str
+) -> list[dict]:
+
+    import copy
+
+    result = copy.deepcopy(network_config)
+    for iface in result:
+        if model == INTERFACE_MODEL_LEGACY:
+            ipv4 = iface.get("ipv4") or {}
+            if iface.get("purpose") == "vpc" and ipv4.get("vpc") == old:
+                ipv4["vpc"] = new
+                return result
+        elif iface.get("vpc"):
+            for a in ((iface["vpc"].get("ipv4") or {}).get("addresses")) or []:
+                if a.get("address") == old:
+                    a["address"] = new
+                    return result
+    raise ConfigError(f"no VPC interface with address {old} in this instance's network config.")
+
+
 def _interface_list(value) -> list:
 
     return list(value) if isinstance(value, (list, tuple)) else []

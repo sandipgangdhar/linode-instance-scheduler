@@ -294,6 +294,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `restore` | On a replacement host: puts the newest (or a chosen, or a local) database snapshot in place, plus the trusted host keys. Run `rebuild` afterward. See §8.10. |
 | `ssh-key-backup` / `ssh-key-restore` | Store the deployment SSH key in Object Storage, encrypted with a passphrase you keep, and get it back on a replacement host. See §8.10. |
 | `offboard` | Permanently decommission a stopped node — releases its reserved IP, removes it from tracking, and optionally deletes its volumes. For when you're actually done with a node, not just pausing it. |
+| `set-vpc-address` | Gives a stopped node's VPC interface a different address, used from its next start — for when another instance took its address while it was stopped. |
 | `deregister` | Admin escape hatch — removes a node from local tracking only, with no changes to the real Linode instance, volumes, or reserved IP at all. For correcting a wrong or unsafe local record, not for decommissioning a real node (use `offboard` for that). |
 
 > **Upgrading this tool on a fleet you already manage?** Read the one-time migration note in
@@ -546,10 +547,20 @@ interface) is fully supported — onboard, stop, start, schedules, groups, hooks
   exist, so Linode treats its VPC address as unused — another instance created in that subnet
   with the same address (or handed it automatically) takes it. The node's next `start` then
   fails cleanly with "The provided IP is already in use in the subnet": nothing is left behind,
-  the node stays `stopped`, and `start` works again once the address is free. Give other
-  instances in that subnet their own explicit addresses, or keep scheduled nodes in a range
-  nothing else is assigned from. (While a node is running — and during a migration — its
-  address is held and can't be taken.)
+  the node stays `stopped`, and `start` works again once the address is free. If the other
+  instance should keep that address, move the stopped node to a free one instead:
+
+  ```
+  python instance_manager.py set-vpc-address --name db-1 --address 10.24.1.40
+  ```
+
+  (or "Change" on the node's **VPC address** card in the dashboard). The new address is used
+  from the next `start`; its trusted SSH host key moves with it. It refuses an address outside
+  the subnet, the subnet's gateway, one another managed node is recorded with, or one a running
+  instance holds. To avoid this altogether, give other instances in that subnet their own
+  explicit addresses, or keep scheduled nodes in a range nothing else is assigned from. (While a
+  node is running — and during a migration — its address is held and can't be taken.)
+  Onboarding refuses an instance whose VPC address is already recorded for another managed node.
 - **VPC 1:1 NAT** (a public address mapped onto the VPC interface instead of a separate public
   interface) isn't supported yet — such a node is refused with a clear message.
 - A **VLAN-only** node gets no default route or DNS from the tool — a VLAN has no gateway — so

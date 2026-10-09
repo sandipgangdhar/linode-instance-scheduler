@@ -14,6 +14,7 @@ import { HooksCard } from '../components/HooksCard'
 import { SavingsCard } from '../components/SavingsCard'
 import { ScheduleEditor } from '../components/ScheduleEditor'
 import { StatusBadge } from '../components/StatusBadge'
+import { VpcAddressCard, vpcAddresses } from '../components/VpcAddressCard'
 import {
   Button,
   Card,
@@ -436,6 +437,14 @@ export function InstanceDetailPage() {
               <p className="px-5 pb-4 text-xs text-slate-500">No additional data volumes attached.</p>
             )}
           </Card>
+
+          <VpcAddressCard
+            key={`vpc-${name}`}
+            name={name}
+            addresses={vpcAddresses(record.network_config, record.network_interface_model)}
+            stopped={record.current_status === 'stopped'}
+            onChanged={reload}
+          />
 
           {record.schedule_mode === 'manual' ? (
             <Card>

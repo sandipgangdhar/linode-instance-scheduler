@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Literal, TypeGuard
 from zoneinfo import ZoneInfo
 
+import ipaddress
 import requests.exceptions
 from dotenv import load_dotenv
 from linode_api4 import Instance, Volume
@@ -1969,6 +1970,20 @@ def onboard_instance(
             captured = engine.capture_network_config(instance, configs=configs)
 
 
+            for subnet_id, vpc_address in engine.vpc_interface_addresses(
+                captured["network_config"], captured["network_interface_model"]
+            ):
+                clashes = _records_using_vpc_address(
+                    load_registry(), subnet_id, vpc_address, exclude=name,
+                )
+                if clashes:
+                    raise _OnboardRefusal(
+                        f"this instance's VPC address {vpc_address} is already recorded for managed "
+                        f"instance(s) {', '.join(clashes)} (Linode gave it out while that one "
+                        "was stopped). Give one of them a different address first: change this "
+                        "instance's VPC address in Cloud Manager, or move the stopped one with "
+                        f"`set-vpc-address --name {clashes[0]} --address <free address>`."
+                    )
             ssh_target = reserved_ip or engine.vpc_or_vlan_address(
                 captured["network_config"], captured["network_interface_model"]
             )
@@ -2615,7 +2630,14 @@ def _start_instance_locked(
 
                 record["current_status"] = "unreachable"
         except (ApiError, RuntimeError, requests.exceptions.RequestException) as e:
-            return StartResult(outcome="create_failed", detail=str(e))
+            detail = str(e)
+            if "already in use in the subnet" in detail:
+                detail += (
+                    f" -- another instance took this node's VPC address while it was stopped. "
+                    f"Move '{name}' to a free address with `set-vpc-address --name {name} "
+                    "--address <free address>` (or from its dashboard page), then start it again."
+                )
+            return StartResult(outcome="create_failed", detail=detail)
 
 
         if on_progress is not None:
@@ -7384,6 +7406,110 @@ class DeregisterResult:
     outcome: Literal["not_onboarded", "aborted_by_user", "deregistered"]
 
 
+def _records_using_vpc_address(
+    registry: dict, subnet_id, address: str, *, exclude: str | None = None
+) -> list[str]:
+
+    names = []
+    for other, rec in registry.items():
+        if other == exclude:
+            continue
+        pairs = engine.vpc_interface_addresses(rec.get("network_config"), rec.get("network_interface_model"))
+        if any(sid == subnet_id and addr == address for sid, addr in pairs):
+            names.append(other)
+    return names
+
+
+def set_vpc_address(
+    client, name: str, address: str, *, current: str | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> str:
+
+    try:
+        new_ip = ipaddress.ip_address(address)
+    except ValueError as e:
+        raise engine.ConfigError(f"{address!r} is not an IP address.") from e
+    with _instance_lock(name):
+        registry = load_registry()
+        record = registry.get(name)
+        if record is None:
+            raise NotOnboardedError(f"'{name}' is not onboarded.")
+        if record.get("current_status") != "stopped":
+            raise engine.ConfigError(
+                f"'{name}' is {record.get('current_status')!r}; its VPC address can only be "
+                "changed while it's stopped (stop it first)."
+            )
+        model = record.get("network_interface_model")
+        pairs = engine.vpc_interface_addresses(record.get("network_config"), model)
+        if current is not None:
+            pairs = [p for p in pairs if p[1] == current]
+        if not pairs:
+            raise engine.ConfigError(
+                f"'{name}' has no VPC interface" + (f" with address {current}." if current else ".")
+            )
+        if len(pairs) > 1:
+            raise engine.ConfigError(
+                f"'{name}' has several VPC interfaces ({', '.join(p[1] for p in pairs)}); say "
+                "which one with --current."
+            )
+        subnet_id, old = pairs[0]
+        if old == address:
+            return old
+        prefix = record.get("vpc_prefix")
+        if prefix:
+            network = ipaddress.ip_network(f"{old}/{prefix}", strict=False)
+            hosts = list(network.hosts()) if network.num_addresses <= 65536 else None
+            if new_ip not in network:
+                raise engine.ConfigError(f"{address} is not in this instance's subnet {network}.")
+            if new_ip in (network.network_address, network.broadcast_address) or (
+                hosts and new_ip == hosts[0]
+            ):
+                raise engine.ConfigError(
+                    f"{address} is reserved in {network} (network, gateway or broadcast address)."
+                )
+        others = _records_using_vpc_address(registry, subnet_id, address, exclude=name)
+        if others:
+            raise engine.ConfigError(
+                f"{address} is already recorded for managed instance(s) {', '.join(others)}."
+            )
+        try:
+            live = engine.retry_transient(lambda: list(client.vpcs.ips()))
+        except (ApiError, requests.exceptions.RequestException) as e:
+            raise engine.ConfigError(f"could not check which VPC addresses are in use: {e}") from e
+        holder = next((ip for ip in live if ip.subnet_id == subnet_id and ip.address == address), None)
+        if holder is not None:
+            raise engine.ConfigError(
+                f"{address} is in use in this subnet right now (instance {holder.linode_id})."
+            )
+        record["network_config"] = engine.replace_vpc_address(
+            record["network_config"], model, old, address,
+        )
+        _save_one_record(name, record)
+
+
+        try:
+            old_entry = engine.read_known_host_entry(old)
+            if old_entry:
+                moved = "".join(
+                    f"{address} {line.split(None, 1)[1]}\n"
+                    for line in old_entry.splitlines() if len(line.split(None, 1)) == 2
+                )
+                engine.restore_known_host_entry(address, moved)
+            else:
+                engine.reset_known_host(address)
+            if not _records_using_vpc_address(registry, subnet_id, old, exclude=name):
+                engine.reset_known_host(old)
+        except Exception as e:
+            if on_warning is not None:
+                on_warning(
+                    f"WARNING: could not move the trusted SSH host key from {old} to {address} "
+                    f"({e}). If the next start reports a host-key problem, run "
+                    f"`reset-host-key --name {name}` once."
+                )
+    osb.sync_object_storage_backup(name, _backup_payload(name, record), on_warning=on_warning)
+    return old
+
+
 def deregister_instance(
     name: str, *,
     confirm: Callable[[], bool] | None = None,
@@ -7405,6 +7531,23 @@ def deregister_instance(
             return DeregisterResult(outcome="aborted_by_user")
         _delete_one_record(name)
         return DeregisterResult(outcome="deregistered")
+
+
+def cmd_set_vpc_address(client, args) -> int:
+    try:
+        old = set_vpc_address(client, args.name, args.address, current=args.current,
+                              on_warning=_print_to_stderr)
+    except InstanceLockedError as e:
+        print(f"{e}", file=sys.stderr)
+        return 3
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    if old == args.address:
+        print(f"'{args.name}' already uses {args.address}.")
+    else:
+        print(f"'{args.name}' moves from {old} to {args.address} on its next start.")
+    return 0
 
 
 def cmd_deregister(args) -> int:
@@ -8900,6 +9043,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     clear_lock_parser.add_argument("--name", required=True, type=validate_instance_name)
     clear_lock_parser.add_argument("--yes", action="store_true")
 
+    set_vpc_parser = subparsers.add_parser(
+        "set-vpc-address",
+        help="Give a stopped instance's VPC interface a different address, used from its next "
+        "start (e.g. after a new instance took its address while it was stopped).",
+    )
+    set_vpc_parser.add_argument("--name", required=True, type=validate_instance_name)
+    set_vpc_parser.add_argument("--address", required=True)
+    set_vpc_parser.add_argument("--current", help="The VPC address to change, if it has several.")
+
     deregister_parser = subparsers.add_parser(
         "deregister",
         help="Remove an instance from this tool's own tracking only -- the Linode instance, "
@@ -9117,6 +9269,8 @@ def _route(args) -> int:
         return cmd_hooks_set(client, args)
     if args.command == "hooks-clear":
         return cmd_hooks_clear(client, args)
+    if args.command == "set-vpc-address":
+        return cmd_set_vpc_address(client, args)
 
     return 1
 

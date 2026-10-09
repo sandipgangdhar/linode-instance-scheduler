@@ -151,6 +151,13 @@ export const api = {
     request<OffboardResult>('POST', `/instances/${encodeURIComponent(name)}/offboard`, {
       delete_volumes: deleteVolumes,
     }),
+  setVpcAddress: (name: string, address: string, current: string | null = null) =>
+    request<{
+      name: string
+      previous_address: string
+      address: string
+      warnings?: string[]
+    }>('POST', `/instances/${encodeURIComponent(name)}/vpc-address`, { address, current }),
   deregisterInstance: (name: string) =>
     request<DeregisterResult>('POST', `/instances/${encodeURIComponent(name)}/deregister`),
   getInstance: (name: string) =>

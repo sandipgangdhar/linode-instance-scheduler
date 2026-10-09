@@ -198,6 +198,7 @@ _ROUTE_SCOPES: dict[tuple[str, str], str] = {
     ("POST", "/instances/{name}/schedule"): "configure",
     ("DELETE", "/instances/{name}/schedule"): "configure",
     ("PATCH", "/instances/{name}"): "configure",
+    ("POST", "/instances/{name}/vpc-address"): "configure",
     ("POST", "/groups"): "configure",
     ("PATCH", "/groups/{group_name}"): "configure",
     ("DELETE", "/groups/{group_name}"): "configure",
@@ -922,6 +923,25 @@ def api_offboard(
     if warnings:
         body_dict["warnings"] = warnings
     return body_dict
+
+
+class VpcAddressRequest(BaseModel):
+    address: str
+
+    current: str | None = None
+
+
+@app.post("/instances/{name}/vpc-address")
+def api_set_vpc_address(
+    name: str, body: VpcAddressRequest, request: Request, user: str = Depends(require_session),
+) -> dict:
+
+    previous, warnings = _call_collecting_warnings(
+        lambda on_warning: im.set_vpc_address(
+            _client(request), name, body.address, current=body.current, on_warning=on_warning,
+        )
+    )
+    return {"name": name, "previous_address": previous, "address": body.address, "warnings": warnings}
 
 
 @app.post("/instances/{name}/deregister")
