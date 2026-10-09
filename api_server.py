@@ -681,6 +681,9 @@ class MigrateStartRequest(BaseModel):
     ssh_password: str | None = None
 
 
+    force: bool = False
+
+
 class GroupCreateRequest(BaseModel):
     name: str
     timezone: str
@@ -1020,6 +1023,7 @@ def api_migrate_start(
             return im.migrate_start_instance(
                 client, name, body.instance_id, ssh_key,
                 ssh_password=ssh_password, install_public_key=install_public_key,
+                force=body.force,
                 on_progress=_make_progress_and_warning_reporter(op_id),
                 on_warning=_make_warning_reporter(op_id),
             )

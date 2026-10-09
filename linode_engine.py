@@ -2244,11 +2244,15 @@ def resume_path_b_migration(
         network_helper = old_config.helpers.network
 
 
-        moved_interfaces = state.get("moved_interfaces")
-        old_interfaces = _interface_list(old_config.interfaces)
-        if moved_interfaces is not None:
+        linode_model = instance.interface_generation == INTERFACE_MODEL_LINODE
+        moved_interfaces = None if linode_model else state.get("moved_interfaces")
+        old_interfaces = [] if linode_model else _interface_list(old_config.interfaces)
+        new_interfaces: list | None
+        if linode_model:
+            new_interfaces = None
+        elif moved_interfaces is not None:
             new_interfaces = moved_interfaces
-        elif instance.interface_generation == INTERFACE_MODEL_LINODE or not old_interfaces:
+        elif not old_interfaces:
             new_interfaces = [{"purpose": "public", "primary": False}]
         else:
             new_interfaces = [iface.dict for iface in old_interfaces]
@@ -2292,12 +2296,13 @@ def resume_path_b_migration(
                     persist_fn(dict(state))
                 old_config.interfaces = []
                 retry_transient(old_config.save)
+            interface_kwargs = {} if new_interfaces is None else {"interfaces": new_interfaces}
             new_config = instance.config_create(
                 label=expected_label,
                 devices={"sda": dest_volume, **extra_devices},
                 root_device="/dev/sda",
-                interfaces=new_interfaces,
                 helpers={"network": network_helper},
+                **interface_kwargs,
             )
         _checkpoint("config_created", new_config_id=new_config.id)
         phase = "config_created"

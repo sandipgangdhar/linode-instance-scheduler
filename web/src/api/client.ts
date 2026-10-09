@@ -198,6 +198,7 @@ export const api = {
     },
     onProgress?: (percent: number, currentStep: string | null) => void,
     onWarning?: (warnings: string[]) => void,
+    force = false,
   ) => {
     const kickoff = await request<{
       operation_id: string
@@ -205,6 +206,7 @@ export const api = {
       instance_id: instanceId,
       ssh_private_key: creds?.ssh_private_key ?? null,
       ssh_password: creds?.ssh_password ?? null,
+      force,
     })
     return pollOperation<MigrateStartResult>(kickoff.operation_id, onProgress, onWarning)
   },

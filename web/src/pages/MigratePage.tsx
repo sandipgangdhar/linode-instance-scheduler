@@ -32,6 +32,7 @@ type Step =
   | 'error'
   | 'incomplete'
   | 'setup_incomplete'
+  | 'stale_checkpoint'
   | 'live'
   | 'reconciled'
 type ManualPhase = 'lsblk' | 'confirm_devices' | 'run_dd'
@@ -45,11 +46,13 @@ export function MigratePage() {
   const force = searchParams.get('force') === '1'
   const migrationKey = `migrate:${name}:${instanceId ?? ''}`
   const trackedEntry = statusBar.findByKey(migrationKey)
-  const returnToThisMigration = () =>
-    navigate(
-      `/migrate?name=${encodeURIComponent(name)}&instanceId=${instanceId ?? ''}` + (force ? '&force=1' : ''),
-    )
+  const migrationPath =
+    `/migrate?name=${encodeURIComponent(name)}&instanceId=${instanceId ?? ''}` + (force ? '&force=1' : '')
+  const returnToThisMigration = () => navigate(migrationPath)
   const [step, setStep] = useState<Step>('loading')
+  const [restart, setRestart] = useState<{
+    previousInstanceId: number | null
+  } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [migrateWarnings, setMigrateWarnings] = useState<string[]>([])
   const [onboardSuccessWarnings, setOnboardSuccessWarnings] = useState<string[] | null>(null)
@@ -87,7 +90,15 @@ export function MigratePage() {
       .getMigrateStatus(name)
       .then((status) => {
         if (requestedKey !== currentKeyRef.current) return
-        if (status.in_progress && status.phase === 'awaiting_manual_dd') {
+        if (
+          status.in_progress &&
+          instanceId !== null &&
+          status.instance_id != null &&
+          status.instance_id !== instanceId
+        ) {
+          setResolvedInstanceId(status.instance_id)
+          setStep('stale_checkpoint')
+        } else if (status.in_progress && status.phase === 'awaiting_manual_dd') {
           setResolvedInstanceId(status.instance_id ?? instanceId)
           setDestVolumeSizeGb(status.dest_volume_size_gb ?? null)
           setLocalDiskSizeMb(status.local_disk_size_mb ?? null)
@@ -109,6 +120,7 @@ export function MigratePage() {
   }
   useEffect(() => {
     setStep('loading')
+    setRestart(null)
     ssh.reset()
     setResolvedInstanceId(instanceId)
     setDestVolumeSizeGb(null)
@@ -200,8 +212,9 @@ export function MigratePage() {
             (warnings) => {
               if (requestedKey === currentKeyRef.current) setMigrateWarnings(warnings)
             },
+            restart !== null,
           ),
-        { onNavigate: returnToThisMigration, key: migrationKey, phase: 'start' },
+        { onNavigate: returnToThisMigration, viewPath: migrationPath, key: migrationKey, phase: 'start' },
       )
       if (requestedKey !== currentKeyRef.current) return
       ssh.reset()
@@ -246,7 +259,7 @@ export function MigratePage() {
               }
             },
           ),
-        { onNavigate: returnToThisMigration, key: migrationKey, phase: 'resume' },
+        { onNavigate: returnToThisMigration, viewPath: migrationPath, key: migrationKey, phase: 'resume' },
       )
       if (result.outcome === 'resumed') {
         const resumeNotes: string[] = []
@@ -303,7 +316,7 @@ export function MigratePage() {
       const result = await statusBar.run(
         `Finishing onboarding for "${name}"`,
         () => api.onboardInstance({ name, instance_id: instId, force }),
-        { onNavigate: returnToThisMigration, key: migrationKey, phase: 'finish' },
+        { onNavigate: returnToThisMigration, viewPath: migrationPath, key: migrationKey, phase: 'finish' },
       )
       if (requestedKey !== currentKeyRef.current) return
       if (result.outcome === 'onboarded') {
@@ -451,6 +464,15 @@ export function MigratePage() {
                 </div>
 
                 {error && <ErrorBanner message={error} />}
+                {restart !== null && (
+                  <div className="rounded-md bg-slate-50 px-3 py-2.5 text-xs text-slate-600">
+                    This replaces the earlier migration attempt
+                    {restart.previousInstanceId !== null && restart.previousInstanceId !== instanceId
+                      ? ` for instance ${restart.previousInstanceId}`
+                      : ''}
+                    .
+                  </div>
+                )}
                 {ssh.node}
 
                 <TypeToConfirmInput
@@ -741,14 +763,50 @@ export function MigratePage() {
               <>
                 <ErrorBanner message="This migration's setup was interrupted before reaching the manual copy step." />
                 <p className="text-sm text-slate-700">
-                  The destination volume and Rescue Mode request may not be ready yet — starting a manual data
-                  copy now could target the wrong device or fail outright. This can't be safely resumed from
-                  the dashboard; use the CLI's force-restart instead (creates a fresh destination volume and
-                  retags the old one):
+                  The destination volume and Rescue Mode may not be ready, so it can't be resumed. Start over
+                  instead: this runs the checks again, creates a fresh destination volume and reboots the
+                  instance into Rescue Mode. The earlier attempt's volume is kept and marked as an orphaned
+                  migration attempt, so nothing is deleted.
                 </p>
-                <code className="block overflow-x-auto rounded-md bg-slate-900 px-3 py-2 text-xs text-slate-100">
-                  migrate-start --instance-id {resolvedInstanceId ?? instanceId} --force
-                </code>
+                <Button
+                  variant="primary"
+                  className="w-full"
+                  onClick={() => {
+                    setRestart({ previousInstanceId: resolvedInstanceId })
+                    setStep('start')
+                  }}
+                >
+                  Start over
+                </Button>
+                <Button variant="secondary" className="w-full" onClick={() => navigate('/onboard')}>
+                  Back to Onboard
+                </Button>
+              </>
+            )}
+
+            {step === 'stale_checkpoint' && (
+              <>
+                <div className="rounded-md bg-amber-50 px-3 py-3 text-sm text-amber-800 ring-1 ring-inset ring-amber-200">
+                  An earlier migration under the name “{name}” is still recorded, but it was for instance{' '}
+                  {resolvedInstanceId}, not this one ({instanceId}) — for example, the original instance was
+                  deleted and recreated.
+                </div>
+                <p className="text-sm text-slate-700">
+                  Start a new migration for this instance. The earlier attempt's volume is kept and marked as
+                  an orphaned migration attempt, so nothing is deleted; you can remove it later with{' '}
+                  <code>migrate-orphans --cleanup</code>.
+                </p>
+                <Button
+                  variant="primary"
+                  className="w-full"
+                  onClick={() => {
+                    setRestart({ previousInstanceId: resolvedInstanceId })
+                    setResolvedInstanceId(instanceId)
+                    setStep('start')
+                  }}
+                >
+                  Start a new migration for this instance
+                </Button>
                 <Button variant="secondary" className="w-full" onClick={() => navigate('/onboard')}>
                   Back to Onboard
                 </Button>

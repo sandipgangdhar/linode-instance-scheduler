@@ -943,6 +943,7 @@ def migrate_start_instance(
 
         if on_progress is not None:
             on_progress("Running pre-flight checks (cloud-init version, datasource, networking)...")
+        _forget_unowned_host_key(host, on_progress)
         try:
             preflight = engine.check_path_b_preflight(host, ssh_key, password=ssh_password)
         except (engine.ConfigError, ApiError, RuntimeError) as e:
@@ -1990,6 +1991,7 @@ def onboard_instance(
                 on_progress("Capturing authorized_keys over SSH and data volumes over the API...")
 
 
+            _forget_unowned_host_key(ssh_target, on_progress)
             authorized_keys_raw = engine.ssh_run(
                 ssh_target, ssh_key, "cat /root/.ssh/authorized_keys 2>/dev/null",
                 trust_new=True, password=ssh_password,
@@ -2314,6 +2316,27 @@ def _resolve_ssh_target(
             "record may be corrupted."
         )
     return address
+
+
+def _forget_unowned_host_key(address: str, on_progress: Callable[[str], None] | None) -> None:
+
+    try:
+        if engine.read_known_host_entry(address) is None:
+            return
+        for other_name, rec in load_registry().items():
+            try:
+                if _ssh_target(rec, other_name) == address:
+                    return
+            except (engine.ConfigError, KeyError):
+                continue
+        engine.reset_known_host(address)
+    except Exception:
+        return
+    if on_progress is not None:
+        on_progress(
+            f"  Forgot the SSH host key this tool held for {address}: no managed instance uses "
+            "that address any more (an earlier instance had it)."
+        )
 
 
 def _ssh_target(record: dict, name: str) -> str:
@@ -3710,6 +3733,16 @@ def offboard_instance(
                         f"first onboarding attempt may need `reset-host-key --ip {reserved_ip}` "
                         "first."
                     )
+
+        if not reserved_ip:
+
+
+            try:
+                private_address = _ssh_target(record, name)
+                engine.reset_known_host(private_address)
+            except Exception as e:
+                if on_warning is not None:
+                    on_warning(f"  WARNING: could not clear this node's known-hosts entry ({e}).")
 
         _delete_one_record(name)
         return OffboardResult(outcome="offboarded")

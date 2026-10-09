@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { useStatusBar } from '../status/StatusBarContext'
 import { ProgressBar, Spinner } from './ui'
 const KIND_CLASSES = {
@@ -6,17 +7,28 @@ const KIND_CLASSES = {
   success: 'bg-emerald-600 text-white',
   error: 'bg-red-600 text-white',
 } as const
+function isSamePage(viewPath: string, pathname: string, search: string): boolean {
+  const [path, query = ''] = viewPath.split('?')
+  if (path !== pathname) return false
+  const a = new URLSearchParams(query)
+  const b = new URLSearchParams(search)
+  const keys = new Set([...a.keys(), ...b.keys()])
+  return [...keys].every((k) => a.get(k) === b.get(k))
+}
 export function StatusBar() {
   const { current, others, bringToFront, dismiss } = useStatusBar()
   const [showOthers, setShowOthers] = useState(false)
+  const location = useLocation()
   if (!current) return null
-  const clickable = current.onNavigate !== undefined
+  const alreadyHere =
+    current.viewPath !== undefined && isSamePage(current.viewPath, location.pathname, location.search)
+  const clickable = current.onNavigate !== undefined && !alreadyHere
   return (
     <div className="fixed inset-x-0 bottom-0 z-50 shadow-lg sm:left-60">
       <div
         className={`flex items-center justify-between gap-3 px-5 py-2.5 text-sm ${KIND_CLASSES[current.kind]} ${clickable ? 'cursor-pointer' : ''}`}
         role="status"
-        onClick={current.onNavigate}
+        onClick={clickable ? current.onNavigate : undefined}
       >
         <div className="flex min-w-0 items-center gap-2">
           {current.kind === 'pending' && <Spinner className="shrink-0 text-white" />}

@@ -9,6 +9,7 @@ interface StatusEntry {
   detail?: string
   percent?: number
   onNavigate?: () => void
+  viewPath?: string
   key?: string
   phase?: string
 }
@@ -24,6 +25,7 @@ interface StatusBarApi {
     fn: (report: ProgressReporter) => Promise<T>,
     opts?: {
       onNavigate?: () => void
+      viewPath?: string
       key?: string
       phase?: string
     },
@@ -54,12 +56,20 @@ export function StatusBarProvider({ children }: { children: ReactNode }) {
       fn: (report: ProgressReporter) => Promise<T>,
       opts?: {
         onNavigate?: () => void
+        viewPath?: string
         key?: string
         phase?: string
       },
     ): Promise<T> => {
       const id = ++nextId.current
-      const base = { id, label, onNavigate: opts?.onNavigate, key: opts?.key, phase: opts?.phase }
+      const base = {
+        id,
+        label,
+        onNavigate: opts?.onNavigate,
+        viewPath: opts?.viewPath,
+        key: opts?.key,
+        phase: opts?.phase,
+      }
       setEntries((es) => [...es, { ...base, kind: 'pending' as const }])
       setFrontId(id)
       const report: ProgressReporter = (percent, step) => {
