@@ -234,7 +234,11 @@ maintain by hand:
 
 Both are best-effort and self-healing: a failed backup never blocks the real stop/onboard
 operation, and the very next time that instance is touched, its full current state is backed up
-again from scratch — nothing needs to be manually retried. See the Definitive Guide, Part 5, for
+again from scratch — nothing needs to be manually retried. Tags heal the same way: every start and stop
+rewrites an instance's schedule, group, start-order, manual-only, identity and hook tags from the
+database, so a tag write that failed when a setting was changed (shown as a warning) is corrected
+within one cycle. An individual schedule is also kept in the instance's Object Storage record, and
+`rebuild` uses that copy when the schedule tags are missing or unreadable. See the Definitive Guide, Part 5, for
 the full mechanics, including exactly what's read from where during recovery and a complete
 table of edge cases.
 

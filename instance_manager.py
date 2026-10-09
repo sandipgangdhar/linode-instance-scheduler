@@ -2990,6 +2990,39 @@ def _refresh_recovery_tags_after_start(
             on_warning(
                 f"  WARNING: could not refresh hook tags for '{name}' after starting it ({e})."
             )
+    _resync_config_tags_locked(client, name, record, on_warning)
+
+
+def _resync_config_tags_locked(
+    client, name: str, record: dict, on_warning: Callable[[str], None] | None,
+) -> None:
+
+    if client is None or not record.get("os_volume_id"):
+        return
+
+    def _attempt(what: str, fn) -> None:
+        try:
+            fn()
+        except Exception as e:
+            if on_warning is not None:
+                on_warning(
+                    f"  WARNING: could not refresh {what} tags for '{name}' ({e}) -- the setting "
+                    "itself is in effect locally; the next start or stop retries this."
+                )
+
+    _attempt("schedule", lambda: _sync_schedule_tags_locked(
+        client, name, record, get_instance_schedule(name)))
+
+    def _group() -> None:
+        group_id = record.get("group_id")
+        group = _group_row_by_id(group_id) if group_id is not None else None
+        if group_id is not None and group is None:
+            return
+        _sync_group_membership_tags_locked(client, name, record, group)
+
+    _attempt("group", _group)
+    _attempt("manual-only", lambda: _sync_schedule_mode_tag_locked(
+        client, name, record, get_schedule_mode(name)))
 
 
 def _is_host_key_mismatch(e: Exception) -> bool:
@@ -3496,6 +3529,7 @@ def _stop_instance_locked(
                     "correct locally; this only affects recovery after a total local database "
                     "loss (safe to retry: just run `stop`/`start` again)."
                 )
+        _resync_config_tags_locked(client, name, record, on_warning)
         osb.sync_object_storage_backup(
             name, _backup_payload(name, record), on_warning=on_warning,
         )
@@ -4298,6 +4332,21 @@ def save_instance_schedule(
         client, name, {"timezone": timezone, "rules": rules, "enabled": enabled},
         on_warning=on_warning,
     )
+    _sync_instance_backup_record(name, on_warning)
+
+
+def _sync_instance_backup_record(name: str, on_warning: Callable[[str], None] | None) -> None:
+
+    if not osb.is_configured():
+        return
+    try:
+        record = load_registry().get(name)
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(f"  WARNING: could not refresh the Object Storage record for '{name}' ({e}).")
+        return
+    if record is not None:
+        osb.sync_object_storage_backup(name, _backup_payload(name, record), on_warning=on_warning)
 
 
 def get_instance_schedule(name: str) -> dict | None:
@@ -4339,6 +4388,7 @@ def clear_instance_schedule(
         cleared = _clear_schedule_row(name)
     if cleared:
         _sync_schedule_tags(client, name, None, on_warning=on_warning)
+        _sync_instance_backup_record(name, on_warning)
     return cleared
 
 
@@ -4592,7 +4642,7 @@ def _write_instance_hooks_row(name: str, normalized: dict) -> None:
 
 def _backup_payload(name: str, record: dict) -> dict:
 
-    return {**record, "hooks": get_instance_hooks(name)}
+    return {**record, "hooks": get_instance_hooks(name), "schedule": get_instance_schedule(name)}
 
 
 def _restore_instance_hooks_from_backup(
@@ -8441,19 +8491,15 @@ def rebuild_instances(
                             "re-run schedule-set/group-add for it manually if it had either."
                         )
 
+                    try:
+                        _restore_individual_schedule(name, None, on_progress, on_warning)
+                    except Exception as e2:
+                        if on_warning is not None:
+                            on_warning(f"  WARNING: '{name}': schedule not restored ({e2}).")
+
                 if os_volume is not None:
                     try:
-                        decoded = _decode_schedule_from_tags(os_volume.tags)
-                        if decoded is not None:
-
-
-                            _validate_schedule_timezone(decoded["timezone"])
-                            _validate_schedule_rules(decoded["rules"])
-                            _save_schedule_row(
-                                name, decoded["timezone"], decoded["rules"], decoded["enabled"]
-                            )
-                            if on_progress is not None:
-                                on_progress(f"  restored schedule for '{name}' from tags.")
+                        _restore_individual_schedule(name, os_volume.tags, on_progress, on_warning)
                     except Exception as e:
 
                         if on_warning is not None:
@@ -8680,6 +8726,50 @@ def cmd_rebuild(client, args) -> int:
         return 0
     return 0 if result.ok else 1
 
+
+def _schedule_from_object_storage(name: str) -> dict | None:
+
+    if not osb.is_configured():
+        return None
+    try:
+        backup = osb.download_instance_backup(name)
+    except Exception:
+        return None
+    sched = (backup or {}).get("schedule")
+    if not isinstance(sched, dict):
+        return None
+    return {"timezone": sched.get("timezone"), "rules": sched.get("rules"),
+            "enabled": bool(sched.get("enabled", True))}
+
+
+def _restore_individual_schedule(
+    name: str, tags: list | None,
+    on_progress: Callable[[str], None] | None, on_warning: Callable[[str], None] | None,
+) -> None:
+
+    problems: list[str] = []
+    candidates = [("tags", lambda: _decode_schedule_from_tags(tags)),
+                  ("Object Storage", lambda: _schedule_from_object_storage(name))]
+    for source, load in candidates:
+        if source == "Object Storage" and get_instance_schedule(name) is not None:
+            return
+        try:
+            decoded = load()
+            if decoded is None:
+                continue
+            _validate_schedule_timezone(decoded["timezone"])
+            _validate_schedule_rules(decoded["rules"])
+        except Exception as e:
+            problems.append(f"{source}: {e}")
+            continue
+        _save_schedule_row(name, decoded["timezone"], decoded["rules"], decoded["enabled"])
+        if on_progress is not None:
+            on_progress(f"  restored schedule for '{name}' from {source}.")
+        if problems and on_warning is not None:
+            on_warning(f"  WARNING: ignored an unusable schedule copy for '{name}' ({'; '.join(problems)}).")
+        return
+    if problems:
+        raise engine.ConfigError("; ".join(problems))
 
 def _rebuild_one_record(
     client, name: str, resources: dict, *, ssh_key: str, vpc_id: int | None = None
