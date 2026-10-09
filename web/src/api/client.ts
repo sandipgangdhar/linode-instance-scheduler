@@ -270,11 +270,13 @@ export const api = {
     request<
       ApiToken & {
         token: string
+        warnings?: string[]
       }
     >('POST', '/tokens', body),
   revokeToken: (name: string) =>
     request<{
       revoked: boolean
+      warnings?: string[]
     }>('DELETE', `/tokens/${encodeURIComponent(name)}`),
   groupAction: async (
     name: string,

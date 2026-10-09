@@ -358,7 +358,7 @@ Three things live only on the deployment host, and a replacement host needs all 
 
 | What | Where | How it's protected |
 |---|---|---|
-| The database (instances, schedules, groups, hooks, start order, API tokens, history) | `state/instances.db` | `backup`: a full snapshot to Object Storage and/or a local directory. Also, independently: Linode tags on every managed resource plus per-instance and per-group records in Object Storage, which `rebuild` reads |
+| The database (instances, schedules, groups, hooks, start order, API tokens, history) | `state/instances.db` | `backup`: a full snapshot to Object Storage and/or a local directory. Also, independently: Linode tags on every managed resource plus per-instance, per-group and per-API-token records in Object Storage, which `rebuild` and `restore` read (a token revoked after a snapshot stays revoked) |
 | The trusted SSH host keys of your instances | `state/known_hosts` | `backup` saves a copy to Object Storage and next to each local snapshot |
 | The deployment SSH private key | `keys/deploy_key` (or `LINODE_SSH_KEY_PATH`) | Your own copy, and/or `ssh-key-backup`: an encrypted copy in Object Storage that only your passphrase opens |
 

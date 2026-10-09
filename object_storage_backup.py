@@ -367,10 +367,7 @@ def _group_object_key(group_name: str) -> str:
     return f"{_GROUP_PREFIX}{group_name}.json"
 
 
-def upload_group_backup(
-    group_name: str, record: dict, *, attempts: int = DEFAULT_ATTEMPTS,
-    delay_s: float = DEFAULT_DELAY_S,
-) -> None:
+def _upload_record(key: str, label: str, record: dict, *, attempts: int, delay_s: float) -> None:
 
     client = build_object_storage_client()
     if client is None:
@@ -380,37 +377,34 @@ def upload_group_backup(
 
     def _do():
         response = client.put_object(
-            Bucket=bucket, Key=_group_object_key(group_name), Body=body,
+            Bucket=bucket, Key=key, Body=body,
             ContentType="application/json", Metadata={_MD5_METADATA_KEY: md5_hex},
         )
         etag = response.get("ETag", "").strip('"')
         if etag and etag != md5_hex:
             raise ObjectStorageError(
-                f"Object Storage record for group '{group_name}' did not verify: expected ETag "
+                f"Object Storage record for {label} did not verify: expected ETag "
                 f"{md5_hex}, got {etag}."
             )
 
     _retry(_do, attempts=attempts, delay_s=delay_s)
 
 
-def delete_group_backup(group_name: str) -> None:
-
+def _delete_record(key: str) -> None:
     client = build_object_storage_client()
     if client is None:
         raise ObjectStorageError("Object Storage is not configured (LINODE_OBJ_STORAGE_* unset)")
     bucket = _cached_bucket
-    _retry(lambda: client.delete_object(Bucket=bucket, Key=_group_object_key(group_name)))
+    _retry(lambda: client.delete_object(Bucket=bucket, Key=key))
 
 
-def download_group_backup(group_name: str) -> dict | None:
+def _download_record(key: str) -> dict | None:
 
     client = build_object_storage_client()
     if client is None:
         return None
     try:
-        response = _retry(
-            lambda: client.get_object(Bucket=_cached_bucket, Key=_group_object_key(group_name))
-        )
+        response = _retry(lambda: client.get_object(Bucket=_cached_bucket, Key=key))
     except (ClientError, BotoCoreError, ObjectStorageError):
         return None
     body = response["Body"].read()
@@ -424,7 +418,7 @@ def download_group_backup(group_name: str) -> dict | None:
     return record if isinstance(record, dict) else None
 
 
-def list_group_backups() -> list[str] | None:
+def _list_record_names(prefix: str) -> list[str] | None:
 
     client = build_object_storage_client()
     if client is None:
@@ -433,20 +427,67 @@ def list_group_backups() -> list[str] | None:
     token = None
     try:
         while True:
-            kwargs = {"Bucket": _cached_bucket, "Prefix": _GROUP_PREFIX}
+            kwargs = {"Bucket": _cached_bucket, "Prefix": prefix}
             if token:
                 kwargs["ContinuationToken"] = token
             page = _retry(lambda kwargs=kwargs: client.list_objects_v2(**kwargs))
             for obj in page.get("Contents", []) or []:
                 key = obj.get("Key", "")
-                if key.startswith(_GROUP_PREFIX) and key.endswith(".json"):
-                    names.append(key[len(_GROUP_PREFIX):-len(".json")])
+                if key.startswith(prefix) and key.endswith(".json"):
+                    names.append(key[len(prefix):-len(".json")])
             if not page.get("IsTruncated"):
                 break
             token = page.get("NextContinuationToken")
     except (ClientError, BotoCoreError, ObjectStorageError):
         return None
     return sorted(names)
+
+
+def upload_group_backup(
+    group_name: str, record: dict, *, attempts: int = DEFAULT_ATTEMPTS,
+    delay_s: float = DEFAULT_DELAY_S,
+) -> None:
+
+    _upload_record(_group_object_key(group_name), f"group '{group_name}'", record,
+                   attempts=attempts, delay_s=delay_s)
+
+
+def delete_group_backup(group_name: str) -> None:
+
+    _delete_record(_group_object_key(group_name))
+
+
+def download_group_backup(group_name: str) -> dict | None:
+
+    return _download_record(_group_object_key(group_name))
+
+
+def list_group_backups() -> list[str] | None:
+
+    return _list_record_names(_GROUP_PREFIX)
+
+
+_TOKEN_PREFIX = "tokens/"
+
+
+def _token_object_key(token_name: str) -> str:
+    return f"{_TOKEN_PREFIX}{token_name}.json"
+
+
+def upload_token_record(
+    token_name: str, record: dict, *, attempts: int = DEFAULT_ATTEMPTS,
+    delay_s: float = DEFAULT_DELAY_S,
+) -> None:
+    _upload_record(_token_object_key(token_name), f"API token '{token_name}'", record,
+                   attempts=attempts, delay_s=delay_s)
+
+
+def download_token_record(token_name: str) -> dict | None:
+    return _download_record(_token_object_key(token_name))
+
+
+def list_token_records() -> list[str] | None:
+    return _list_record_names(_TOKEN_PREFIX)
 
 
 def sync_object_storage_backup(

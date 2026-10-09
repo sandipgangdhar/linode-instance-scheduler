@@ -799,10 +799,12 @@ class TokenCreateRequest(BaseModel):
 @app.post("/tokens")
 def api_create_token(body: TokenCreateRequest, user: str = Depends(require_session)) -> dict:
 
-    return im.create_api_token(
+    warnings: list[str] = []
+    created = im.create_api_token(
         body.name, body.scopes, instances=body.instances, groups=body.groups,
-        expires_days=body.expires_days, created_by=user,
+        expires_days=body.expires_days, created_by=user, on_warning=warnings.append,
     )
+    return {**created, "warnings": warnings} if warnings else created
 
 
 @app.get("/tokens")
@@ -812,9 +814,10 @@ def api_list_tokens(user: str = Depends(require_session)) -> list[dict]:
 
 @app.delete("/tokens/{token_name}")
 def api_revoke_token(token_name: str, user: str = Depends(require_session)) -> dict:
-    if not im.revoke_api_token(token_name):
+    warnings: list[str] = []
+    if not im.revoke_api_token(token_name, on_warning=warnings.append):
         raise HTTPException(404, f"no active token named '{token_name}'.")
-    return {"revoked": True}
+    return {"revoked": True, **({"warnings": warnings} if warnings else {})}
 
 
 @app.get("/instances")

@@ -1624,7 +1624,11 @@ python instance_manager.py api-token-create --name ci-deploy --scopes read,opera
 The token is printed once — store it in your secret manager. Send it as
 `Authorization: Bearer <token>`. You can also create, list and revoke tokens on the dashboard's
 **API tokens** page. Only a hash of each token is kept, so a lost token can't be shown again;
-revoke it and create a new one.
+revoke it and create a new one. With Object Storage configured, each token's record (hash, scopes,
+limits, expiry, revocation; never the token) is also written there on every create and revoke,
+so tokens survive a lost database and a restore from an older snapshot never brings a revoked
+token back. If that write fails you'll see a warning; run `backup`, or revoke the token again, to
+retry.
 
 Scopes (combine as needed):
 

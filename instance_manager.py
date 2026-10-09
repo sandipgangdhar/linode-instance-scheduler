@@ -5657,6 +5657,8 @@ class BackupResult:
     instances_failed: list[str] = field(default_factory=list)
     groups_synced: list[str] = field(default_factory=list)
     groups_failed: list[str] = field(default_factory=list)
+    tokens_synced: list[str] = field(default_factory=list)
+    tokens_failed: list[str] = field(default_factory=list)
     known_hosts_key: str | None = None
     known_hosts_error: str | None = None
     object_storage_snapshot_key: str | None = None
@@ -5670,6 +5672,7 @@ class BackupResult:
         return not (
             self.instances_failed
             or self.groups_failed
+            or self.tokens_failed
             or self.known_hosts_error
             or self.object_storage_snapshot_error
             or self.local_snapshot_error
@@ -5711,6 +5714,22 @@ def backup_full_system(
                 if on_warning is not None:
                     on_warning(
                         f"  WARNING: could not back up group '{g['name']}' to Object Storage ({e})"
+                    )
+
+        tokens = list_api_tokens()
+        if tokens and on_progress is not None:
+            on_progress(f"Re-syncing {len(tokens)} API token record(s) to Object Storage...")
+        for t in tokens:
+            try:
+                record = _token_record(t["name"])
+                if record is not None:
+                    osb.upload_token_record(t["name"], record)
+                    result.tokens_synced.append(t["name"])
+            except Exception as e:
+                result.tokens_failed.append(t["name"])
+                if on_warning is not None:
+                    on_warning(
+                        f"  WARNING: could not back up API token '{t['name']}' to Object Storage ({e})"
                     )
 
         if on_progress is not None:
@@ -5783,6 +5802,10 @@ def cmd_backup(args) -> int:
         summary += f"; {len(result.groups_synced)} group record(s) re-synced"
         if result.groups_failed:
             summary += f", {len(result.groups_failed)} failed"
+        if result.tokens_synced or result.tokens_failed:
+            summary += f"; {len(result.tokens_synced)} API token record(s) re-synced"
+            if result.tokens_failed:
+                summary += f", {len(result.tokens_failed)} failed"
         print(summary + ".")
         if result.object_storage_snapshot_key:
             print(
@@ -6005,6 +6028,12 @@ def restore_from_backup(
         REGISTRY_PATH.write_bytes(staged.read_bytes())
     _connect().close()
     say(f"Restored {instances} instance(s) and {groups} group(s) from {source}.")
+    try:
+        restore_api_tokens_from_object_storage(on_progress=on_progress, on_warning=on_warning)
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(f"WARNING: couldn't reconcile API tokens from Object Storage ({e}); "
+                       "run `restore` again or `rebuild` to retry.")
 
     result.known_hosts_restored = restore_known_hosts(
         known_hosts_file, on_progress=on_progress, on_warning=on_warning,
@@ -6447,6 +6476,7 @@ def cmd_api_token_create(args) -> int:
         created = create_api_token(
             args.name, _csv(args.scopes) or [], instances=_csv(args.instances),
             groups=_csv(args.groups), expires_days=args.expires_days, created_by="cli",
+            on_warning=_print_to_stderr,
         )
     except engine.ConfigError as e:
         print(f"Configuration error: {e}", file=sys.stderr)
@@ -6479,7 +6509,10 @@ def cmd_api_token_list(args) -> int:
 
 
 def cmd_api_token_revoke(args) -> int:
-    if not revoke_api_token(args.name):
+    if not revoke_api_token(args.name, on_warning=_print_to_stderr):
+        if _token_record(args.name) is not None:
+            print(f"Token '{args.name}' was already revoked (its backup record was re-synced).")
+            return 0
         print(f"Configuration error: no active token named '{args.name}'.", file=sys.stderr)
         return 1
     print(f"Token '{args.name}' revoked.")
@@ -8560,6 +8593,11 @@ def rebuild_instances(
     _restore_group_dependencies(
         client, pending_dependencies, object_dependencies, on_progress, on_warning,
     )
+    try:
+        restore_api_tokens_from_object_storage(on_progress=on_progress, on_warning=on_warning)
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(f"WARNING: couldn't reconcile API tokens from Object Storage ({e}).")
 
     if on_progress is not None:
         on_progress(f"Scanned tags: {len(found)} name(s) found.")
@@ -8918,10 +8956,49 @@ _TOKEN_COLUMNS = ("name, token_prefix, scopes, instances, groups, created_by, cr
                   " expires_at, revoked_at, last_used_at")
 
 
+_TOKEN_RECORD_FIELDS = ("name", "token_hash", "token_prefix", "scopes", "instances", "groups",
+                        "created_by", "created_at", "expires_at", "revoked_at")
+
+
+def _token_record(name: str) -> dict | None:
+
+    def _do():
+        conn = _connect()
+        try:
+            return conn.execute(
+                f"SELECT {', '.join(_TOKEN_RECORD_FIELDS)} FROM api_tokens WHERE name = ?", (name,)
+            ).fetchone()
+        finally:
+            conn.close()
+
+    row = _retry_db(_do)
+    return dict(zip(_TOKEN_RECORD_FIELDS, row, strict=True)) if row else None
+
+
+def _sync_token_record(name: str, on_warning: Callable[[str], None] | None) -> bool:
+
+    if not osb.is_configured():
+        return True
+    try:
+        record = _token_record(name)
+        if record is not None:
+            osb.upload_token_record(name, record)
+        return True
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(
+                f"WARNING: could not back up API token '{name}' to Object Storage ({e}). The change "
+                "is in effect now, but a restore from an older database snapshot wouldn't know "
+                f"about it -- run `backup` (or `api-token-revoke --name {name}` again for a "
+                "revocation) to retry."
+            )
+        return False
+
+
 def create_api_token(
     name: str, scopes: list[str], *, instances: list[str] | None = None,
     groups: list[str] | None = None, expires_days: float | None = None,
-    created_by: str | None = None,
+    created_by: str | None = None, on_warning: Callable[[str], None] | None = None,
 ) -> dict:
 
     if not _API_TOKEN_NAME_RE.fullmatch(name or ""):
@@ -8962,6 +9039,7 @@ def create_api_token(
             conn.close()
 
     _retry_db(_do)
+    _sync_token_record(name, on_warning)
     meta = next(t for t in list_api_tokens() if t["name"] == name)
     return {**meta, "token": token}
 
@@ -8980,7 +9058,7 @@ def list_api_tokens() -> list[dict]:
     return [_token_row_to_dict(r) for r in _retry_db(_do)]
 
 
-def revoke_api_token(name: str) -> bool:
+def revoke_api_token(name: str, *, on_warning: Callable[[str], None] | None = None) -> bool:
 
     def _do():
         conn = _connect()
@@ -8994,7 +9072,85 @@ def revoke_api_token(name: str) -> bool:
         finally:
             conn.close()
 
-    return bool(_retry_db(_do))
+    revoked = bool(_retry_db(_do))
+    _sync_token_record(name, on_warning)
+    return revoked
+
+
+def _earliest(a: str | None, b: str | None) -> str | None:
+    values = [v for v in (a, b) if v]
+    return min(values, key=datetime.fromisoformat) if values else None
+
+
+def restore_api_tokens_from_object_storage(
+    *, on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> int:
+
+    names = osb.list_token_records()
+    if names is None:
+        if osb.is_configured() and on_warning is not None:
+            on_warning("WARNING: couldn't list API token records in Object Storage -- tokens were "
+                       "not reconciled; re-run to retry.")
+        return 0
+    changed = 0
+    for token_name in names:
+        record = osb.download_token_record(token_name)
+        if (record is None or record.get("name") != token_name
+                or not isinstance(record.get("token_hash"), str)
+                or not _API_TOKEN_NAME_RE.fullmatch(token_name)):
+            if on_warning is not None:
+                on_warning(f"WARNING: API token record '{token_name}' in Object Storage is missing "
+                           "or failed verification -- skipped.")
+            continue
+        local = _token_record(token_name)
+        if local is None:
+            def _insert(rec=record):
+                conn = _connect()
+                try:
+                    conn.execute(
+                        f"INSERT INTO api_tokens ({', '.join(_TOKEN_RECORD_FIELDS)})"
+                        f" VALUES ({', '.join('?' * len(_TOKEN_RECORD_FIELDS))})",
+                        tuple(rec.get(f) for f in _TOKEN_RECORD_FIELDS),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+            try:
+                _retry_db(_insert)
+            except sqlite3.IntegrityError as e:
+                if on_warning is not None:
+                    on_warning(f"WARNING: couldn't restore API token '{token_name}' ({e}).")
+                continue
+            changed += 1
+            if on_progress is not None:
+                state = "revoked" if record.get("revoked_at") else "active"
+                on_progress(f"  restored API token '{token_name}' ({state}) from Object Storage.")
+            continue
+        if local["token_hash"] != record["token_hash"]:
+            if on_warning is not None:
+                on_warning(f"WARNING: API token '{token_name}' differs between the database and "
+                           "Object Storage -- kept the local one.")
+            continue
+        revoked_at = _earliest(local["revoked_at"], record.get("revoked_at"))
+        expires_at = _earliest(local["expires_at"], record.get("expires_at"))
+        if revoked_at != local["revoked_at"] or expires_at != local["expires_at"]:
+            def _update(n=token_name, r=revoked_at, x=expires_at):
+                conn = _connect()
+                try:
+                    conn.execute("UPDATE api_tokens SET revoked_at = ?, expires_at = ? WHERE name = ?",
+                                 (r, x, n))
+                    conn.commit()
+                finally:
+                    conn.close()
+
+            _retry_db(_update)
+            changed += 1
+            if on_progress is not None:
+                on_progress(f"  applied the revocation/expiry recorded for API token "
+                            f"'{token_name}' in Object Storage.")
+    return changed
 
 
 def verify_api_token(token: str) -> dict | None:

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api/client'
 import type { ApiToken, ApiTokenScope } from '../api/types'
-import { Button, Card, CardHeader, EmptyState, ErrorBanner, Spinner } from '../components/ui'
+import { Button, Card, CardHeader, EmptyState, ErrorBanner, Spinner, WarningBanner } from '../components/ui'
 import { PageHeader } from './DashboardLayout'
 const SCOPES: {
   value: ApiTokenScope
@@ -23,6 +23,7 @@ function splitList(text: string): string[] | null {
 export function TokensPage() {
   const [tokens, setTokens] = useState<ApiToken[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [warnings, setWarnings] = useState<string[]>([])
   const [name, setName] = useState('')
   const [scopes, setScopes] = useState<ApiTokenScope[]>(['read', 'operate'])
   const [instances, setInstances] = useState('')
@@ -61,6 +62,7 @@ export function TokensPage() {
     setCreating(true)
     setCreateError(null)
     setNewToken(null)
+    setWarnings([])
     try {
       const days = expiresDays.trim() ? Number(expiresDays) : null
       const created = await api.createToken({
@@ -72,6 +74,7 @@ export function TokensPage() {
       })
       if (!mountedRef.current) return
       setNewToken({ name: created.name, token: created.token })
+      setWarnings(created.warnings ?? [])
       setName('')
       setInstances('')
       setGroups('')
@@ -88,7 +91,8 @@ export function TokensPage() {
     if (revoking) return
     setRevoking(tokenName)
     try {
-      await api.revokeToken(tokenName)
+      const result = await api.revokeToken(tokenName)
+      if (mountedRef.current) setWarnings(result.warnings ?? [])
       reload()
     } catch (e) {
       if (mountedRef.current) setError(e instanceof ApiError ? e.message : 'Could not revoke the token.')
@@ -106,6 +110,7 @@ export function TokensPage() {
       />
       <div className="space-y-6 p-8">
         {error && <ErrorBanner message={error} />}
+        {warnings.length > 0 && <WarningBanner messages={warnings} />}
         <Card>
           <CardHeader
             title="Create a token"
