@@ -625,7 +625,7 @@ $(sed 's/^/    /' "$KEY_PATH.pub" 2>/dev/null)
 
   Next:  cd $INSTALL_DIR && sudo -u $SERVICE_USER .venv/bin/python instance_manager.py onboard --name <name> --instance-id <id>
   $(if [[ -n "$DOMAIN" ]]; then echo "Dashboard: https://$DOMAIN"; else echo "API:   http://127.0.0.1:$API_PORT (re-run with --domain NAME for HTTPS, or see DEPLOYMENT.md)"; fi)
-  Logs:  journalctl -u $POLL_UNIT -f
+  Logs:  the dashboard's Activity and Logs pages, $INSTALL_DIR/state/logs/, or journalctl -u $POLL_UNIT -f
 EOF
   obj_configured || warn "Object Storage isn't configured: only local snapshots in $BACKUP_DIR are kept, and they're lost with this host. Copy them off-host, or configure Object Storage and re-run install."
   [[ $BACKUP_SSH_KEY -eq 1 ]] || warn "recovering on a new host needs $KEY_PATH -- keep a copy somewhere safe, or store it encrypted with --backup-ssh-key (skip this if you already did)."

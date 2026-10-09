@@ -18,6 +18,9 @@ export default defineConfig({
       '/oauth': 'http://127.0.0.1:8000',
       '/health': 'http://127.0.0.1:8000',
       '/operations': 'http://127.0.0.1:8000',
+      '/activity': 'http://127.0.0.1:8000',
+      '/logs': 'http://127.0.0.1:8000',
+      '/console': 'http://127.0.0.1:8000',
     },
   },
 })

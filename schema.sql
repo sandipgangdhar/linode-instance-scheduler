@@ -127,3 +127,25 @@ CREATE TABLE IF NOT EXISTS hook_events (
     detail TEXT
 );
 CREATE INDEX IF NOT EXISTS hook_events_by_instance ON hook_events (instance_name, timestamp);
+
+CREATE TABLE IF NOT EXISTS activity_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TIMESTAMP NOT NULL,
+    level TEXT NOT NULL CHECK (level IN ('info', 'warning', 'error')),
+    source TEXT NOT NULL,
+    instance_name TEXT,
+    action TEXT,
+    actor TEXT,
+    message TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS activity_log_by_instance ON activity_log (instance_name, id);
+CREATE INDEX IF NOT EXISTS activity_log_by_time ON activity_log (timestamp);
+
+CREATE TABLE IF NOT EXISTS scheduler_heartbeat (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_tick TIMESTAMP NOT NULL,
+    interval_seconds INTEGER,
+    instances_checked INTEGER NOT NULL,
+    fired INTEGER NOT NULL,
+    failed INTEGER NOT NULL
+);

@@ -1320,6 +1320,31 @@ detail page for the same schedule/savings view plus membership management. It's 
 over the REST API in §8.8 — every action it takes is one of that API's own endpoints, nothing the
 dashboard can do that the CLI/API couldn't already do directly.
 
+### 8.9.1 Activity, Logs and Console — seeing and running things from the dashboard
+
+Three dashboard pages show what the backend is doing, without opening a terminal on the
+scheduler host:
+
+- **Activity** — everything the backend did and why, newest first, updating live: each start,
+  stop, onboard, offboard, migration step and hook run (scheduled, manual or from the dashboard),
+  every warning and error they reported, each scheduler decision (fired, waiting on a dependency,
+  failed), and every console command with who ran it. Filter by level, source or text. A banner at
+  the top says when the scheduler last checked in, and turns red if it stops — so a schedule that
+  didn't fire because the scheduler wasn't running is obvious at a glance. Each instance's page
+  has the same feed for just that instance ("Activity log"). Entries are kept for 30 days
+  (`ACTIVITY_LOG_RETENTION_DAYS` in `.env`).
+- **Logs** — the raw output of the scheduler (`poll`), the API/dashboard server and backups,
+  tailed live, plus the console's own log and the database file's size. Engine messages appear in
+  whichever service ran the operation. The same files are on disk under `state/logs/` (rotated at
+  5 MB, three old files kept), so they work identically on a VM and on Kubernetes.
+- **Console** — runs this tool's own commands on the scheduler host with live output: `list`,
+  `status --name web-1`, `history`, `start`, `stop`, `reset-host-key`, `rebuild`, `backup` and
+  the rest. It is not a shell: only this tool's commands run, so the console can't read the Linode
+  API token or the SSH key, or run other programs. A command that normally asks for confirmation
+  needs `--yes`. The long-running services (`poll`, `serve-api`), `restore`, SSH key backup and
+  creating API tokens aren't available there. The console is for dashboard logins only (never API
+  tokens), and every command is recorded on the Activity page and in the console log.
+
 ### 8.10 `backup` — scheduling your own whole-system backups
 
 Every stop/onboard already backs that one node up automatically (see the disaster recovery

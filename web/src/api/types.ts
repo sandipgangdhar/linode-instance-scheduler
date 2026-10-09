@@ -249,3 +249,61 @@ export interface GroupActionResult {
   members: GroupMemberResult[]
   ok: boolean
 }
+export type ActivityLevel = 'info' | 'warning' | 'error'
+export interface ActivityEntry {
+  id: number
+  timestamp: string
+  level: ActivityLevel
+  source: string
+  instance_name: string | null
+  action: string | null
+  actor: string | null
+  message: string
+}
+export interface SchedulerStatus {
+  running: boolean
+  last_tick: string | null
+  interval_seconds: number | null
+  age_seconds?: number
+  instances_checked?: number
+  fired?: number
+  failed?: number
+  message: string | null
+}
+export interface ActivityResponse {
+  entries: ActivityEntry[]
+  scheduler: SchedulerStatus
+}
+export interface LogService {
+  name: string
+  exists: boolean
+  size: number
+  modified: string | null
+}
+export interface LogsIndex {
+  services: LogService[]
+  database: {
+    path: string
+    size: number
+    wal_size: number
+    activity_retention_days: number
+  }
+  scheduler: SchedulerStatus
+}
+export interface LogTail {
+  lines: string[]
+  offset: number
+  reset: boolean
+}
+export interface ConsoleRun {
+  id: string
+  command: string
+  actor: string
+  status: 'running' | 'done' | 'error' | 'cancelled'
+  exit_code: number | null
+  started_at: string
+  finished_at: string | null
+  lines: string[]
+  next_offset: number
+  truncated: boolean
+}

@@ -198,6 +198,7 @@ in real values — never commit the real file).
 | `LINODE_OAUTH_CLIENT_ID` / `LINODE_OAUTH_CLIENT_SECRET` | Only if using the dashboard's "Login with Linode" | Register your own OAuth Client in your own Linode account (Cloud Manager → Profile → OAuth Apps) — see "Setting up dashboard login" below. |
 | `LINODE_OAUTH_REDIRECT_URI` | Only if using dashboard login | Must exactly match the redirect URI configured on the OAuth App above. |
 | `LINODE_API_MAX_REQUESTS_PER_SECOND` | No (default 10) | Cap on Linode API requests per second for one process; all parallel `poll` workers share it. A rate-limited (429) response also pauses every worker for as long as the API asks. `0` removes the cap. |
+| `ACTIVITY_LOG_RETENTION_DAYS` | No (default 30) | How long the dashboard's Activity entries are kept. Service log files under `state/logs/` rotate by size (5 MB, three old files) regardless. |
 | `API_ALLOWED_ORIGINS` | No | Comma-separated browser origins allowed to call the API cross-origin (CORS). Leave unset unless a separately-hosted frontend needs to call this API from a different origin. |
 | `LINODE_OBJ_STORAGE_BUCKET` / `LINODE_OBJ_STORAGE_ENDPOINT` / `LINODE_OBJ_STORAGE_ACCESS_KEY` / `LINODE_OBJ_STORAGE_SECRET_KEY` | No | Optional Object Storage backup of each instance's full record, for fuller disaster recovery than tags alone provide. See "Setting up Object Storage backup" below. All four must be set together — leave all four unset to skip this layer entirely. |
 
@@ -470,7 +471,11 @@ apply unchanged.
 
 ## Monitoring & health checks
 
-There's no separate metrics pipeline — the signal to watch is the tool's own state and logs:
+There's no separate metrics pipeline — the signal to watch is the tool's own state and logs.
+The dashboard's **Activity** page shows all of the below in one place, with a banner that turns
+red when the scheduler stops checking in; **Logs** tails the scheduler, API and backup output
+(also on disk under `state/logs/`); and **Console** runs any of the commands below from the
+browser.
 
 - **Are both processes actually running?** `systemctl is-active instance-scheduler-poll
   instance-scheduler-api`.

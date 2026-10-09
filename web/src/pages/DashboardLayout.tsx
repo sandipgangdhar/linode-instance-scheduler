@@ -5,6 +5,9 @@ import { StatusBar } from '../components/StatusBar'
 const NAV_ITEMS = [
   { to: '/instances', label: 'Instances', icon: ServerIcon },
   { to: '/groups', label: 'Groups', icon: GroupIcon },
+  { to: '/activity', label: 'Activity', icon: PulseIcon },
+  { to: '/logs', label: 'Logs', icon: LogsIcon },
+  { to: '/console', label: 'Console', icon: TerminalIcon },
   { to: '/tokens', label: 'API tokens', icon: KeyIcon },
 ]
 export function DashboardLayout() {
@@ -104,6 +107,29 @@ function LogoutIcon({ className }: { className?: string }) {
       <path d="M9 5H5a1 1 0 00-1 1v12a1 1 0 001 1h4" />
       <path d="M14 8l4 4-4 4" />
       <path d="M18 12H9" />
+    </svg>
+  )
+}
+function PulseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <path d="M3 12h4l2-6 4 12 2-6h6" />
+    </svg>
+  )
+}
+function LogsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <rect x="4" y="3" width="16" height="18" rx="1.5" />
+      <path d="M8 8h8M8 12h8M8 16h5" />
+    </svg>
+  )
+}
+function TerminalIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <rect x="3" y="4" width="18" height="16" rx="1.5" />
+      <path d="M7 9l3 3-3 3M12 15h5" />
     </svg>
   )
 }

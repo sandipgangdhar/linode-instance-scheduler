@@ -520,6 +520,225 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+ACTIVITY_LOG_ENABLED = True
+DEFAULT_ACTIVITY_LOG_RETENTION_DAYS = 30
+ACTIVITY_LOG_MAX_MESSAGE = 4000
+_ACTIVITY_PRUNE_EVERY_S = 3600
+_last_activity_prune = 0.0
+
+
+def activity_retention_days() -> int:
+
+    try:
+        days = int(os.environ.get("ACTIVITY_LOG_RETENTION_DAYS") or DEFAULT_ACTIVITY_LOG_RETENTION_DAYS)
+    except ValueError:
+        return DEFAULT_ACTIVITY_LOG_RETENTION_DAYS
+    return days if days > 0 else DEFAULT_ACTIVITY_LOG_RETENTION_DAYS
+
+
+def record_activity(
+    message: str, *, level: Literal["info", "warning", "error"] = "info", source: str = "system",
+    instance_name: str | None = None, action: str | None = None, actor: str | None = None,
+) -> None:
+
+    if not ACTIVITY_LOG_ENABLED or not message or not str(message).strip():
+        return
+    text = str(message).rstrip()[:ACTIVITY_LOG_MAX_MESSAGE]
+
+    def _do():
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO activity_log (timestamp, level, source, instance_name, action, actor,"
+                " message) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (_now(), level, source, instance_name, action, actor, text),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    with contextlib_suppress(Exception):
+        _retry_db(_do)
+
+
+def _message_level(message: str) -> Literal["info", "warning", "error"]:
+    head = message.lstrip().upper()
+    if head.startswith(("ERROR", "SECURITY WARNING", "CONFIGURATION ERROR")):
+        return "error"
+    return "warning" if head.startswith("WARNING") else "info"
+
+
+_FAILED_OUTCOME_WORDS = ("fail", "error", "incomplete", "refused", "aborted")
+
+
+def _outcome_level(outcome: str) -> Literal["info", "warning", "error"]:
+    return "error" if any(w in outcome for w in _FAILED_OUTCOME_WORDS) else "info"
+
+
+def _logs_activity(action: str, *, name_arg: int = 1):
+
+    import functools
+    import inspect
+
+    def decorate(fn):
+        params = inspect.signature(fn).parameters
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if not ACTIVITY_LOG_ENABLED:
+                return fn(*args, **kwargs)
+            name = kwargs.get("name", args[name_arg] if len(args) > name_arg else None)
+            source = kwargs.get("triggered_by") or (
+                params["triggered_by"].default if "triggered_by" in params else "manual"
+            )
+            actor = kwargs.get("actor")
+
+            def log(message, level=None):
+                record_activity(
+                    message, level=level or _message_level(str(message)), source=source,
+                    instance_name=name, action=action, actor=actor,
+                )
+
+            if "on_progress" in params:
+                caller_progress = kwargs.get("on_progress")
+
+                def on_progress(message):
+                    log(message)
+                    if caller_progress is not None:
+                        caller_progress(message)
+                kwargs["on_progress"] = on_progress
+            if "on_warning" in params:
+                caller_warning = kwargs.get("on_warning")
+
+                def on_warning(message):
+                    level = _message_level(str(message))
+                    log(message, "error" if level == "error" else "warning")
+                    if caller_warning is not None:
+                        caller_warning(message)
+                kwargs["on_warning"] = on_warning
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as e:
+                log(f"{action} failed: {e}", "error")
+                raise
+            outcome = getattr(result, "outcome", None)
+            if isinstance(outcome, str):
+                detail = getattr(result, "detail", None)
+                log(f"{action}: {outcome}" + (f" -- {detail}" if detail else ""), _outcome_level(outcome))
+            return result
+        return wrapper
+    return decorate
+
+
+def write_scheduler_heartbeat(
+    *, interval_seconds: int | None, instances_checked: int, fired: int, failed: int,
+) -> None:
+
+    global _last_activity_prune
+    if not ACTIVITY_LOG_ENABLED:
+        return
+
+    def _do():
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO scheduler_heartbeat (id, last_tick, interval_seconds,"
+                " instances_checked, fired, failed) VALUES (1, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET last_tick = excluded.last_tick,"
+                " interval_seconds = excluded.interval_seconds,"
+                " instances_checked = excluded.instances_checked, fired = excluded.fired,"
+                " failed = excluded.failed",
+                (_now(), interval_seconds, instances_checked, fired, failed),
+            )
+            if time.monotonic() - _last_activity_prune > _ACTIVITY_PRUNE_EVERY_S:
+                cutoff = (datetime.now(UTC) - timedelta(days=activity_retention_days())).isoformat()
+                conn.execute("DELETE FROM activity_log WHERE timestamp < ?", (cutoff,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    try:
+        _retry_db(_do)
+        if time.monotonic() - _last_activity_prune > _ACTIVITY_PRUNE_EVERY_S:
+            _last_activity_prune = time.monotonic()
+    except Exception:
+        pass
+
+
+def get_scheduler_heartbeat() -> dict | None:
+    def _do():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT last_tick, interval_seconds, instances_checked, fired, failed"
+                " FROM scheduler_heartbeat WHERE id = 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        return row
+
+    row = _retry_db(_do)
+    if row is None:
+        return None
+    keys = ("last_tick", "interval_seconds", "instances_checked", "fired", "failed")
+    return dict(zip(keys, row, strict=True))
+
+
+MAX_ACTIVITY_LIMIT = 1000
+
+
+def get_activity(
+    *, names: list[str] | None = None, level: str | None = None, source: str | None = None,
+    query: str | None = None, after_id: int | None = None, before_id: int | None = None,
+    limit: int = 200, include_unscoped: bool = True,
+) -> list[dict]:
+
+    if limit < 1 or limit > MAX_ACTIVITY_LIMIT:
+        raise engine.ConfigError(f"limit must be from 1 to {MAX_ACTIVITY_LIMIT}.")
+    levels = {"info": ("info", "warning", "error"), "warning": ("warning", "error"),
+              "error": ("error",)}
+    if level is not None and level not in levels:
+        raise engine.ConfigError("level must be info, warning or error.")
+    where: list[str] = []
+    values: list[object] = []
+    if names is not None:
+        placeholders = ",".join("?" * len(names))
+        clause = f"instance_name IN ({placeholders})" if names else "0"
+        if include_unscoped:
+            clause = f"({clause} OR instance_name IS NULL)"
+        where.append(clause)
+        values += names
+    if level is not None:
+        where.append(f"level IN ({','.join('?' * len(levels[level]))})")
+        values += levels[level]
+    if source is not None:
+        where.append("source = ?")
+        values.append(source)
+    if query:
+        where.append("instr(lower(message), lower(?)) > 0")
+        values.append(query)
+    if after_id is not None:
+        where.append("id > ?")
+        values.append(after_id)
+    if before_id is not None:
+        where.append("id < ?")
+        values.append(before_id)
+    sql = ("SELECT id, timestamp, level, source, instance_name, action, actor, message"
+           " FROM activity_log" + (" WHERE " + " AND ".join(where) if where else "")
+           + " ORDER BY id DESC LIMIT ?")
+    values.append(limit)
+
+    def _do():
+        conn = _connect()
+        try:
+            return conn.execute(sql, values).fetchall()
+        finally:
+            conn.close()
+
+    keys = ("id", "timestamp", "level", "source", "instance_name", "action", "actor", "message")
+    return [dict(zip(keys, row, strict=True)) for row in _retry_db(_do)]
+
+
 def load_migrations() -> dict:
     def _do():
         conn = _connect()
@@ -853,6 +1072,7 @@ def _append_authorized_key_command(public_key: str) -> str:
     )
 
 
+@_logs_activity("migrate-start")
 def migrate_start_instance(
     client, name: str, instance_id: int, ssh_key: str | None, *,
     force: bool = False,
@@ -1222,6 +1442,7 @@ class MigrateResumeResult:
     fstab_entries_disabled: list[str] = field(default_factory=list)
 
 
+@_logs_activity("migrate-resume")
 def migrate_resume_instance(
     client, name: str, ssh_key: str, *,
     on_progress: Callable[[str], None] | None = None,
@@ -1840,6 +2061,7 @@ class OnboardResult:
     record: dict | None = None
 
 
+@_logs_activity("onboard")
 def onboard_instance(
     client, name: str, instance_id: int, ssh_key: str | None, *,
     vpc_id: int | None = None, force: bool = False,
@@ -2400,6 +2622,7 @@ def _ssh_target(record: dict, name: str) -> str:
     )
 
 
+@_logs_activity("start")
 def start_instance(
     client, name: str, ssh_key: str, *,
     triggered_by: Literal["schedule", "manual", "api"] = "manual",
@@ -2594,7 +2817,13 @@ def _start_instance_locked(
                 )
                 if on_progress is not None:
                     on_progress("  running -- verifying real network reachability...")
-                engine.ssh_run(_ssh_target(record, name), ssh_key, "echo ok", retries=12, retry_delay_s=10)
+                if _first_contact_trust(name, record, registry):
+                    engine.ssh_run(
+                        _ssh_target(record, name), ssh_key, "echo ok", retries=12, retry_delay_s=10,
+                        trust_new=True,
+                    )
+                else:
+                    engine.ssh_run(_ssh_target(record, name), ssh_key, "echo ok", retries=12, retry_delay_s=10)
             except ApiError as e:
                 if e.status == 404:
 
@@ -2985,6 +3214,7 @@ class StopResult:
     hook_output: str | None = None
 
 
+@_logs_activity("stop")
 def stop_instance(
     client, name: str, ssh_key: str, *,
     skip_precapture: bool = False, force: bool = False, skip_hooks: bool = False,
@@ -3355,6 +3585,7 @@ def extend_manual_override(name: str, hours: float | None = None) -> str:
         return new_expiry
 
 
+@_logs_activity("hook-run", name_arg=0)
 def run_hook_now(
     name: str, hook_type: Literal["pre_stop", "post_start"], ssh_key: str, *,
     triggered_by: Literal["schedule", "manual", "api"] = "manual", actor: str | None = None,
@@ -3588,6 +3819,7 @@ def _strip_recovery_metadata_tags(client, os_volume_id: int | None) -> None:
     _verify_os_volume_tag_write(client, os_volume_id, kept)
 
 
+@_logs_activity("offboard")
 def offboard_instance(
     client, name: str, *,
     delete_volumes: bool = False,
@@ -6404,6 +6636,7 @@ def cmd_group_remove(client, args) -> int:
     return 0
 
 
+DEFAULT_POLL_INTERVAL_SECONDS = 300
 DEFAULT_POLL_WINDOW_SECONDS = 300
 
 
@@ -7218,6 +7451,16 @@ def cmd_poll(client, args) -> int:
                     timing = (f" started={_hms(r.started_at)} finished={_hms(r.finished_at)} "
                               f"took={r.duration_s:.1f}s worker={r.worker}")
                 print(f"  {r.name}: {r.outcome} action={r.action}{via}{revert}{timing}{detail}")
+                record_activity(
+                    f"scheduler: {r.outcome} action={r.action}{via}{revert}{timing}{detail}",
+                    level="error" if r.outcome in ("fired_failure", "error") else (
+                        "warning" if r.outcome.startswith("waiting") else "info"),
+                    source="scheduler", instance_name=r.name, action="tick",
+                )
+        write_scheduler_heartbeat(
+            interval_seconds=None if args.once else args.interval_seconds,
+            instances_checked=len(tick.results), fired=tick.fired_count, failed=tick.failed_count,
+        )
         if tick.results:
             waiting = f", {tick.waiting_count} waiting on a dependency" if tick.waiting_count else ""
             print(f"Tick complete: {tick.fired_count} fired, {tick.failed_count} failed{waiting}, "
@@ -7258,6 +7501,11 @@ def cmd_poll(client, args) -> int:
         return 1
 
     print(f"Polling every {args.interval_seconds}s (Ctrl-C to stop)...")
+    record_activity(
+        f"Scheduler started: checking every {args.interval_seconds}s, catch-up window "
+        f"{args.window_seconds}s, up to {args.max_parallel} at once.", source="scheduler",
+        action="tick",
+    )
     try:
         while True:
             tick_started = time.monotonic()
@@ -7271,11 +7519,13 @@ def cmd_poll(client, args) -> int:
 
 
             if elapsed > args.interval_seconds:
-                print(
+                overrun = (
                     f"WARNING: this tick took {elapsed:.1f}s, longer than the "
                     f"{args.interval_seconds}s poll interval -- a schedule's match window may "
-                    "have been skipped entirely this cycle.", file=sys.stderr,
+                    "have been skipped entirely this cycle."
                 )
+                print(overrun, file=sys.stderr)
+                record_activity(overrun, level="warning", source="scheduler", action="tick")
 
 
             time.sleep(max(MIN_POLL_SLEEP_SECONDS, args.interval_seconds - elapsed))
@@ -7591,6 +7841,8 @@ def _move_vpc_address_locked(
             carried = True
         else:
             engine.reset_known_host(address)
+
+
         if not shared:
             engine.reset_known_host(old)
     except Exception as e:
@@ -7660,22 +7912,49 @@ def _reclaim_vpc_addresses_locked(
                 "Anything that reaches it by its VPC address needs the new one."
             )
         live.append(type("_Held", (), {"subnet_id": subnet_id, "address": new_address})())
+    return _first_contact_trust(name, record, registry) or trust_new_once
+
+
+def _key_material(entry: str | None) -> set[tuple[str, str]]:
+
+    out: set[tuple[str, str]] = set()
+    for line in (entry or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            out.add((parts[1], parts[2]))
+    return out
+
+
+def _first_contact_trust(name: str, record: dict, registry: dict) -> bool:
+
+    if record.get("reserved_ip"):
+        return False
     target = _ssh_target(record, name)
     for subnet_id, address in engine.vpc_interface_addresses(
         record.get("network_config"), record.get("network_interface_model")
     ):
         if address == target and _records_using_vpc_address(registry, subnet_id, address, exclude=name):
-
-
             engine.reset_known_host(address)
-            trust_new_once = True
+            return True
+    stored = _key_material(engine.read_known_host_entry(target))
+    if not stored:
+        return True
+    for other_name, other in registry.items():
+        if other_name == name:
+            continue
+        try:
+            other_target = _ssh_target(other, other_name)
+        except Exception:
+            continue
+        if other_target and other_target != target and stored & _key_material(
+            engine.read_known_host_entry(other_target)
+        ):
+            engine.reset_known_host(target)
+            return True
+    return False
 
 
-    if not record.get("reserved_ip") and engine.read_known_host_entry(target) is None:
-        trust_new_once = True
-    return trust_new_once
-
-
+@_logs_activity("set-vpc-address")
 def set_vpc_address(
     client, name: str, address: str, *, current: str | None = None,
     on_warning: Callable[[str], None] | None = None,
@@ -7749,6 +8028,7 @@ def set_vpc_address(
     return old
 
 
+@_logs_activity("deregister", name_arg=0)
 def deregister_instance(
     name: str, *,
     confirm: Callable[[], bool] | None = None,
@@ -8968,7 +9248,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "start/stop it if due.",
     )
     poll_parser.add_argument(
-        "--interval-seconds", type=int, default=300,
+        "--interval-seconds", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS,
         help="Seconds between ticks when running continuously (default 300, on this project's own recommended cadence of every 1-5 minutes). Ignored with --once.",
     )
     poll_parser.add_argument(
@@ -9397,9 +9677,88 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+SERVICE_LOGS = {"poll": "scheduler", "serve-api": "api", "backup": "backup"}
+LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
+LOG_FILE_BACKUPS = 3
+
+
+def service_log_dir() -> Path:
+    return REGISTRY_PATH.parent / "logs"
+
+
+class _RotatingLogFile:
+
+
+    def __init__(self, name: str):
+        self.path = service_log_dir() / f"{name}.log"
+        self._lock = threading.Lock()
+
+    def write_line(self, stream: str, line: str) -> None:
+        stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            with self._lock:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                if self.path.exists() and self.path.stat().st_size > LOG_FILE_MAX_BYTES:
+                    for i in range(LOG_FILE_BACKUPS, 0, -1):
+                        src = self.path.with_name(f"{self.path.name}.{i - 1}" if i > 1 else self.path.name)
+                        if src.exists():
+                            src.replace(self.path.with_name(f"{self.path.name}.{i}"))
+                with self.path.open("a", encoding="utf-8") as f:
+                    f.write(f"{stamp} {stream} {line}\n")
+        except OSError:
+            pass
+
+
+class _TeeStream:
+
+
+    def __init__(self, original, log: _RotatingLogFile, stream: str):
+        self._original = original
+        self._log = log
+        self._stream = stream
+        self._buffer = ""
+        self._lock = threading.Lock()
+
+    def write(self, text: str) -> int:
+        written = self._original.write(text)
+        with self._lock:
+            self._buffer += text
+            *lines, self._buffer = self._buffer.split("\n")
+        for line in lines:
+            self._log.write_line(self._stream, line)
+        return written if isinstance(written, int) else len(text)
+
+    def flush(self) -> None:
+        self._original.flush()
+
+    def __getattr__(self, attr):
+        return getattr(self._original, attr)
+
+
+def _tee_to_service_log(command: str | None) -> None:
+    name = SERVICE_LOGS.get(command) if command else None
+    if name is None or isinstance(sys.stdout, _TeeStream):
+        return
+    log = _RotatingLogFile(name)
+    sys.stdout = _TeeStream(sys.stdout, log, "OUT")
+    sys.stderr = _TeeStream(sys.stderr, log, "ERR")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    if argv is None:
+        _tee_to_service_log(getattr(args, "command", None))
+    if os.environ.get("LIS_NONINTERACTIVE") == "1":
+
+        import builtins
+
+        def _no_prompt(prompt: object = "") -> str:
+            print(f"{str(prompt).strip()}\nThis command asks for confirmation, which the console "
+                  "can't answer. Add --yes to run it.", file=sys.stderr)
+            raise SystemExit(2)
+
+        builtins.input = _no_prompt
 
     try:
         return _dispatch(args)

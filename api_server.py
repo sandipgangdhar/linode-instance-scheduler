@@ -210,11 +210,12 @@ _ROUTE_SCOPES: dict[tuple[str, str], str] = {
     ("DELETE", "/groups/{group_name}/hooks"): "admin",
 }
 
-_ADMIN_READ_PREFIXES = ("/linode/", "/tokens")
+_ADMIN_READ_PREFIXES = ("/linode/", "/tokens", "/logs", "/console")
 
 
 _LIMITED_TOKEN_OPEN_ROUTES = {
     ("GET", "/instances"), ("GET", "/groups"), ("GET", "/operations/{op_id}"),
+    ("GET", "/activity"),
 }
 
 
@@ -1543,6 +1544,302 @@ def root_redirect() -> RedirectResponse | dict:
     if not _DASHBOARD_BUILT:
         return {"message": "Dashboard not built (web/dist missing) -- API docs at /docs."}
     return RedirectResponse("/ui/")
+
+
+SCHEDULER_STALE_TICKS = 3
+
+
+def _scheduler_status() -> dict:
+    beat = im.get_scheduler_heartbeat()
+    if beat is None:
+        return {"running": False, "last_tick": None, "interval_seconds": None,
+                "message": "The scheduler hasn't recorded a check yet."}
+    interval = beat.get("interval_seconds") or im.DEFAULT_POLL_INTERVAL_SECONDS
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(beat["last_tick"])).total_seconds()
+    running = age <= interval * SCHEDULER_STALE_TICKS + 60
+    return {**beat, "age_seconds": int(age), "running": running,
+            "message": None if running else "The scheduler hasn't checked in recently; it may be stopped."}
+
+
+@app.get("/activity")
+def api_activity(
+    request: Request, name: str | None = None, group_name: str | None = None,
+    level: str | None = None, source: str | None = None, q: str | None = None,
+    after_id: int | None = None, before_id: int | None = None, limit: int = 200,
+    user: str = Depends(require_session),
+) -> dict:
+
+    names: list[str] | None = None
+    include_unscoped = True
+    if name is not None:
+        names, include_unscoped = [name], False
+    elif group_name is not None:
+        group = im.get_schedule_group(group_name)
+        if group is None:
+            raise im.GroupNotFoundError(f"no schedule group named '{group_name}'.")
+        names = [n for n, r in im.load_registry().items() if r.get("group_id") == group["id"]]
+        include_unscoped = False
+    limited = _limited_token(request)
+    if limited is not None:
+        allowed = [n for n in im.load_registry() if im.api_token_allows_instance(limited, n)]
+        names = allowed if names is None else [n for n in names if n in allowed]
+        include_unscoped = False
+    entries = im.get_activity(
+        names=names, level=level, source=source, query=q, after_id=after_id,
+        before_id=before_id, limit=limit, include_unscoped=include_unscoped,
+    )
+    return {"entries": entries, "scheduler": _scheduler_status()}
+
+
+LOG_SERVICES = ("scheduler", "api", "backup", "console")
+MAX_LOG_TAIL_LINES = 5000
+_MAX_LOG_CHUNK_BYTES = 1024 * 1024
+
+
+def _log_path(service: str) -> Path:
+    if service not in LOG_SERVICES:
+        raise HTTPException(404, f"no log named '{service}' (available: {', '.join(LOG_SERVICES)}).")
+    return im.service_log_dir() / f"{service}.log"
+
+
+@app.get("/logs")
+def api_logs_index(user: str = Depends(require_session)) -> dict:
+
+    services = []
+    for service in LOG_SERVICES:
+        path = im.service_log_dir() / f"{service}.log"
+        exists = path.exists()
+        services.append({
+            "name": service, "exists": exists,
+            "size": path.stat().st_size if exists else 0,
+            "modified": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+            if exists else None,
+        })
+    db = Path(im.REGISTRY_PATH)
+    wal = db.with_name(db.name + "-wal")
+    database = {
+        "path": str(db), "size": db.stat().st_size if db.exists() else 0,
+        "wal_size": wal.stat().st_size if wal.exists() else 0,
+        "activity_retention_days": im.activity_retention_days(),
+    }
+    return {"services": services, "database": database, "scheduler": _scheduler_status()}
+
+
+@app.get("/logs/{service}")
+def api_log_tail(
+    service: str, lines: int = 500, offset: int | None = None,
+    user: str = Depends(require_session),
+) -> dict:
+
+    if lines < 1 or lines > MAX_LOG_TAIL_LINES:
+        raise HTTPException(400, f"lines must be from 1 to {MAX_LOG_TAIL_LINES}.")
+    path = _log_path(service)
+    if not path.exists():
+        return {"lines": [], "offset": 0, "reset": offset is not None and offset > 0}
+    size = path.stat().st_size
+    reset = False
+    with path.open("rb") as f:
+        if offset is not None:
+            if offset > size:
+                offset, reset = 0, True
+            f.seek(max(offset, size - _MAX_LOG_CHUNK_BYTES))
+            data = f.read(_MAX_LOG_CHUNK_BYTES)
+            end = f.tell()
+            text = data.decode("utf-8", "replace")
+            if not text.endswith("\n") and "\n" in text:
+                cut = text.rindex("\n") + 1
+                end -= len(text[cut:].encode("utf-8"))
+                text = text[:cut]
+            elif not text.endswith("\n"):
+                end -= len(data)
+                text = ""
+            return {"lines": text.splitlines(), "offset": end, "reset": reset}
+        f.seek(max(0, size - _MAX_LOG_CHUNK_BYTES))
+        tail = f.read().decode("utf-8", "replace").splitlines()[-lines:]
+        return {"lines": tail, "offset": size, "reset": False}
+
+
+CONSOLE_COMMANDS = (
+    "list", "status", "history", "start", "stop", "extend", "onboard", "offboard", "deregister",
+    "migrate-start", "migrate-resume", "migrate-orphans", "schedule-set", "schedule-show",
+    "schedule-clear", "hooks-set", "hooks-show", "hooks-clear", "hooks-run", "set-mode",
+    "group-create", "group-schedule-set", "group-show", "group-list", "group-depends",
+    "group-delete", "group-add", "group-remove", "api-token-list", "api-token-revoke",
+    "clear-lock", "set-vpc-address", "reset-host-key", "rebuild", "backup",
+)
+CONSOLE_MAX_RUNTIME_S = 3 * 3600
+CONSOLE_MAX_LINES = 20000
+_CONSOLE_KEEP_RUNS = 50
+
+
+class ConsoleRequest(BaseModel):
+    command: str
+
+
+@dataclasses.dataclass
+class _ConsoleRun:
+    id: str
+    command: str
+    actor: str
+    started_at: str
+    status: str = "running"
+    exit_code: int | None = None
+    finished_at: str | None = None
+    lines: list[str] = dataclasses.field(default_factory=list)
+    truncated: bool = False
+    process: object = None
+
+
+_console_runs: OrderedDict[str, _ConsoleRun] = OrderedDict()
+_console_lock = threading.Lock()
+
+
+def _parse_console_command(command: str) -> list[str]:
+    import shlex
+
+    try:
+        argv = shlex.split(command)
+    except ValueError as e:
+        raise HTTPException(400, f"could not parse the command: {e}") from e
+    if argv and argv[0] in ("instance_manager.py", "./instance_manager.py"):
+        argv = argv[1:]
+    if not argv:
+        raise HTTPException(400, "type a command, e.g. `status --name web-1` or `--help`.")
+    if argv[0] in ("-h", "--help", "help"):
+        return ["--help"]
+    if argv[0] not in CONSOLE_COMMANDS:
+        raise HTTPException(
+            400, f"'{argv[0]}' isn't available in the console. Available: "
+            f"{', '.join(CONSOLE_COMMANDS)}.")
+    return argv
+
+
+def _console_view(run: _ConsoleRun, offset: int = 0) -> dict:
+    return {
+        "id": run.id, "command": run.command, "actor": run.actor, "status": run.status,
+        "exit_code": run.exit_code, "started_at": run.started_at, "finished_at": run.finished_at,
+        "lines": run.lines[offset:], "next_offset": len(run.lines), "truncated": run.truncated,
+    }
+
+
+def _require_dashboard_session(request: Request) -> None:
+    if getattr(request.state, "api_token", None) is not None:
+        raise HTTPException(403, "the console is only available to dashboard logins, not API tokens.")
+
+
+@app.get("/console/commands")
+def api_console_commands(request: Request, user: str = Depends(require_session)) -> dict:
+    _require_dashboard_session(request)
+    return {"commands": list(CONSOLE_COMMANDS)}
+
+
+@app.post("/console/run")
+def api_console_run(
+    body: ConsoleRequest, request: Request, user: str = Depends(require_session),
+) -> dict:
+
+    import subprocess
+
+    _require_dashboard_session(request)
+    argv = _parse_console_command(body.command)
+    run = _ConsoleRun(id=uuid.uuid4().hex, command=" ".join(argv), actor=user,
+                      started_at=datetime.now(timezone.utc).isoformat())
+    log = im._RotatingLogFile("console")
+    log.write_line("RUN", f"{user} $ {run.command}")
+    im.record_activity(f"$ {run.command}", source="console", actor=user, action="console")
+    env = {**os.environ, "LIS_NONINTERACTIVE": "1", "PYTHONUNBUFFERED": "1"}
+    script = Path(im.__file__).resolve()
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(script), *argv], cwd=str(script.parent), env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+    except OSError as e:
+        raise HTTPException(500, f"could not start the command: {e}") from e
+    run.process = process
+    with _console_lock:
+        _console_runs[run.id] = run
+        while len(_console_runs) > _CONSOLE_KEEP_RUNS:
+            oldest = next(iter(_console_runs.values()))
+            if oldest.status == "running":
+                break
+            _console_runs.popitem(last=False)
+
+    def _reader() -> None:
+        assert process.stdout is not None
+        for raw in process.stdout:
+            line = raw.rstrip("\n")
+            log.write_line("OUT", line)
+            with _console_lock:
+                if len(run.lines) < CONSOLE_MAX_LINES:
+                    run.lines.append(line)
+                else:
+                    run.truncated = True
+
+    def _watch() -> None:
+        reader = threading.Thread(target=_reader, daemon=True)
+        reader.start()
+        try:
+            code = process.wait(timeout=CONSOLE_MAX_RUNTIME_S)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            code = process.wait()
+            with _console_lock:
+                run.lines.append(f"[stopped: ran longer than {CONSOLE_MAX_RUNTIME_S // 3600} hours]")
+        reader.join(timeout=10)
+        with _console_lock:
+            run.exit_code = code
+            if run.status != "cancelled":
+                run.status = "done" if code == 0 else "error"
+            run.finished_at = datetime.now(timezone.utc).isoformat()
+        log.write_line("RUN", f"{user} $ {run.command} -> exit {code}")
+        im.record_activity(
+            f"$ {run.command} -> exit {code}", level="info" if code == 0 else "warning",
+            source="console", actor=user, action="console",
+        )
+
+    threading.Thread(target=_watch, daemon=True).start()
+    return _console_view(run)
+
+
+@app.get("/console/runs")
+def api_console_runs(request: Request, user: str = Depends(require_session)) -> list[dict]:
+    _require_dashboard_session(request)
+    with _console_lock:
+        return [
+            {k: v for k, v in _console_view(r).items() if k != "lines"}
+            for r in reversed(_console_runs.values())
+        ]
+
+
+@app.get("/console/runs/{run_id}")
+def api_console_run_output(
+    run_id: str, request: Request, offset: int = 0, user: str = Depends(require_session),
+) -> dict:
+    _require_dashboard_session(request)
+    with _console_lock:
+        run = _console_runs.get(run_id)
+        if run is None:
+            raise HTTPException(404, "no such console run (it may have expired).")
+        return _console_view(run, max(0, offset))
+
+
+@app.post("/console/runs/{run_id}/cancel")
+def api_console_cancel(run_id: str, request: Request, user: str = Depends(require_session)) -> dict:
+    _require_dashboard_session(request)
+    with _console_lock:
+        run = _console_runs.get(run_id)
+        if run is None:
+            raise HTTPException(404, "no such console run (it may have expired).")
+        if run.status == "running":
+            run.status = "cancelled"
+            run.lines.append(f"[cancelled by {user}]")
+            proc = run.process
+    if run.status == "cancelled" and proc is not None:
+        with suppress(Exception):
+            proc.terminate()
+    return _console_view(run)
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:

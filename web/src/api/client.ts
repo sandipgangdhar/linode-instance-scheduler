@@ -23,6 +23,11 @@ import type {
   ApiToken,
   ApiTokenScope,
   GroupActionResult,
+  ActivityLevel,
+  ActivityResponse,
+  ConsoleRun,
+  LogsIndex,
+  LogTail,
 } from './types'
 export class ApiError extends Error {
   status: number
@@ -331,6 +336,45 @@ export const api = {
     request<{
       cleared: boolean
     }>('DELETE', `/groups/${encodeURIComponent(name)}/hooks`),
+  getActivity: (
+    params: {
+      name?: string
+      groupName?: string
+      level?: ActivityLevel
+      source?: string
+      q?: string
+      afterId?: number
+      beforeId?: number
+      limit?: number
+    } = {},
+  ) => {
+    const qs = new URLSearchParams()
+    if (params.name) qs.set('name', params.name)
+    if (params.groupName) qs.set('group_name', params.groupName)
+    if (params.level) qs.set('level', params.level)
+    if (params.source) qs.set('source', params.source)
+    if (params.q) qs.set('q', params.q)
+    if (params.afterId !== undefined) qs.set('after_id', String(params.afterId))
+    if (params.beforeId !== undefined) qs.set('before_id', String(params.beforeId))
+    qs.set('limit', String(params.limit ?? 200))
+    return request<ActivityResponse>('GET', `/activity?${qs.toString()}`)
+  },
+  getLogsIndex: () => request<LogsIndex>('GET', '/logs'),
+  getLogTail: (service: string, offset: number | null, lines = 500) =>
+    request<LogTail>(
+      'GET',
+      `/logs/${encodeURIComponent(service)}?lines=${lines}${offset === null ? '' : `&offset=${offset}`}`,
+    ),
+  listConsoleCommands: () =>
+    request<{
+      commands: string[]
+    }>('GET', '/console/commands'),
+  runConsoleCommand: (command: string) => request<ConsoleRun>('POST', '/console/run', { command }),
+  getConsoleRun: (id: string, offset = 0) =>
+    request<ConsoleRun>('GET', `/console/runs/${encodeURIComponent(id)}?offset=${offset}`),
+  listConsoleRuns: () => request<Omit<ConsoleRun, 'lines'>[]>('GET', '/console/runs'),
+  cancelConsoleRun: (id: string) =>
+    request<ConsoleRun>('POST', `/console/runs/${encodeURIComponent(id)}/cancel`),
   logout: () =>
     request<{
       ok: boolean

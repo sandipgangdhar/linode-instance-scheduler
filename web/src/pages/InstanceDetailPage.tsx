@@ -10,6 +10,7 @@ import {
   type ScheduleEvent,
   type ScheduleGroupSummary,
 } from '../api/types'
+import { ActivityFeed } from '../components/ActivityFeed'
 import { HooksCard } from '../components/HooksCard'
 import { SavingsCard } from '../components/SavingsCard'
 import { ScheduleEditor } from '../components/ScheduleEditor'
@@ -546,7 +547,7 @@ export function InstanceDetailPage() {
           />
 
           <Card>
-            <CardHeader title="Recent activity" subtitle="Create/delete events for this instance." />
+            <CardHeader title="History" subtitle="Create/delete events for this instance." />
             {history.length === 0 ? (
               <p className="px-5 py-6 text-sm text-slate-500">Nothing recorded yet.</p>
             ) : (
@@ -574,6 +575,16 @@ export function InstanceDetailPage() {
                 ))}
               </ul>
             )}
+          </Card>
+
+          <Card>
+            <CardHeader
+              title="Activity log"
+              subtitle="Everything the backend reported for this instance: progress, warnings, scheduler decisions and results. Updates live."
+            />
+            <div className="px-5 pb-5">
+              <ActivityFeed key={`activity-${name}`} name={name} compact />
+            </div>
           </Card>
         </div>
 

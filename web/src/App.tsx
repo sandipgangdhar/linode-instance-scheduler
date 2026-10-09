@@ -3,12 +3,15 @@ import { useEffect } from 'react'
 import { Navigate, Route, HashRouter as Router, Routes } from 'react-router-dom'
 import { cancelBackgroundPolling, resetBackgroundPollingCancellation } from './api/client'
 import { AuthProvider, useAuth } from './auth/AuthContext'
+import { ActivityPage } from './pages/ActivityPage'
+import { ConsolePage } from './pages/ConsolePage'
 import { DashboardLayout } from './pages/DashboardLayout'
 import { GroupDetailPage } from './pages/GroupDetailPage'
 import { GroupsPage } from './pages/GroupsPage'
 import { InstanceDetailPage } from './pages/InstanceDetailPage'
 import { InstancesPage } from './pages/InstancesPage'
 import { LoginPage } from './pages/LoginPage'
+import { LogsPage } from './pages/LogsPage'
 import { MigratePage } from './pages/MigratePage'
 import { OnboardPage } from './pages/OnboardPage'
 import { TokensPage } from './pages/TokensPage'
@@ -40,6 +43,9 @@ function AppRoutes() {
         <Route path="/groups" element={<GroupsPage />} />
         <Route path="/groups/:name" element={<GroupDetailPage />} />
         <Route path="/tokens" element={<TokensPage />} />
+        <Route path="/activity" element={<ActivityPage />} />
+        <Route path="/logs" element={<LogsPage />} />
+        <Route path="/console" element={<ConsolePage />} />
       </Route>
       <Route path="*" element={<Navigate to="/instances" replace />} />
     </Routes>
