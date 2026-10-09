@@ -589,7 +589,12 @@ interface) is fully supported — onboard, stop, start, schedules, groups, hooks
   that differs from one already on record is still refused. Nodes reached over a public reserved
   IP always use the strict check.
 - **VPC 1:1 NAT** (a public address mapped onto the VPC interface instead of a separate public
-  interface) isn't supported yet — such a node is refused with a clear message.
+  interface) is supported on Linode Interfaces. The guest is set up exactly like a VPC-only
+  node. Linode releases an ordinary NAT address when the instance is deleted, so unless the
+  address is **reserved**, every start gives the node a new public address (the start says
+  which). Reserve it in Cloud Manager to keep it: a reserved NAT address is reused on every
+  start. Onboarding warns when it isn't reserved. Under the older (legacy config) networking
+  model, a node whose only public address is VPC 1:1 NAT is refused at onboarding.
 - A **VLAN-only** node gets no default route or DNS from the tool — a VLAN has no gateway — so
   anything it needs beyond its own VLAN must come from its own configuration.
 

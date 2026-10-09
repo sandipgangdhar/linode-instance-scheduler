@@ -580,6 +580,60 @@ def replace_vpc_address(
     raise ConfigError(f"no VPC interface with address {old} in this instance's network config.")
 
 
+def nat_1_1_addresses(network_config: list[dict] | None, model: str | None) -> list[str]:
+
+    if model == INTERFACE_MODEL_LEGACY:
+        return []
+    out: list[str] = []
+    for iface in network_config or []:
+        if iface.get("vpc"):
+            for a in ((iface["vpc"].get("ipv4") or {}).get("addresses")) or []:
+                if a.get("nat_1_1_address"):
+                    out.append(a["nat_1_1_address"])
+    return out
+
+
+def legacy_nat_only(network_config: list[dict] | None, model: str | None) -> bool:
+
+    if model != INTERFACE_MODEL_LEGACY:
+        return False
+    config = network_config or []
+    if any(iface.get("purpose") == "public" for iface in config):
+        return False
+    return any(
+        iface.get("purpose") == "vpc" and (iface.get("ipv4") or {}).get("nat_1_1") for iface in config
+    )
+
+
+def prepare_nat_1_1_for_recreate(
+    client: LinodeClient, network_config: list[dict] | None, model: str | None
+) -> tuple[list[dict] | None, list[str]]:
+
+    import copy
+
+    if model == INTERFACE_MODEL_LEGACY or not nat_1_1_addresses(network_config, model):
+        return network_config, []
+    result = copy.deepcopy(network_config)
+    lost: list[str] = []
+    for iface in result or []:
+        if not iface.get("vpc"):
+            continue
+        for a in ((iface["vpc"].get("ipv4") or {}).get("addresses")) or []:
+            address = a.get("nat_1_1_address")
+            if not address or address == "auto":
+                continue
+            try:
+                ip = retry_transient(lambda address=address: client.get(f"/networking/reserved/ips/{address}"))
+            except ApiError as e:
+                if e.status != 404:
+                    raise
+                ip = None
+            if not (ip and ip.get("reserved") and not ip.get("linode_id")):
+                a["nat_1_1_address"] = "auto"
+                lost.append(address)
+    return result, lost
+
+
 def _interface_list(value) -> list:
 
     return list(value) if isinstance(value, (list, tuple)) else []
@@ -804,11 +858,6 @@ def _linode_interface_lines(
         addresses = ((iface["vpc"].get("ipv4") or {}).get("addresses")) or []
 
 
-        if carries_default_route and any(a.get("nat_1_1_address") for a in addresses):
-            raise ConfigError(
-                f"VPC interface at index {idx} uses VPC 1:1 NAT -- not supported yet. Use a "
-                "dedicated public interface, or a VPC interface without 1:1 NAT."
-            )
         address = _linode_interface_address(addresses, idx, "VPC")
         if not vpc_prefix:
             raise ConfigError("vpc_prefix is required to build user_data for a 'vpc' interface")
@@ -1212,26 +1261,14 @@ def create_and_boot_instance(
     if captured_network["network_interface_model"] == INTERFACE_MODEL_LEGACY:
 
 
-        has_public_interface = any(
-            iface.get("purpose") == "public" for iface in captured_network["network_config"]
-        )
-        if not has_public_interface:
-            nat_interface = next(
-                (
-                    iface for iface in captured_network["network_config"]
-                    if iface.get("purpose") == "vpc" and (iface.get("ipv4") or {}).get("nat_1_1")
-                ),
-                None,
+        if legacy_nat_only(captured_network["network_config"], INTERFACE_MODEL_LEGACY):
+            raise ConfigError(
+                "This instance appears to use VPC 1:1 NAT for its public IP (no dedicated "
+                "public interface) -- this topology isn't supported for automated recreate "
+                "yet under the older (legacy config) networking model. Assigning the reserved "
+                "IP via the normal path regardless would risk creating an unwanted additional "
+                "public interface alongside the existing NAT config."
             )
-            if nat_interface is not None:
-                raise ConfigError(
-                    "This instance appears to use VPC 1:1 NAT for its public IP (no dedicated "
-                    "public interface) -- this topology isn't supported for automated recreate "
-                    "yet. Assigning the reserved IP via the normal path regardless would risk "
-                    "creating an unwanted additional public interface alongside the existing "
-                    "NAT config. Not supported for now; investigate manually before "
-                    "recreating this instance."
-                )
 
 
         extra_create_kwargs = {"ipv4": [reserved_ip]} if reserved_ip is not None else {}

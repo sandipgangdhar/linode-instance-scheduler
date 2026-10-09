@@ -1969,6 +1969,13 @@ def onboard_instance(
 
 
             captured = engine.capture_network_config(instance, configs=configs)
+            if engine.legacy_nat_only(captured["network_config"], captured["network_interface_model"]):
+                raise _OnboardRefusal(
+                    "this instance reaches the internet only through VPC 1:1 NAT under the older "
+                    "(legacy config) networking model, which can't be recreated after a stop. "
+                    "Give it a public interface, or use Linode Interfaces, where VPC 1:1 NAT is "
+                    "supported."
+                )
 
 
             for subnet_id, vpc_address in engine.vpc_interface_addresses(
@@ -2244,8 +2251,27 @@ def onboard_instance(
                 findings = []
             if findings:
                 on_warning(_neighbour_warning(name, findings))
+            unreserved_nat = [
+                a for a in engine.nat_1_1_addresses(record["network_config"], record["network_interface_model"])
+                if not _is_reserved_ip(client, a)
+            ]
+            if unreserved_nat:
+                on_warning(
+                    f"WARNING: '{name}' reaches the internet through VPC 1:1 NAT public address "
+                    f"{', '.join(unreserved_nat)}, which isn't reserved. Linode releases it when "
+                    "the instance is stopped, so it gets a new public address on every start. "
+                    "Reserve it in Cloud Manager to keep it."
+                )
 
         return OnboardResult(outcome="onboarded", record=record)
+
+
+def _is_reserved_ip(client, address: str) -> bool:
+
+    try:
+        return bool(client.get(f"/networking/reserved/ips/{address}").get("reserved"))
+    except Exception:
+        return False
 
 
 def cmd_onboard(client, args) -> int:
@@ -2622,6 +2648,11 @@ def _start_instance_locked(
                 lambda: client.load(Volume, record["os_volume_id"])
             )
             data_volume_devices = engine.build_data_volume_devices(record["data_volumes"])
+
+
+            network_config, lost_nat = engine.prepare_nat_1_1_for_recreate(
+                client, record["network_config"], record["network_interface_model"],
+            )
             with engine.transitioning(record, persist_fn=lambda r: _save_one_record(name, r)) as record:
                 instance, _config = engine.create_and_boot_instance_with_retry(
                     client,
@@ -2632,7 +2663,7 @@ def _start_instance_locked(
                     reserved_ip=record["reserved_ip"],
                     captured_network={
                         "network_interface_model": record["network_interface_model"],
-                        "network_config": record["network_config"],
+                        "network_config": network_config,
                         "network_helper_enabled": record["network_helper_enabled"],
                     },
 
@@ -2663,6 +2694,13 @@ def _start_instance_locked(
 
         if on_progress is not None:
             on_progress(f"  instance: {instance.id}")
+        if lost_nat and on_warning is not None:
+            new_public = ", ".join(str(a) for a in (getattr(instance, "ipv4", None) or [])) or "a new address"
+            on_warning(
+                f"WARNING: '{name}''s VPC 1:1 NAT public address {', '.join(lost_nat)} wasn't "
+                f"reserved, so Linode released it when the instance was stopped; it now has "
+                f"{new_public}. Reserve the new address to keep it across stops and starts."
+            )
 
         try:
             engine.poll_until_status(
