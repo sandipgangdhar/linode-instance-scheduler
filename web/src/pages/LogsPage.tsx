@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, ApiError } from '../api/client'
 import type { LogsIndex } from '../api/types'
 import { SchedulerBanner, formatTime } from '../components/ActivityFeed'
@@ -25,9 +26,13 @@ function lineClass(line: string): string {
   if (upper.includes('WARNING')) return 'text-amber-300'
   return 'text-slate-200'
 }
+function logLabel(name: string): string {
+  return SERVICE_LABELS[name] ?? (name.startsWith('lish-') ? `Console session: ${name.slice(5)}` : name)
+}
 export function LogsPage() {
+  const [params] = useSearchParams()
   const [index, setIndex] = useState<LogsIndex | null>(null)
-  const [service, setService] = useState('scheduler')
+  const [service, setService] = useState(() => params.get('log') || 'scheduler')
   const [lines, setLines] = useState<string[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState(true)
@@ -101,6 +106,7 @@ export function LogsPage() {
   const services =
     index?.services ??
     Object.keys(SERVICE_LABELS).map((name) => ({ name, exists: false, size: 0, modified: null }))
+  const sessions = index?.console_sessions ?? []
   return (
     <div>
       <PageHeader
@@ -116,7 +122,7 @@ export function LogsPage() {
               onClick={() => setService(s.name)}
               className={`rounded-md px-3 py-1.5 text-sm font-medium ring-1 ring-inset ${service === s.name ? 'bg-indigo-600 text-white ring-indigo-600' : 'bg-white text-slate-700 ring-slate-300 hover:bg-slate-50'}`}
             >
-              {SERVICE_LABELS[s.name] ?? s.name}
+              {logLabel(s.name)}
               <span className={`ml-2 text-xs ${service === s.name ? 'text-indigo-100' : 'text-slate-400'}`}>
                 {s.exists ? bytes(s.size) : 'empty'}
               </span>
@@ -139,6 +145,32 @@ export function LogsPage() {
             Download
           </Button>
         </div>
+        {(sessions.length > 0 || service.startsWith('lish-')) && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+              Migration console sessions
+            </span>
+            {sessions.length === 0 && <span className="text-xs text-slate-500">none yet</span>}
+            {sessions.map((s) => (
+              <button
+                key={s.name}
+                onClick={() => setService(s.name)}
+                className={`rounded-md px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${service === s.name ? 'bg-indigo-600 text-white ring-indigo-600' : 'bg-white text-slate-700 ring-slate-300 hover:bg-slate-50'}`}
+              >
+                {s.instance}
+                <span className={`ml-1.5 ${service === s.name ? 'text-indigo-100' : 'text-slate-400'}`}>
+                  {bytes(s.size)}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+        {service.startsWith('lish-') && (
+          <p className="text-xs text-slate-500">
+            {logLabel(service)} — what the instance's Rescue Mode console showed while the tool ran the copy
+            (terminal codes removed).
+          </p>
+        )}
         {error && <ErrorBanner message={error} />}
         <div
           ref={boxRef}

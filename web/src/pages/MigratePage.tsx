@@ -74,6 +74,7 @@ export function MigratePage() {
   const [assisted, setAssisted] = useState<AssistedCopyReadiness | null>(null)
   const [assistedChecking, setAssistedChecking] = useState(false)
   const [assistedCopyDone, setAssistedCopyDone] = useState(false)
+  const [assistedRunning, setAssistedRunning] = useState(false)
   const [backupEstimate, setBackupEstimate] = useState<BackupEstimate | 'unavailable' | null>(null)
   const [copyState, setCopyState] = useState<{
     text: string
@@ -281,6 +282,7 @@ export function MigratePage() {
         }
       }
       let result: MigrateResumeResult
+      if (assisted) setAssistedRunning(true)
       if (assisted) {
         const copied = await statusBar.run(
           `Copying and finishing migration for "${name}"`,
@@ -350,7 +352,10 @@ export function MigratePage() {
       )
       setStep('manual')
     } finally {
-      if (requestedKey === currentKeyRef.current) setProgress(null)
+      if (requestedKey === currentKeyRef.current) {
+        setProgress(null)
+        setAssistedRunning(false)
+      }
     }
   }
   const finishOnboarding = async (migrateResumeNotes: string[] = []) => {
@@ -610,6 +615,24 @@ export function MigratePage() {
                   </div>
                 )}
 
+                {step === 'resuming' && assistedRunning && (
+                  <div className="rounded-md border border-indigo-200 bg-indigo-50 p-4 space-y-3 text-sm">
+                    <p className="font-medium text-slate-900">
+                      The tool is running the copy in the Rescue Mode console
+                    </p>
+                    <p className="text-slate-700">
+                      This takes a few minutes for a typical disk, longer for a large one. When it finishes,
+                      the migration completes and the instance is onboarded.
+                    </p>
+                    {progress && <ProgressBar percent={progress.percent} label={progress.label} />}
+                    <a
+                      className="text-indigo-700 underline"
+                      href={`#/logs?log=lish-${encodeURIComponent(name)}`}
+                    >
+                      Watch the console session
+                    </a>
+                  </div>
+                )}
                 {step === 'manual' && assistedCopyDone && (
                   <div className="rounded-md border border-emerald-300 bg-emerald-50 p-4 space-y-2 text-sm">
                     <p className="text-emerald-900">The copy already finished. Only the last step is left.</p>

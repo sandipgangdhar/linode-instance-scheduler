@@ -329,8 +329,12 @@ export interface LogService {
   size: number
   modified: string | null
 }
+export interface ConsoleSessionLog extends LogService {
+  instance: string
+}
 export interface LogsIndex {
   services: LogService[]
+  console_sessions?: ConsoleSessionLog[]
   database: {
     path: string
     size: number

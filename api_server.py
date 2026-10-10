@@ -6,6 +6,7 @@ import argparse
 import dataclasses
 import ipaddress
 import os
+import re
 import secrets
 import socket
 import sys
@@ -1917,10 +1918,29 @@ MAX_LOG_TAIL_LINES = 5000
 _MAX_LOG_CHUNK_BYTES = 1024 * 1024
 
 
+_CONSOLE_SESSION_RE = re.compile(r"lish-[a-z0-9][a-z0-9-]{0,63}")
+
+
 def _log_path(service: str) -> Path:
-    if service not in LOG_SERVICES:
-        raise HTTPException(404, f"no log named '{service}' (available: {', '.join(LOG_SERVICES)}).")
-    return im.service_log_dir() / f"{service}.log"
+
+    if service in LOG_SERVICES or _CONSOLE_SESSION_RE.fullmatch(service):
+        return im.service_log_dir() / f"{service}.log"
+    raise HTTPException(404, f"no log named '{service}' (available: {', '.join(LOG_SERVICES)}, "
+                             "or lish-<name> for a migration's console session).")
+
+
+def _console_sessions() -> list[dict]:
+
+    out = []
+    for path in im.service_log_dir().glob("lish-*.log"):
+        name = path.stem
+        if not _CONSOLE_SESSION_RE.fullmatch(name):
+            continue
+        st = path.stat()
+        out.append({"name": name, "instance": name[len("lish-"):], "exists": True,
+                    "size": st.st_size,
+                    "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat()})
+    return sorted(out, key=lambda e: e["modified"], reverse=True)
 
 
 @app.get("/logs")
@@ -1943,7 +1963,8 @@ def api_logs_index(user: str = Depends(require_session)) -> dict:
         "wal_size": wal.stat().st_size if wal.exists() else 0,
         "activity_retention_days": im.activity_retention_days(),
     }
-    return {"services": services, "database": database, "scheduler": _scheduler_status()}
+    return {"services": services, "console_sessions": _console_sessions(), "database": database,
+            "scheduler": _scheduler_status()}
 
 
 @app.get("/logs/{service}")

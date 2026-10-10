@@ -587,10 +587,12 @@ disks, or `dd` fails, nothing further happens: the migration keeps waiting for i
 run `migrate-copy` again, do the copy yourself, or roll back. If the copy finishes but
 `migrate-resume` fails, run `migrate-resume` again. `--no-resume` stops after the copy.
 
-The console session is recorded in `state/logs/lish-<name>.log`. In the dashboard, the migration's
-copy step shows **Run the copy for me** when a backup is kept and the key is registered, or the
-setup steps above (with the key to paste) when it isn't. After the copy it finishes the migration
-and onboards the instance, the same as the manual path.
+The console session is recorded in `state/logs/lish-<name>.log`, cleaned of terminal control codes
+and with each line timestamped (UTC), so `dd`'s progress reads as one line per update. In the
+dashboard, the migration's copy step shows **Run the copy for me** when a backup is kept and the
+key is registered, or the setup steps above (with the key to paste) when it isn't. While the copy
+runs, **Watch the console session** opens it on the Logs page, updating live. After the copy it
+finishes the migration and onboards the instance, the same as the manual path.
 
 ## 7. Onboarding
 
@@ -1489,7 +1491,9 @@ scheduler host:
   has the same feed for just that instance ("Activity log"). Entries are kept for 30 days
   (`ACTIVITY_LOG_RETENTION_DAYS` in `.env`).
 - **Logs** — the raw output of the scheduler (`poll`), the API/dashboard server and backups,
-  tailed live, plus the console's own log and the database file's size. Engine messages appear in
+  tailed live, plus the console's own log and the database file's size. Each assisted migration
+  copy's Rescue Mode console session is listed there too (**Migration console sessions**), one per
+  instance, readable as plain text and updating live while a copy runs. Engine messages appear in
   whichever service ran the operation. The same files are on disk under `state/logs/` (rotated at
   5 MB, three old files kept), so they work identically on a VM and on Kubernetes.
 - **Console** — runs this tool's own commands on the scheduler host with live output: `list`,

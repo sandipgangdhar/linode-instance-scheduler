@@ -2188,6 +2188,74 @@ def lish_key_status(client, public_key: str) -> dict:
     }
 
 
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()*+\-./][ -~]|(?![\[\]])[ -~])")
+CONSOLE_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+class CleanConsoleLog:
+
+
+    def __init__(self, path: str | Path, header: str):
+        self._pending = ""
+        self._at_line_start = True
+        self._f = None
+        try:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if p.exists() and p.stat().st_size > CONSOLE_LOG_MAX_BYTES:
+                p.replace(p.with_name(p.name + ".1"))
+            self._f = open(p, "a", encoding="utf-8")
+            self._emit(f"=== {header} ===\n")
+        except OSError:
+            self._f = None
+
+    def _emit(self, text: str) -> None:
+        if self._f is None:
+            return
+        out = []
+        parts = text.split("\n")
+        for i, part in enumerate(parts):
+            if part.strip():
+                if self._at_line_start:
+                    out.append(_datetime.now(_timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ "))
+                    self._at_line_start = False
+                out.append(part)
+            if i < len(parts) - 1 and not self._at_line_start:
+                out.append("\n")
+                self._at_line_start = True
+        try:
+            self._f.write("".join(out))
+            self._f.flush()
+        except OSError:
+            pass
+
+    def write(self, chunk: str) -> int:
+        data = self._pending + chunk
+        self._pending = ""
+        cut = data.rfind("\x1b")
+        if cut != -1 and len(data) - cut < 64 and not _ANSI_ESCAPE_RE.match(data, cut):
+            data, self._pending = data[:cut], data[cut:]
+        if data.endswith("\r"):
+            data, self._pending = data[:-1], "\r" + self._pending
+        data = _ANSI_ESCAPE_RE.sub("", data).replace("\r\n", "\n").replace("\r", "\n")
+        self._emit("".join(ch for ch in data if ch in "\n\t" or ch >= " "))
+        return len(chunk)
+
+    def flush(self) -> None:
+        if self._f is not None:
+            with suppress(OSError):
+                self._f.flush()
+
+    def close(self) -> None:
+        if self._f is not None:
+            if not self._at_line_start:
+                self._emit("\n")
+            with suppress(OSError):
+                self._f.close()
+            self._f = None
+
+
 def _lish_spawn(username: str, region: str, instance_label: str, ssh_key_path: str,
                 known_hosts_path: str | Path | None, log_path: str | Path | None = None):
     import pexpect
@@ -2205,7 +2273,8 @@ def _lish_spawn(username: str, region: str, instance_label: str, ssh_key_path: s
         env={**os.environ, "TERM": "xterm"}, dimensions=(40, 200),
     )
     if log_path is not None:
-        child.logfile_read = open(log_path, "a")
+        child.logfile_read = CleanConsoleLog(
+            log_path, f"Rescue Mode console of {instance_label} via {lish_gateway(region)}")
     return child
 
 
