@@ -2037,10 +2037,12 @@ def compute_migration_volume_size(disk_size_mb: int) -> int:
 
 
 def start_path_b_migration(
-    client: LinodeClient, instance, *, name: str, region: str | None = None, persist_fn=None
+    client: LinodeClient, instance, *, name: str, region: str | None = None, persist_fn=None,
+    allow_offline: bool = False,
 ) -> dict:
 
-    if instance.status != "running":
+
+    if instance.status != "running" and not (allow_offline and instance.status == "offline"):
         raise ConfigError(
             f"Instance {instance.id} is not running (status={instance.status!r}) -- "
             "must be running to read its current disk layout and run pre-flight checks."
@@ -3126,3 +3128,433 @@ def retry_transient_or_already_done(
         time.sleep(backoff_delay(attempt, delay_s, exc=last_exc))
 
 
+MIGRATION_BACKUP_TAG_PREFIX = "linode-scheduler-backup-of"
+_LEGACY_INTERFACE_WRITE_KEYS = ("purpose", "label", "ipam_address", "subnet_id", "ipv4", "primary",
+                                "ip_ranges")
+
+
+def migration_backup_tag(name: str) -> str:
+    return f"{MIGRATION_BACKUP_TAG_PREFIX}:{name}"
+
+
+def _is_public_ipv4(address: str) -> bool:
+    try:
+        return ipaddress.ip_address(address).is_global
+    except ValueError:
+        return False
+
+
+def _region_price(item: dict, region: str) -> float | None:
+    for rp in item.get("region_prices") or []:
+        if rp.get("id") == region and (rp.get("monthly") is not None):
+            return float(rp["monthly"])
+    monthly = (item.get("price") or {}).get("monthly")
+    return float(monthly) if monthly is not None else None
+
+
+def estimate_migration_backup_cost(client: LinodeClient, instance, volume_sizes_gb: list[int]) -> dict:
+
+    region = instance.region.id
+    plan = retry_transient(lambda: client.get(f"/linode/types/{instance.type.id}"))
+    instance_monthly = _region_price(plan, region)
+    if instance_monthly is None:
+        raise ConfigError(f"no monthly price published for plan {instance.type.id}")
+    volumes_monthly = 0.0
+    if volume_sizes_gb:
+        types = retry_transient(lambda: client.get("/volumes/types")).get("data") or []
+        per_gb = next((_region_price(t, region) for t in types if t.get("id") == "volume"), None)
+        if per_gb is None:
+            raise ConfigError("no Block Storage price published")
+        volumes_monthly = per_gb * sum(volume_sizes_gb)
+    return {"instance_monthly": round(instance_monthly, 2),
+            "volumes_monthly": round(volumes_monthly, 2),
+            "total_monthly": round(instance_monthly + volumes_monthly, 2),
+            "plan": instance.type.id, "region": region,
+            "volume_gb": sum(volume_sizes_gb)}
+
+
+def attached_volumes(config_devices: dict) -> list[dict]:
+
+    return [{"slot": slot, "volume_id": dev["volume_id"]}
+            for slot, dev in sorted((config_devices or {}).items())
+            if dev and dev.get("volume_id")]
+
+
+def _wait_for_instance_clone(client: LinodeClient, source_id: int, clone_id: int,
+                             timeout_s: int = 7200) -> None:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            source_status = client.load(Instance, source_id).status
+            clone_status = client.load(Instance, clone_id).status
+            disks = client.get(f"/linode/instances/{clone_id}/disks").get("data") or []
+            if (source_status != "cloning" and clone_status == "offline" and disks
+                    and all(d.get("status") == "ready" for d in disks)):
+                return
+        except (ApiError, requests.exceptions.RequestException) as e:
+            if isinstance(e, ApiError) and e.status not in (408, 429) and e.status < 500:
+                raise
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"cloning instance {source_id} into {clone_id} didn't finish in "
+                               f"{timeout_s // 60} minutes")
+        time.sleep(15)
+
+
+def _tag_resource(resource, tag: str) -> None:
+    tags = list(resource.tags or [])
+    if tag not in tags:
+        resource.tags = tags + [tag]
+        retry_transient(resource.save)
+
+
+def create_migration_backup(
+    client: LinodeClient, instance, *, name: str,
+    on_record: Callable[[dict], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict:
+
+    if instance.status != "offline":
+        raise ConfigError(f"instance {instance.id} must be powered off before it is cloned "
+                          f"(status={instance.status!r})")
+    configs_raw = retry_transient(lambda: client.get(f"/linode/instances/{instance.id}/configs"))
+    configs_raw = configs_raw.get("data") or []
+    if len(configs_raw) != 1:
+        raise ConfigError(f"instance {instance.id} has {len(configs_raw)} boot configs -- can't "
+                          "tell which one to keep in the backup")
+    config = configs_raw[0]
+    network = capture_network_config(instance, configs=list(instance.configs))
+    volumes = []
+    for entry in attached_volumes(config.get("devices") or {}):
+        vol = retry_transient(lambda vid=entry["volume_id"]: client.load(Volume, vid))
+        volumes.append({**entry, "label": vol.label, "size": vol.size})
+    firewall_ids: list[int] = []
+    if instance.interface_generation == INTERFACE_MODEL_LEGACY:
+        with suppress(ApiError, requests.exceptions.RequestException):
+            firewall_ids = [f.id for f in retry_transient(lambda: list(instance.firewalls()))]
+    record: dict = {
+        "version": 1,
+        "name": name,
+        "created_at": _datetime.now(_timezone.utc).isoformat(),
+        "original": {
+            "instance_id": instance.id,
+            "label": instance.label,
+            "region": instance.region.id,
+            "type": instance.type.id,
+            "tags": list(instance.tags or []),
+            "interface_generation": instance.interface_generation,
+            "public_ipv4": [a for a in (instance.ipv4 or []) if _is_public_ipv4(a)],
+            "config": config,
+            "network_config": network["network_config"],
+            "network_helper_enabled": network["network_helper_enabled"],
+            "firewall_ids": firewall_ids,
+            "volumes": volumes,
+        },
+        "backup": {"instance_id": None, "label": None, "volumes": [], "public_ipv4": []},
+    }
+    tag = migration_backup_tag(name)
+    label = truncated_random_label(f"{instance.label}-backup", max_len=64)
+    if on_progress is not None:
+        on_progress(f"Cloning instance {instance.id} into a powered-off backup '{label}' "
+                    "(Linode's native clone; this can take several minutes)...")
+
+    clone = client.post(f"/linode/instances/{instance.id}/clone",
+                        data={"region": instance.region.id, "type": instance.type.id,
+                              "label": label})
+    record["backup"]["instance_id"] = clone["id"]
+    record["backup"]["label"] = label
+    if on_record is not None:
+        on_record(record)
+
+
+    for vol in volumes:
+        vol_label = truncated_random_label(f"{vol['label']}-backup")
+        if on_progress is not None:
+            on_progress(f"Cloning volume {vol['volume_id']} ({vol['size']} GB, {vol['slot']})...")
+        cloned = None
+        for attempt in range(20):
+            try:
+                cloned = client.post(f"/volumes/{vol['volume_id']}/clone", data={"label": vol_label})
+                break
+            except ApiError as e:
+                if not is_linode_busy(e) or attempt == 19:
+                    raise
+                time.sleep(10)
+        assert cloned is not None
+        record["backup"]["volumes"].append({"slot": vol["slot"], "volume_id": cloned["id"],
+                                            "source_volume_id": vol["volume_id"],
+                                            "label": vol_label, "size": vol["size"]})
+        if on_record is not None:
+            on_record(record)
+    _wait_for_instance_clone(client, instance.id, clone["id"])
+    for vol in record["backup"]["volumes"]:
+        poll_until_status(lambda vid=vol["volume_id"]: client.load(Volume, vid), ("active",),
+                          timeout_s=7200)
+    backup_id = clone["id"]
+    backup_configs = retry_transient(lambda: client.get(f"/linode/instances/{backup_id}/configs"))
+    backup_config = (backup_configs.get("data") or [])[0]
+    devices = {slot: dev for slot, dev in (backup_config.get("devices") or {}).items() if dev}
+    for vol in record["backup"]["volumes"]:
+        devices[vol["slot"]] = {"volume_id": vol["volume_id"]}
+    update: dict = {"devices": devices}
+    if instance.interface_generation == INTERFACE_MODEL_LEGACY:
+        update["interfaces"] = [{"purpose": "public"}]
+    retry_transient(lambda: client.put(
+        f"/linode/instances/{backup_id}/configs/{backup_config['id']}", data=update))
+    if instance.interface_generation != INTERFACE_MODEL_LEGACY:
+        listing = retry_transient(lambda: client.get(f"/linode/instances/{backup_id}/interfaces"))
+        for iface in listing.get("interfaces", listing.get("data")) or []:
+            if iface.get("vpc") or iface.get("vlan"):
+                retry_transient(lambda i=iface: client.delete(
+                    f"/linode/instances/{backup_id}/interfaces/{i['id']}"))
+    backup = client.load(Instance, backup_id)
+    _tag_resource(backup, tag)
+    for vol in record["backup"]["volumes"]:
+        _tag_resource(client.load(Volume, vol["volume_id"]), tag)
+    record["backup"]["public_ipv4"] = [a for a in (backup.ipv4 or []) if _is_public_ipv4(a)]
+    if on_record is not None:
+        on_record(record)
+    return record
+
+
+def _legacy_interface_body(iface: dict) -> dict:
+    out = {}
+    for key in _LEGACY_INTERFACE_WRITE_KEYS:
+        value = iface.get(key)
+        if value is None or value == []:
+            continue
+        if key == "ipv4" and isinstance(value, dict):
+            value = {k: v for k, v in value.items() if v is not None}
+            if not value:
+                continue
+        out[key] = value
+    return out
+
+
+def _reserve_address(client: LinodeClient, address: str) -> None:
+
+    try:
+        retry_transient(lambda: client.get(f"/networking/reserved/ips/{address}"))
+        return
+    except ApiError as e:
+        if e.status != 404:
+            raise
+    ip = retry_transient(lambda: client.load(IPAddress, address))
+    ip.reserved = True
+    retry_transient(ip.save)
+
+
+def _move_reserved_ip_to_legacy_instance(client: LinodeClient, address: str, target_id: int,
+                                         region: str) -> None:
+
+    target_own = [a for a in (client.load(Instance, target_id).ipv4 or []) if _is_public_ipv4(a)]
+    if address in target_own:
+        return
+    helper = client.linode.instance_create(
+        "g6-nanode-1", region, label=truncated_random_label("lis-ip-swap", max_len=64),
+        ipv4=[address], booted=False, tags=["linode-scheduler-temporary"])
+    try:
+        poll_until_status(lambda: client.load(Instance, helper.id), ("offline",), timeout_s=600)
+        retry_transient(lambda: client.post("/networking/ips/assign", data={
+            "region": region, "assignments": [{"address": address, "linode_id": target_id},
+                                              {"address": target_own[0], "linode_id": helper.id}]}))
+    finally:
+        retry_transient_or_already_done(
+            lambda: client.load(Instance, helper.id).delete(),
+            already_done=lambda: _resource_confirmed_gone(client, helper))
+
+
+def _set_linode_interface_public_address(client: LinodeClient, instance_id: int,
+                                         address: str) -> None:
+
+    listing = retry_transient(lambda: client.get(f"/linode/instances/{instance_id}/interfaces"))
+    public = next((i for i in listing.get("interfaces", listing.get("data")) or [] if i.get("public")),
+                  None)
+    if public is None:
+        raise ConfigError(f"instance {instance_id} has no public interface to give {address}")
+    retry_transient(lambda: client.put(
+        f"/linode/instances/{instance_id}/interfaces/{public['id']}",
+        data={"public": {"ipv4": {"addresses": [{"address": address, "primary": True}]}}}))
+
+
+def restore_migration_backup(
+    client: LinodeClient, record: dict, *, boot: bool = True,
+    on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> dict:
+
+    orig = record["original"]
+    backup_id = record["backup"]["instance_id"]
+    model = orig["interface_generation"]
+    region = orig["region"]
+
+    def _say(msg: str) -> None:
+        if on_progress is not None:
+            on_progress(msg)
+
+    original = None
+    try:
+        original = retry_transient(lambda: client.load(Instance, orig["instance_id"]))
+        _ = original.status
+    except ApiError as e:
+        if e.status != 404:
+            raise
+        original = None
+    wanted = [a for a in orig.get("public_ipv4") or [] if _is_public_ipv4(a)]
+    has_public_iface = any(
+        (i.get("purpose") == "public") if model == INTERFACE_MODEL_LEGACY else bool(i.get("public"))
+        for i in orig.get("network_config") or []) or not orig.get("network_config")
+    move = wanted[:1] if has_public_iface else []
+
+    backup = retry_transient(lambda: client.load(Instance, backup_id))
+    if backup.status not in ("offline", "running"):
+        poll_until_status(lambda: client.load(Instance, backup_id), ("offline", "running"),
+                          timeout_s=1800)
+    if client.load(Instance, backup_id).status == "running":
+        _say(f"Powering off the backup {backup_id} before restoring its settings...")
+        retry_transient_or_already_done(
+            client.load(Instance, backup_id).shutdown,
+            already_done=lambda: client.load(Instance, backup_id).status == "offline")
+        poll_until_status(lambda: client.load(Instance, backup_id), ("offline",), timeout_s=900)
+
+    if original is not None:
+        for address in move:
+            _say(f"Reserving {address} so it is kept when the original instance is removed...")
+            _reserve_address(client, address)
+        _say(f"Removing the original instance {original.id} (its volumes are detached and kept; "
+             "the backup holds its system)...")
+        raw = retry_transient(lambda: client.get(f"/linode/instances/{original.id}/configs"))
+        volume_ids = [d["volume_id"] for c in raw.get("data") or []
+                      for d in attached_volumes(c.get("devices") or {})]
+        volumes = [retry_transient(lambda v=v: client.load(Volume, v)) for v in volume_ids]
+        delete_instance_and_detach_volumes(client, original, volumes)
+
+    for address in move:
+        _say(f"Moving public address {address} to the backup...")
+        if model == INTERFACE_MODEL_LEGACY:
+            _move_reserved_ip_to_legacy_instance(client, address, backup_id, region)
+        else:
+            _set_linode_interface_public_address(client, backup_id, address)
+
+    _say("Restoring the original network interfaces on the backup...")
+    if model == INTERFACE_MODEL_LEGACY:
+        cfgs = retry_transient(lambda: client.get(f"/linode/instances/{backup_id}/configs"))
+        cfg = (cfgs.get("data") or [])[0]
+        body = [_legacy_interface_body(i) for i in orig.get("network_config") or []]
+        retry_transient(lambda: client.put(
+            f"/linode/instances/{backup_id}/configs/{cfg['id']}", data={"interfaces": body}))
+    else:
+        for iface in orig.get("network_config") or []:
+            if iface.get("vpc") or iface.get("vlan"):
+                iface_body = _rebuild_linode_interface(iface)
+                iface_body.pop("public", None)
+                retry_transient(lambda b=iface_body: client.post(
+                    f"/linode/instances/{backup_id}/interfaces", data=b))
+        if not has_public_iface:
+            listing = retry_transient(lambda: client.get(f"/linode/instances/{backup_id}/interfaces"))
+            for iface in listing.get("interfaces", listing.get("data")) or []:
+                if iface.get("public"):
+                    retry_transient(lambda i=iface: client.delete(
+                        f"/linode/instances/{backup_id}/interfaces/{i['id']}"))
+
+
+    original_labels = {v["slot"]: v.get("label") for v in orig.get("volumes") or []}
+    for vol in record["backup"].get("volumes") or []:
+        wanted_label = original_labels.get(vol["slot"])
+        if not wanted_label:
+            continue
+        try:
+            clone_vol = retry_transient(lambda v=vol["volume_id"]: client.load(Volume, v))
+            if clone_vol.label == wanted_label:
+                continue
+            try:
+                source = retry_transient(lambda v=vol["source_volume_id"]: client.load(Volume, v))
+                if source.label == wanted_label:
+                    source.label = truncated_random_label(f"{wanted_label}-replaced")
+                    retry_transient(source.save)
+                    _say(f"Renamed the source volume {source.id} to '{source.label}' (kept).")
+            except ApiError as e:
+                if e.status != 404:
+                    raise
+            clone_vol.label = wanted_label
+            retry_transient(clone_vol.save)
+        except (ApiError, requests.exceptions.RequestException) as e:
+            if on_warning is not None:
+                on_warning(f"WARNING: could not give cloned volume {vol['volume_id']} the original "
+                           f"label '{wanted_label}' ({e}); if /etc/fstab mounts it by label, rename "
+                           "it in Cloud Manager.")
+
+    label = record["backup"].get("label")
+    if orig.get("label"):
+        try:
+            renamed = client.load(Instance, backup_id)
+            renamed.label = orig["label"]
+            retry_transient(renamed.save)
+            label = orig["label"]
+        except (ApiError, requests.exceptions.RequestException) as e:
+            if on_warning is not None:
+                on_warning(f"WARNING: could not rename the backup to '{orig['label']}' ({e}); it "
+                           f"keeps the label '{label}'.")
+    if boot:
+        _say(f"Booting the restored instance {backup_id}...")
+        retry_transient_or_already_done(
+            client.load(Instance, backup_id).boot,
+            already_done=lambda: client.load(Instance, backup_id).status in ("booting", "running"))
+        poll_until_status(lambda: client.load(Instance, backup_id), ("running",), timeout_s=900)
+    final = client.load(Instance, backup_id)
+    return {"original_deleted": original is not None, "label": label,
+            "public_ipv4": [a for a in (final.ipv4 or []) if _is_public_ipv4(a)]}
+
+
+def delete_migration_backup_resources(
+    client: LinodeClient, record: dict, name: str, *,
+    on_progress: Callable[[str], None] | None = None,
+) -> list[str]:
+
+    tag = migration_backup_tag(name)
+    problems: list[str] = []
+    backup_id = record.get("backup", {}).get("instance_id")
+    if backup_id:
+        try:
+            inst = retry_transient(lambda: client.load(Instance, backup_id))
+            if tag not in (inst.tags or []):
+                problems.append(f"instance {backup_id} no longer carries {tag!r}; not deleted")
+            else:
+                if on_progress is not None:
+                    on_progress(f"Deleting backup instance {backup_id}...")
+                retry_transient_or_already_done(
+                    inst.delete, already_done=lambda: _resource_confirmed_gone(client, inst))
+                deadline = time.monotonic() + 900
+                while not _resource_confirmed_gone(client, inst):
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f"backup instance {backup_id} still exists")
+                    time.sleep(10)
+        except ApiError as e:
+            if e.status != 404:
+                problems.append(f"instance {backup_id}: {e}")
+    for vol in record.get("backup", {}).get("volumes") or []:
+        vid = vol["volume_id"]
+        try:
+            v = retry_transient(lambda vid=vid: client.load(Volume, vid))
+            if tag not in (v.tags or []):
+                problems.append(f"volume {vid} no longer carries {tag!r}; not deleted")
+                continue
+            if v.linode_id:
+                poll_until_status(lambda vid=vid: client.load(Volume, vid), ("active",),
+                                  timeout_s=600)
+            if on_progress is not None:
+                on_progress(f"Deleting backup volume {vid}...")
+            deadline = time.monotonic() + 600
+            while True:
+                try:
+                    retry_transient(client.load(Volume, vid).delete)
+                    break
+                except ApiError as e:
+                    if e.status == 404:
+                        break
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(15)
+        except ApiError as e:
+            if e.status != 404:
+                problems.append(f"volume {vid}: {e}")
+    return problems

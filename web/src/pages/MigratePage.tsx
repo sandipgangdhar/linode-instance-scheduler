@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, ApiError, errorWarnings } from '../api/client'
+import type { BackupEstimate } from '../api/types'
 import {
   Button,
   Card,
@@ -69,6 +70,8 @@ export function MigratePage() {
   const [selectedDest, setSelectedDest] = useState('')
   const [ddOutput, setDdOutput] = useState('')
   const [confirmName, setConfirmName] = useState('')
+  const [keepBackup, setKeepBackup] = useState(false)
+  const [backupEstimate, setBackupEstimate] = useState<BackupEstimate | 'unavailable' | null>(null)
   const [copyState, setCopyState] = useState<{
     text: string
     status: 'copied' | 'failed'
@@ -131,6 +134,8 @@ export function MigratePage() {
     setSelectedDest('')
     setDdOutput('')
     setConfirmName('')
+    setKeepBackup(false)
+    setBackupEstimate(null)
     setOnboardError(null)
     setOnboardErrorWarnings(null)
     setMigrateWarnings([])
@@ -213,6 +218,7 @@ export function MigratePage() {
               if (requestedKey === currentKeyRef.current) setMigrateWarnings(warnings)
             },
             restart !== null,
+            keepBackup,
           ),
         { onNavigate: returnToThisMigration, viewPath: migrationPath, key: migrationKey, phase: 'start' },
       )
@@ -474,6 +480,42 @@ export function MigratePage() {
                   </div>
                 )}
                 {ssh.node}
+
+                <div className="rounded-md bg-slate-50 px-3 py-3 text-sm text-slate-700 ring-1 ring-inset ring-slate-200">
+                  <label className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={keepBackup}
+                      onChange={(e) => {
+                        const on = e.target.checked
+                        setKeepBackup(on)
+                        if (on && backupEstimate === null && instanceId !== null) {
+                          api.getBackupEstimate(instanceId).then(
+                            (est) => setBackupEstimate(est),
+                            () => setBackupEstimate('unavailable'),
+                          )
+                        }
+                      }}
+                    />
+                    <span>
+                      <strong>Keep a backup of the original first</strong> (recommended). The instance is
+                      powered off and Linode clones it and its attached volumes. The clone stays powered off,
+                      and <em>Backups → Roll back</em> puts the original system back if anything goes wrong.
+                    </span>
+                  </label>
+                  {keepBackup && (
+                    <p className="mt-2 text-xs text-amber-800">
+                      This creates billable resources until you delete the backup
+                      {backupEstimate && backupEstimate !== 'unavailable'
+                        ? ` — about $${backupEstimate.total_monthly.toFixed(2)}/month at Linode's current prices ` +
+                          `($${backupEstimate.instance_monthly.toFixed(2)} for the powered-off ${backupEstimate.plan} clone, ` +
+                          `$${backupEstimate.volumes_monthly.toFixed(2)} for ${backupEstimate.volume_gb} GB of cloned volumes)`
+                        : ' (a powered-off Linode still bills at its plan price, cloned volumes as Block Storage)'}
+                      . Cloning adds a few minutes before the copy step.
+                    </p>
+                  )}
+                </div>
 
                 <TypeToConfirmInput
                   expected={name}

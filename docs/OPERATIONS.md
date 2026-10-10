@@ -252,17 +252,18 @@ table of edge cases.
    shown for it.
 2. **Object Storage → Access Keys → Create Access Key.** Scope it to just this one bucket, not
    account-wide, if given the option.
-3. Set all four variables in `.env`:
+3. Save the settings with `backup-config` (or the dashboard's **System backup** page). It writes a
+   small test object, reads it back and deletes it, and only saves the settings (to `.env`, mode
+   600) if that works; it prompts for the keys so they never appear in your shell history:
    ```bash
-   LINODE_OBJ_STORAGE_BUCKET=your-bucket-name
-   LINODE_OBJ_STORAGE_ENDPOINT=https://your-bucket-name.your-region.linodeobjects.com
-   LINODE_OBJ_STORAGE_ACCESS_KEY=...
-   LINODE_OBJ_STORAGE_SECRET_KEY=...
+   python instance_manager.py backup-config --bucket your-bucket-name \
+       --endpoint https://your-region.linodeobjects.com
    ```
-4. Restart both services so they pick up the new configuration:
-   ```bash
-   systemctl restart instance-scheduler-poll instance-scheduler-api
-   ```
+   The running scheduler and API pick the settings up within seconds -- no restart needed. (Setting
+   the four `LINODE_OBJ_STORAGE_BUCKET`/`_ENDPOINT`/`_ACCESS_KEY`/`_SECRET_KEY` lines in `.env` by
+   hand also works.)
+4. Check it any time: `python instance_manager.py backup-config` shows whether Object Storage is
+   configured and how the last backup went; `--test` re-runs the write/read/delete test.
 
 No backfill step is needed — the very next stop or onboard for each instance starts backing it up
 from that point on. An instance that isn't touched again after this is configured won't have an
@@ -396,6 +397,22 @@ leave its destination volume behind, still billing, with no instance ever using 
 python instance_manager.py migrate-orphans              # list every orphaned migration volume found
 python instance_manager.py migrate-orphans --cleanup     # permanently delete them, after re-verifying each one is genuinely orphaned
 ```
+
+### Rolling back a migration
+
+A migration started with `migrate-start --backup` keeps a powered-off clone of the original
+instance and its volumes. To put the original back:
+
+```bash
+python instance_manager.py backup-list                   # what's kept, since when
+python instance_manager.py stop --name web-1             # only if it's onboarded and running
+python instance_manager.py rollback --name web-1         # original addresses, label and volumes back
+python instance_manager.py backup-delete --name web-1    # once you're sure; it bills until then
+```
+
+`rollback` refuses while the node is running as a managed instance, or when an original VPC
+address has since been taken by another instance. Its migrated volumes are kept; delete them when
+no longer needed.
 
 ## Security operations
 

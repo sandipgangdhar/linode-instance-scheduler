@@ -1,5 +1,10 @@
 import type {
+  BackupDeleteResult,
+  BackupEstimate,
   DeregisterResult,
+  MigrationBackup,
+  RollbackResult,
+  SystemBackupStatus,
   HookConfig,
   HookEvent,
   HookRunResult,
@@ -211,6 +216,7 @@ export const api = {
     onProgress?: (percent: number, currentStep: string | null) => void,
     onWarning?: (warnings: string[]) => void,
     force = false,
+    backup = false,
   ) => {
     const kickoff = await request<{
       operation_id: string
@@ -219,6 +225,7 @@ export const api = {
       ssh_private_key: creds?.ssh_private_key ?? null,
       ssh_password: creds?.ssh_password ?? null,
       force,
+      backup,
     })
     return pollOperation<MigrateStartResult>(kickoff.operation_id, onProgress, onWarning)
   },
@@ -233,6 +240,49 @@ export const api = {
       operation_id: string
     }>('POST', `/instances/${encodeURIComponent(name)}/migrate-resume`)
     return pollOperation<MigrateResumeResult>(kickoff.operation_id, onProgress, onWarning)
+  },
+  getBackupEstimate: (instanceId: number) =>
+    request<BackupEstimate>('GET', `/linode/instances/${instanceId}/backup-estimate`),
+  listBackups: () => request<MigrationBackup[]>('GET', '/backups'),
+  rollbackBackup: async (
+    name: string,
+    boot: boolean,
+    onProgress?: (percent: number, currentStep: string | null) => void,
+    onWarning?: (warnings: string[]) => void,
+  ) => {
+    const kickoff = await request<{
+      operation_id: string
+    }>('POST', `/backups/${encodeURIComponent(name)}/rollback`, { boot })
+    return pollOperation<RollbackResult>(kickoff.operation_id, onProgress, onWarning)
+  },
+  deleteBackup: async (name: string, onProgress?: (percent: number, currentStep: string | null) => void) => {
+    const kickoff = await request<{
+      operation_id: string
+    }>('DELETE', `/backups/${encodeURIComponent(name)}`)
+    return pollOperation<BackupDeleteResult>(kickoff.operation_id, onProgress)
+  },
+  getSystemBackup: () => request<SystemBackupStatus>('GET', '/system/backup'),
+  configureSystemBackup: (body: {
+    bucket: string
+    endpoint: string
+    access_key: string
+    secret_key: string
+  }) => request<SystemBackupStatus>('PUT', '/system/backup/config', body),
+  disableSystemBackup: () => request<SystemBackupStatus>('DELETE', '/system/backup/config'),
+  testSystemBackup: () =>
+    request<{
+      ok: boolean
+    }>('POST', '/system/backup/test'),
+  runSystemBackup: async (onProgress?: (percent: number, currentStep: string | null) => void) => {
+    const kickoff = await request<{
+      operation_id: string
+    }>('POST', '/system/backup/run')
+    return pollOperation<{
+      ok: boolean
+      problems: string[]
+      object_storage_key: string | null
+      local_path: string | null
+    }>(kickoff.operation_id, onProgress)
   },
   extendOverride: (name: string, hours?: number) =>
     request<{

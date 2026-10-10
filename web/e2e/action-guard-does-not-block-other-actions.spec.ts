@@ -32,7 +32,7 @@ test('clicking Extend then Clear schedule in quick succession fires both real re
     await route.fulfill({ json: { cleared: true, warnings: [] } })
   })
   await page.goto('/ui/#/instances/redis-1')
-  await page.getByRole('button', { name: 'Extend override' }).click()
+  await page.getByRole('button', { name: 'Extend', exact: true }).click()
   await page.getByRole('button', { name: 'Clear' }).click()
   await page.waitForTimeout(1000)
   expect(extendCallCount).toBe(1)

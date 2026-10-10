@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
+from linode_api4 import Instance, Volume
 from linode_api4.errors import ApiError
 from pydantic import BaseModel
 
@@ -227,6 +228,11 @@ _ROUTE_SCOPES: dict[tuple[str, str], str | None] = {
     ("POST", "/instances/{name}/migrate-start"): "instances:migrate",
     ("POST", "/instances/{name}/migrate-resume"): "instances:migrate",
     ("GET", "/instances/{name}/migrate-status"): "instances:migrate",
+    ("GET", "/linode/instances/{instance_id}/backup-estimate"): "instances:migrate",
+    ("GET", "/backups"): "instances:migrate",
+    ("GET", "/backups/{name}"): "instances:migrate",
+    ("POST", "/backups/{name}/rollback"): "instances:migrate",
+    ("DELETE", "/backups/{name}"): "instances:migrate",
     ("POST", "/instances/{name}/offboard"): "instances:offboard",
     ("POST", "/instances/{name}/deregister"): "instances:offboard",
     ("POST", "/instances/{name}/vpc-address"): "instances:vpc-address",
@@ -721,6 +727,9 @@ class MigrateStartRequest(BaseModel):
     force: bool = False
 
 
+    backup: bool = False
+
+
 class GroupCreateRequest(BaseModel):
     name: str
     timezone: str
@@ -1092,7 +1101,8 @@ def api_migrate_start(
     )
 
 
-    total_steps = _TOTAL_STEPS["migrate_start"] + (1 if install_public_key is not None else 0)
+    total_steps = (_TOTAL_STEPS["migrate_start"] + (1 if install_public_key is not None else 0)
+                   + (5 if body.backup else 0))
     op_id = _start_operation("migrate_start", total_steps=total_steps)
 
     def _do() -> im.MigrateStartResult:
@@ -1100,7 +1110,7 @@ def api_migrate_start(
             return im.migrate_start_instance(
                 client, name, body.instance_id, ssh_key,
                 ssh_password=ssh_password, install_public_key=install_public_key,
-                force=body.force,
+                force=body.force, backup=body.backup,
                 on_progress=_make_progress_and_warning_reporter(op_id),
                 on_warning=_make_warning_reporter(op_id),
             )
@@ -1111,6 +1121,140 @@ def api_migrate_start(
 
     threading.Thread(target=_run_job, args=(op_id, _do), daemon=True).start()
     return {"operation_id": op_id, "total_steps": total_steps}
+
+
+@app.get("/linode/instances/{instance_id}/backup-estimate")
+def api_backup_estimate(
+    instance_id: int, request: Request, user: str = Depends(require_session),
+) -> dict:
+
+    client = _client(request)
+    try:
+        instance = engine.retry_transient(lambda: client.load(Instance, instance_id))
+        _ = instance.status
+    except ApiError as e:
+        if e.status == 404:
+            raise HTTPException(404, f"instance {instance_id} not found.") from e
+        raise
+    configs = engine.retry_transient(
+        lambda: client.get(f"/linode/instances/{instance_id}/configs")).get("data") or []
+    devices = (configs[0].get("devices") if len(configs) == 1 else None) or {}
+    sizes = [engine.retry_transient(lambda v=e["volume_id"]: client.load(Volume, v)).size
+             for e in engine.attached_volumes(devices)]
+    return engine.estimate_migration_backup_cost(client, instance, sizes)
+
+
+@app.get("/backups")
+def api_list_backups(user: str = Depends(require_session)) -> list:
+    return [im.migration_backup_summary(e) for e in im.list_migration_backups()]
+
+
+@app.get("/backups/{name}")
+def api_get_backup(name: str, user: str = Depends(require_session)) -> dict:
+    entry = im.get_migration_backup(name)
+    if entry is None:
+        raise HTTPException(404, f"no pre-migration backup is recorded for '{name}'.")
+    return im.migration_backup_summary(entry)
+
+
+class RollbackRequest(BaseModel):
+    boot: bool = True
+
+
+@app.post("/backups/{name}/rollback")
+def api_rollback(
+    name: str, body: RollbackRequest, request: Request, wait: bool = False,
+    user: str = Depends(require_session),
+) -> JSONResponse:
+
+    if im.get_migration_backup(name) is None:
+        raise HTTPException(404, f"no pre-migration backup is recorded for '{name}'.")
+    client, ssh_key = _client(request), _ssh_key(request)
+
+    def _do(op_id: str) -> im.RollbackResult:
+        return im.rollback_to_backup(
+            client, name, ssh_key, boot=body.boot,
+            on_progress=_make_progress_reporter(op_id), on_warning=_make_warning_reporter(op_id),
+        )
+
+    return _kickoff("rollback", 8, _do, wait, actor=user)
+
+
+@app.delete("/backups/{name}")
+def api_delete_backup(
+    name: str, request: Request, wait: bool = False, user: str = Depends(require_session),
+) -> JSONResponse:
+
+    if im.get_migration_backup(name) is None:
+        raise HTTPException(404, f"no pre-migration backup is recorded for '{name}'.")
+    client = _client(request)
+
+    def _do(op_id: str) -> im.BackupDeleteResult:
+        return im.delete_migration_backup(
+            client, name, on_progress=_make_progress_reporter(op_id),
+            on_warning=_make_warning_reporter(op_id),
+        )
+
+    return _kickoff("backup_delete", 4, _do, wait, actor=user)
+
+
+class SystemBackupConfigRequest(BaseModel):
+    bucket: str
+    endpoint: str
+    access_key: str
+    secret_key: str
+
+
+@app.get("/system/backup")
+def api_system_backup_status(user: str = Depends(require_session)) -> dict:
+
+    im.reload_object_storage_settings_if_changed()
+    return im.get_system_backup_status()
+
+
+@app.put("/system/backup/config")
+def api_system_backup_configure(
+    body: SystemBackupConfigRequest, user: str = Depends(require_session),
+) -> dict:
+
+    im.configure_system_backup(body.bucket, body.endpoint, body.access_key, body.secret_key)
+    im.record_activity(f"System backup Object Storage settings changed (bucket {body.bucket}).",
+                       source="api", actor=user, action="backup-config")
+    return im.get_system_backup_status()
+
+
+@app.delete("/system/backup/config")
+def api_system_backup_disable(user: str = Depends(require_session)) -> dict:
+    im.disable_system_backup_object_storage()
+    im.record_activity("System backup Object Storage settings removed.", source="api", actor=user,
+                       action="backup-config")
+    return im.get_system_backup_status()
+
+
+@app.post("/system/backup/test")
+def api_system_backup_test(user: str = Depends(require_session)) -> dict:
+    im.reload_object_storage_settings_if_changed()
+    im.test_system_backup_settings()
+    return {"ok": True}
+
+
+@app.post("/system/backup/run")
+def api_system_backup_run(wait: bool = False, user: str = Depends(require_session)) -> JSONResponse:
+
+    im.reload_object_storage_settings_if_changed()
+    local_dir = im.default_backup_dir()
+    if not im.osb.is_configured() and local_dir is None:
+        raise engine.ConfigError("nothing to back up to -- configure Object Storage first.")
+
+    def _do(op_id: str) -> dict:
+        result = im.backup_full_system(
+            local_dir=local_dir, trigger="api", on_progress=_make_progress_reporter(op_id),
+            on_warning=_make_warning_reporter(op_id))
+        return {"ok": result.ok, "problems": im._backup_problems(result),
+                "object_storage_key": result.object_storage_snapshot_key,
+                "local_path": result.local_snapshot_path}
+
+    return _kickoff("system_backup", 6, _do, wait, actor=user)
 
 
 @app.get("/instances/{name}/migrate-status")
@@ -1581,6 +1725,8 @@ def api_group_savings(
 
 def _asdict(result) -> dict:
 
+    if isinstance(result, dict):
+        return result
     data = dataclasses.asdict(result)
     if isinstance(result, im.GroupActionResult):
         data["ok"] = result.ok
@@ -1725,6 +1871,7 @@ CONSOLE_COMMANDS = (
     "group-delete", "group-add", "group-remove", "api-token-list", "api-token-scopes",
     "api-token-revoke",
     "clear-lock", "set-vpc-address", "reset-host-key", "rebuild", "backup",
+    "backup-list", "rollback", "backup-delete",
 )
 CONSOLE_MAX_RUNTIME_S = 3 * 3600
 CONSOLE_MAX_LINES = 20000

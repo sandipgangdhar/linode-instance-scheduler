@@ -149,3 +149,21 @@ CREATE TABLE IF NOT EXISTS scheduler_heartbeat (
     fired INTEGER NOT NULL,
     failed INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS migration_backups (
+    name TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    record TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS system_backup_status (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    finished_at TIMESTAMP NOT NULL,
+    ok INTEGER NOT NULL,
+    trigger TEXT,
+    object_storage_key TEXT,
+    local_path TEXT,
+    problems TEXT
+);

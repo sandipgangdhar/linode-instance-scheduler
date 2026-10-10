@@ -41,6 +41,7 @@ export function InstanceDetailPage() {
   const { name = '' } = useParams()
   const navigate = useNavigate()
   const statusBar = useStatusBar()
+  const [extendHours, setExtendHours] = useState(2)
   const [record, setRecord] = useState<InstanceRecord | null>(null)
   const [schedule, setSchedule] = useState<Schedule | null>(null)
   const [savings, setSavings] = useState<Savings | null>(null)
@@ -255,6 +256,16 @@ export function InstanceDetailPage() {
   }
   const currentGroup = groups.find((g) => g.id === record.group_id)
   const hasActiveIndividualSchedule = schedule !== null && schedule.enabled
+  const followsActiveSchedule =
+    record.schedule_mode !== 'manual' &&
+    (hasActiveIndividualSchedule ||
+      (!schedule?.enabled &&
+        currentGroup !== undefined &&
+        currentGroup.enabled !== false &&
+        currentGroup.rules.length > 0))
+  const canExtend =
+    record.current_status === 'running' &&
+    (record.manual_override_expires_at !== null || followsActiveSchedule)
   const removeFromGroup = (copy: boolean) => {
     setPendingGroupRemoval(false)
     run('remove from group', async (_onProgress, onWarning) => {
@@ -322,7 +333,7 @@ export function InstanceDetailPage() {
             )}
             {record.manual_override_expires_at && (
               <div className="mx-5 mb-4 rounded-md bg-indigo-50 px-4 py-3 text-sm text-indigo-800 ring-1 ring-inset ring-indigo-200">
-                Manually started outside its scheduled hours — auto-stops at{' '}
+                Running past its scheduled hours — stops at{' '}
                 <strong>{new Date(record.manual_override_expires_at).toLocaleString()}</strong> unless
                 extended.
               </div>
@@ -400,14 +411,38 @@ export function InstanceDetailPage() {
                   </div>
                 </div>
               )}
-              {record.manual_override_expires_at && (
-                <Button
-                  variant="secondary"
-                  disabled={busy !== null}
-                  onClick={() => run('extend', () => api.extendOverride(name))}
-                >
-                  {busy === 'extend' ? 'Extending…' : 'Extend override'}
-                </Button>
+              {canExtend && (
+                <div className="flex items-center gap-2">
+                  <select
+                    aria-label="Extend by hours"
+                    className="rounded-md border-0 py-1.5 pl-2 pr-7 text-sm text-slate-900 ring-1 ring-inset ring-slate-300"
+                    value={extendHours}
+                    onChange={(e) => setExtendHours(Number(e.target.value))}
+                    disabled={busy !== null}
+                  >
+                    {[1, 2, 3, 4, 6, 8, 12].map((h) => (
+                      <option key={h} value={h}>
+                        {h} h
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    variant="secondary"
+                    disabled={busy !== null}
+                    title={
+                      record.manual_override_expires_at
+                        ? 'Push the auto-stop out by this many hours from now'
+                        : "Skip today's scheduled stop and keep it running this many hours past it"
+                    }
+                    onClick={() => run('extend', () => api.extendOverride(name, extendHours))}
+                  >
+                    {busy === 'extend'
+                      ? 'Extending…'
+                      : record.manual_override_expires_at
+                        ? 'Extend'
+                        : 'Keep running past today’s stop'}
+                  </Button>
+                </div>
               )}
             </div>
           </Card>

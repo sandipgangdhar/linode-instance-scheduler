@@ -4,6 +4,7 @@ import { Navigate, Route, HashRouter as Router, Routes } from 'react-router-dom'
 import { cancelBackgroundPolling, resetBackgroundPollingCancellation } from './api/client'
 import { AuthProvider, useAuth } from './auth/AuthContext'
 import { ActivityPage } from './pages/ActivityPage'
+import { BackupsPage } from './pages/BackupsPage'
 import { ConsolePage } from './pages/ConsolePage'
 import { DashboardLayout } from './pages/DashboardLayout'
 import { GroupDetailPage } from './pages/GroupDetailPage'
@@ -14,6 +15,7 @@ import { LoginPage } from './pages/LoginPage'
 import { LogsPage } from './pages/LogsPage'
 import { MigratePage } from './pages/MigratePage'
 import { OnboardPage } from './pages/OnboardPage'
+import { SystemBackupPage } from './pages/SystemBackupPage'
 import { TokensPage } from './pages/TokensPage'
 import { StatusBarProvider } from './status/StatusBarContext'
 function RequireAuth({ children }: { children: ReactElement }) {
@@ -43,6 +45,8 @@ function AppRoutes() {
         <Route path="/groups" element={<GroupsPage />} />
         <Route path="/groups/:name" element={<GroupDetailPage />} />
         <Route path="/tokens" element={<TokensPage />} />
+        <Route path="/backups" element={<BackupsPage />} />
+        <Route path="/system-backup" element={<SystemBackupPage />} />
         <Route path="/activity" element={<ActivityPage />} />
         <Route path="/logs" element={<LogsPage />} />
         <Route path="/console" element={<ConsolePage />} />

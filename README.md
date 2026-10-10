@@ -259,6 +259,7 @@ Every command below is run from the repository root, with the virtual environmen
 | Command | What it does |
 |---|---|
 | `migrate-start` | **One-time, only for a node whose OS is still on local disk.** Starts moving it onto Block Storage — creates the destination volume and boots the node into Rescue Mode. Prints one manual command for you to run. |
+| `rollback` / `backup-list` / `backup-delete` | Put the original system back from the backup `migrate-start --backup` kept, list backups, or delete one when you no longer need it. See §6.5. |
 | `migrate-resume` | Finishes what `migrate-start` began, after you've run that one manual command. Boots the node from its new Block Storage volume and reserves its IP. |
 | `migrate-orphans` | Lists (or `--cleanup`s) destination volumes left behind by a `migrate-start --force` restart — see §6.4. You'll rarely need this. |
 | `onboard` | Registers an already-running, already volume-based node with this tool by name. Pure capture — reads the node's current state, changes nothing on it. |
@@ -282,7 +283,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `group-remove` | Removes a node from its group — asks what to do about its schedule if it doesn't have one of its own. See §8.6. |
 | `poll` | Runs the scheduler — checks every node's individual AND group schedule and starts/stops it if due, and auto-reverts any expired manual override. Run it continuously (the normal way), or `--once` from cron. See §8.5/§8.6/§8.7. |
 | `serve-api` | Runs the optional REST API server — the same capabilities as the CLI, over HTTP, with "Login with Linode" auth. See §8.8. |
-| `extend` | Pushes an active manual-override auto-stop timer further out. See §8.7. |
+| `extend` | Pushes an active manual-override auto-stop timer further out, or keeps a node running past today's scheduled stop. See §8.7. |
 | `hooks-set` | Sets a node's (or a group's) pre-stop hook and/or post-start check — your own command, script path, or uploaded script, run on the node right before every stop and right after every start. See §8.12. |
 | `hooks-show` | Shows a node's own hooks and the ones that actually apply to it (its own, or inherited from its group), or a group's hooks. |
 | `hooks-clear` | Removes a node's own hooks (its group's then apply), or a group's hooks. |
@@ -291,6 +292,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `reset-host-key` | Admin escape hatch — re-establishes SSH trust for a node after a genuine, confirmed key change. You should rarely need this either; see [§8](#8-day-to-day-usage) and the one-time migration note below. |
 | `rebuild` | Disaster recovery — reconstructs your local registry from tags on your own Linode account, in case the machine running this tool (and its local records) is ever lost. You should rarely need this either. |
 | `backup` | On-demand, whole-system backup — re-syncs every node's and group's Object Storage record, takes a full local/remote database snapshot, and saves the trusted host keys. Meant to be run on a schedule (cron/systemd timer). See §8.10. |
+| `backup-config` | Shows where this tool backs itself up and how the last backup went; sets, tests or removes the Object Storage settings. See §8.10. |
 | `restore` | On a replacement host: puts the newest (or a chosen, or a local) database snapshot in place, plus the trusted host keys. Run `rebuild` afterward. See §8.10. |
 | `ssh-key-backup` / `ssh-key-restore` | Store the deployment SSH key in Object Storage, encrypted with a passphrase you keep, and get it back on a replacement host. See §8.10. |
 | `offboard` | Permanently decommission a stopped node — releases its reserved IP, removes it from tracking, and optionally deletes its volumes. For when you're actually done with a node, not just pausing it. |
@@ -493,6 +495,65 @@ Only do this after independently confirming (Cloud Manager, Lish console) that t
 genuinely belongs to the node you expect.
 
 ---
+
+### 6.5 Keeping a backup of the original, and rolling back
+
+The one step of a migration that can't be undone on its own is the copy: once the node boots from
+its new volume, `migrate-resume` deletes the old local disk. If you want a guaranteed way back to
+exactly the system you had, ask `migrate-start` to keep a backup first:
+
+```
+python instance_manager.py migrate-start --name web-1 --instance-id 12345678 --backup
+```
+
+Before anything is copied, the node is powered off and Linode clones it -- its disks and boot
+configuration -- and each of its attached Block Storage volumes, using Linode's own clone feature.
+The clone stays **powered off**, with its private (VPC/VLAN) interfaces removed so it can never take
+or clash with an address while it waits; every setting needed to put the original back (plan,
+region, label, tags, every interface and address, the public address, which volume sits in which
+slot) is recorded locally, in Object Storage when configured, and as a tag on the clone and its
+volumes. The migration then carries on as usual.
+
+**The backup is a billable resource until you delete it** -- a powered-off Linode still bills at
+its plan's rate, and each cloned volume bills as Block Storage. Before creating it, `migrate-start`
+shows the monthly cost from Linode's current price list (or a plain "billable resource" notice if
+the price list can't be read) and asks you to confirm; `--yes` skips the question.
+
+**Going back.** If anything about the migrated node is wrong, at any point -- mid-migration, after
+`migrate-resume`, or after onboarding and any number of stop/start cycles:
+
+```
+python instance_manager.py rollback --name web-1
+```
+
+- The backup takes back the original public address (kept reserved), its VPC and VLAN addresses,
+  its label, and its data volumes under their original labels, so the original `/etc/fstab`
+  mounts them as before. It is then booted and checked over SSH.
+- If the original instance still exists (a migration not finished yet), it is replaced: its public
+  address is reserved first, its volumes are detached and kept, and the instance is deleted -- the
+  backup holds the system it had before the migration.
+- If the node is onboarded, it must be stopped first (`stop`, or `stop --skip-precapture` if it
+  can't be reached); `rollback` refuses while it is running. The scheduler then stops managing the
+  name; the migrated volumes are kept, never deleted -- remove them when you no longer need them.
+- `rollback` refuses when an original VPC address has since been taken by another instance; free
+  it first.
+- `--no-boot` restores everything but leaves the instance powered off.
+
+The restored node is your original system, outside this tool. To schedule it again, migrate and
+onboard it again (with a fresh backup if you like).
+
+**When you're happy with the migration**, delete the backup so it stops billing:
+
+```
+python instance_manager.py backup-list
+python instance_manager.py backup-delete --name web-1
+```
+
+`backup-delete` permanently deletes the clone and its cloned volumes (each only after re-checking it
+still carries this backup's tag). For a backup that has already been rolled back to, it only
+removes the record -- that instance is your running system. In the dashboard, the same actions are
+on the **Backups** page; the migration wizard offers "Keep a backup of the original first" on its
+confirmation step.
 
 ## 7. Onboarding
 
@@ -1221,6 +1282,18 @@ top of the old one. `poll` (§8.5) is what actually enforces the auto-stop — a
 running (continuously, or on a cron via `--once`), an expired override gets stopped
 automatically on the next tick, the same way a normal schedule does.
 
+**Keeping a node running past today's scheduled stop.** For a node running on its schedule (its
+own or its group's), `extend` skips today's scheduled stop and keeps it running for `--hours` past
+it (or from now, if the stop time has already passed):
+
+```
+python instance_manager.py extend --name redis-standby-1 --hours 3
+```
+
+The scheduler holds the scheduled stop until then, and stops the node when the extension runs out.
+Tomorrow's schedule is unaffected. In the dashboard: **Keep running past today's stop** on the
+node's page. A manual-only node, or one with no active schedule, has nothing to extend.
+
 **What does NOT get a timer:**
 - A `start` that happens to land *inside* your node's own scheduled hours — nothing to revert
   from, the schedule already agrees it should be running.
@@ -1368,6 +1441,24 @@ scheduler host:
   tokens), and every command is recorded on the Activity page and in the console log.
 
 ### 8.10 `backup` — scheduling your own whole-system backups
+
+**Where backups go, and whether they work: `backup-config`.** `install.sh` asks for Object Storage
+settings and sets up a scheduled `backup` (hourly by default). Without Object Storage, backups stay
+on the same host -- lost with it -- so set it up if you skipped it, and check on it from time to
+time:
+
+```
+python instance_manager.py backup-config                       # status and the last backup's result
+python instance_manager.py backup-config --bucket my-bucket \
+    --endpoint https://in-maa-1.linodeobjects.com               # prompts for the access/secret key
+python instance_manager.py backup-config --test                 # write/read/delete a test object
+python instance_manager.py backup-config --disable              # remove the Object Storage settings
+```
+
+New settings are tested (a small test object is written, read back and deleted) and saved to
+`.env` only if the test passes; the secret key is never shown again. A running scheduler and API
+pick up the change within seconds, no restart needed. The dashboard's **System backup** page does
+the same, plus **Back up now** and the last backup's result.
 
 Every stop/onboard already backs that one node up automatically (see the disaster recovery
 section of the Definitive Guide) — `backup` is a separate, explicit command for taking a backup

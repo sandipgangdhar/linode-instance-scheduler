@@ -131,8 +131,9 @@ export interface PatchInstanceGroupResult {
   warnings?: string[]
 }
 export interface MigrateStartResult {
-  outcome: 'started' | 'identity_change_declined'
+  outcome: 'started' | 'identity_change_declined' | 'backup_declined'
   instance_id: number | null
+  backup_instance_id?: number | null
   dest_volume_id: number | null
   dest_volume_size_gb: number | null
   local_disk_size_mb: number | null
@@ -334,4 +335,64 @@ export interface ConsoleRun {
   lines: string[]
   next_offset: number
   truncated: boolean
+}
+export interface BackupEstimate {
+  instance_monthly: number
+  volumes_monthly: number
+  total_monthly: number
+  plan: string
+  region: string
+  volume_gb: number
+}
+export interface MigrationBackup {
+  name: string
+  status: 'creating' | 'kept' | 'restored' | 'failed'
+  created_at: string
+  updated_at: string
+  original_instance_id: number | null
+  original_label: string | null
+  region: string | null
+  plan: string | null
+  public_ipv4: string[]
+  backup_instance_id: number | null
+  backup_label: string | null
+  backup_volumes: {
+    slot: string
+    volume_id: number
+    size: number
+    source_volume_id: number
+  }[]
+  estimated_monthly_cost: BackupEstimate | null
+  restored_at: string | null
+}
+export interface RollbackResult {
+  outcome: 'restored' | 'aborted_by_user'
+  backup_instance_id: number | null
+  label: string | null
+  public_ipv4: string[]
+  original_deleted_instance_id: number | null
+  reachable: boolean | null
+  warnings: string[]
+}
+export interface BackupDeleteResult {
+  outcome: 'deleted' | 'forgotten' | 'aborted_by_user' | 'incomplete'
+  problems: string[]
+}
+export interface SystemBackupStatus {
+  object_storage: {
+    configured: boolean
+    bucket: string | null
+    endpoint: string | null
+    access_key_hint: string | null
+    secret_key_set: boolean
+  }
+  local_backup_dir: string | null
+  last_backup: {
+    finished_at: string
+    ok: boolean
+    trigger: string | null
+    object_storage_key: string | null
+    local_path: string | null
+    problems: string[]
+  } | null
 }

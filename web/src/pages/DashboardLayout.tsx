@@ -8,6 +8,8 @@ const NAV_ITEMS = [
   { to: '/activity', label: 'Activity', icon: PulseIcon },
   { to: '/logs', label: 'Logs', icon: LogsIcon },
   { to: '/console', label: 'Console', icon: TerminalIcon },
+  { to: '/backups', label: 'Backups', icon: ArchiveIcon },
+  { to: '/system-backup', label: 'System backup', icon: ShieldIcon },
   { to: '/tokens', label: 'API tokens', icon: KeyIcon },
 ]
 export function DashboardLayout() {
@@ -130,6 +132,22 @@ function TerminalIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
       <rect x="3" y="4" width="18" height="16" rx="1.5" />
       <path d="M7 9l3 3-3 3M12 15h5" />
+    </svg>
+  )
+}
+function ArchiveIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <rect x="3" y="4" width="18" height="5" rx="1.5" />
+      <path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4" />
+    </svg>
+  )
+}
+function ShieldIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6l7-3z" />
+      <path d="M9 12l2 2 4-4" />
     </svg>
   )
 }

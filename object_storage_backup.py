@@ -38,6 +38,51 @@ def is_configured() -> bool:
     )
 
 
+SETTING_KEYS = ("LINODE_OBJ_STORAGE_BUCKET", "LINODE_OBJ_STORAGE_ENDPOINT",
+                "LINODE_OBJ_STORAGE_ACCESS_KEY", "LINODE_OBJ_STORAGE_SECRET_KEY")
+
+
+def settings_summary() -> dict:
+
+    access = os.environ.get("LINODE_OBJ_STORAGE_ACCESS_KEY") or ""
+    return {
+        "configured": is_configured(),
+        "bucket": os.environ.get("LINODE_OBJ_STORAGE_BUCKET") or None,
+        "endpoint": os.environ.get("LINODE_OBJ_STORAGE_ENDPOINT") or None,
+        "access_key_hint": (access[:4] + "..." + access[-2:]) if len(access) > 8 else (
+            "set" if access else None),
+        "secret_key_set": bool(os.environ.get("LINODE_OBJ_STORAGE_SECRET_KEY")),
+    }
+
+
+def reset_client() -> None:
+
+    global _cached_client, _cached_bucket
+    _cached_client = None
+    _cached_bucket = None
+
+
+def test_connection(bucket: str, endpoint: str, access_key: str, secret_key: str) -> None:
+
+    if boto3 is None:
+        raise ObjectStorageError("the boto3 package is not installed")
+    try:
+        client = boto3.client("s3", endpoint_url=endpoint, aws_access_key_id=access_key,
+                              aws_secret_access_key=secret_key,
+                              config=BotoConfig(signature_version="s3v4"))
+        key = f"{_DEPLOYMENT_PREFIX_FOR_TEST}connection-test"
+        client.put_object(Bucket=bucket, Key=key, Body=b"ok")
+        got = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        client.delete_object(Bucket=bucket, Key=key)
+    except Exception as e:
+        raise ObjectStorageError(f"could not write to bucket {bucket!r} at {endpoint}: {e}") from e
+    if got != b"ok":
+        raise ObjectStorageError("the test object read back differently than written")
+
+
+_DEPLOYMENT_PREFIX_FOR_TEST = "deployment/"
+
+
 _cached_client = None
 _cached_bucket: str | None = None
 
@@ -489,6 +534,32 @@ def download_token_record(token_name: str) -> dict | None:
 def list_token_records() -> list[str] | None:
     return _list_record_names(_TOKEN_PREFIX)
 
+
+_MIGRATION_BACKUP_PREFIX = "migration-backups/"
+
+
+def _migration_backup_key(name: str) -> str:
+    return f"{_MIGRATION_BACKUP_PREFIX}{name}.json"
+
+
+def upload_migration_backup(
+    name: str, record: dict, *, attempts: int = DEFAULT_ATTEMPTS,
+    delay_s: float = DEFAULT_DELAY_S,
+) -> None:
+    _upload_record(_migration_backup_key(name), f"pre-migration backup of '{name}'", record,
+                   attempts=attempts, delay_s=delay_s)
+
+
+def download_migration_backup(name: str) -> dict | None:
+    return _download_record(_migration_backup_key(name))
+
+
+def delete_migration_backup(name: str) -> None:
+    _delete_record(_migration_backup_key(name))
+
+
+def list_migration_backups() -> list[str] | None:
+    return _list_record_names(_MIGRATION_BACKUP_PREFIX)
 
 def sync_object_storage_backup(
     name: str, record: dict, *, on_warning: Callable[[str], None] | None = None

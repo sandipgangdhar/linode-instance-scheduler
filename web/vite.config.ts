@@ -21,6 +21,8 @@ export default defineConfig({
       '/activity': 'http://127.0.0.1:8000',
       '/logs': 'http://127.0.0.1:8000',
       '/console': 'http://127.0.0.1:8000',
+      '/backups': 'http://127.0.0.1:8000',
+      '/system': 'http://127.0.0.1:8000',
     },
   },
 })

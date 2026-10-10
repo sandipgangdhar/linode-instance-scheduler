@@ -9,6 +9,7 @@ import hashlib
 import functools
 import json
 import math
+import getpass
 import os
 import re
 import secrets
@@ -33,7 +34,7 @@ from zoneinfo import ZoneInfo
 import ipaddress
 import subprocess
 import requests.exceptions
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from linode_api4 import Instance, Volume
 from linode_api4.errors import ApiError
 
@@ -1057,8 +1058,9 @@ def _archive_previous_attempts(
 @dataclass
 class MigrateStartResult:
 
-    outcome: Literal["started", "identity_change_declined"]
+    outcome: Literal["started", "identity_change_declined", "backup_declined"]
     instance_id: int | None = None
+    backup_instance_id: int | None = None
     dest_volume_id: int | None = None
     dest_volume_size_gb: int | None = None
     local_disk_size_mb: int | None = None
@@ -1088,6 +1090,98 @@ def _append_authorized_key_command(public_key: str) -> str:
     )
 
 
+KEEP_HOST_KEYS_COMMAND = (
+    f"mkdir -p /etc/cloud/cloud.cfg.d && printf '%s\\n' "
+    f"'# Written by linode-instance-scheduler: keep SSH host keys across recreates.' "
+    f"'ssh_deletekeys: false' > {VLAN_ONLY_CLOUD_CFG}"
+)
+
+
+def _take_pre_migration_backup(
+    client, name: str, instance, confirm_backup: Callable[[dict | None], bool] | None,
+    on_progress: Callable[[str], None] | None, on_warning: Callable[[str], None] | None,
+    *, host: str | None = None, ssh_key: str | None = None, ssh_password: str | None = None,
+) -> int | None:
+
+    def say(msg: str) -> None:
+        if on_progress is not None:
+            on_progress(msg)
+
+    existing = get_migration_backup(name)
+    if existing is not None and existing["status"] in ("kept", "creating", "failed"):
+        rec = existing["record"]
+        if (existing["status"] == "kept"
+                and rec.get("original", {}).get("instance_id") == instance.id):
+            say(f"Reusing the existing backup of instance {instance.id} (backup instance "
+                f"{rec['backup'].get('instance_id')}, taken {rec.get('created_at')}).")
+            return rec["backup"].get("instance_id")
+        raise engine.ConfigError(
+            f"a pre-migration backup for '{name}' already exists (status {existing['status']}, "
+            f"of instance {rec.get('original', {}).get('instance_id')}). Remove it first "
+            f"(`backup-delete --name {name}`).")
+    configs_raw = engine.retry_transient(
+        lambda: client.get(f"/linode/instances/{instance.id}/configs")).get("data") or []
+    sizes = []
+    for entry in engine.attached_volumes((configs_raw[0] if configs_raw else {}).get("devices") or {}):
+        sizes.append(engine.retry_transient(lambda v=entry["volume_id"]: client.load(Volume, v)).size)
+    try:
+        estimate = engine.estimate_migration_backup_cost(client, instance, sizes)
+    except Exception as e:
+        estimate = None
+        if on_warning is not None:
+            on_warning(f"WARNING: couldn't price the backup from Linode's price list ({e}).")
+    say(f"A pre-migration backup keeps a powered-off native clone of instance {instance.id} and of "
+        f"its {len(sizes)} attached volume(s). It is a billable resource: {_format_cost(estimate)}, "
+        "until you delete it (`backup-delete`).")
+    if confirm_backup is not None and not confirm_backup(estimate):
+        return None
+    if host:
+
+
+        try:
+            engine.ssh_run(host, ssh_key, KEEP_HOST_KEYS_COMMAND, trust_new=True,
+                           password=ssh_password)
+        except Exception as e:
+            if on_warning is not None:
+                on_warning(f"WARNING: could not set cloud-init to keep SSH host keys ({e}); after a "
+                           "rollback the restored system may present new SSH host keys.")
+    say(f"Powering off instance {instance.id} for a consistent copy...")
+    engine.retry_transient_or_already_done(
+        instance.shutdown,
+        already_done=lambda: client.load(Instance, instance.id).status == "offline")
+    engine.poll_until_status(lambda: client.load(Instance, instance.id), ("offline",),
+                             timeout_s=900)
+    instance = engine.retry_transient(lambda: client.load(Instance, instance.id))
+
+    def _checkpoint(record: dict) -> None:
+        record["estimated_monthly_cost"] = estimate
+        _save_migration_backup(name, "creating", record)
+
+    try:
+        record = engine.create_migration_backup(client, instance, name=name, on_record=_checkpoint,
+                                                on_progress=on_progress)
+    except Exception as e:
+        partial = get_migration_backup(name)
+        if partial is not None:
+            _save_migration_backup(name, "failed", partial["record"])
+            _sync_migration_backup_record(name, on_warning)
+        with contextlib_suppress(Exception):
+            engine.retry_transient_or_already_done(
+                instance.boot,
+                already_done=lambda: client.load(Instance, instance.id).status in ("booting", "running"))
+        raise engine.ConfigError(
+            f"the pre-migration backup failed ({e}). Nothing was migrated; instance {instance.id} "
+            f"was booted again. Remove any partial backup with `backup-delete --name {name}`, then "
+            "retry.") from e
+    record["estimated_monthly_cost"] = estimate
+    _save_migration_backup(name, "kept", record)
+    _sync_migration_backup_record(name, on_warning)
+    say(f"Backup kept: powered-off instance {record['backup']['instance_id']} "
+        f"('{record['backup']['label']}') with {len(record['backup']['volumes'])} cloned "
+        f"volume(s). Roll back any time with `rollback --name {name}`.")
+    return record["backup"]["instance_id"]
+
+
 @_logs_activity("migrate-start")
 def migrate_start_instance(
     client, name: str, instance_id: int, ssh_key: str | None, *,
@@ -1095,6 +1189,8 @@ def migrate_start_instance(
     ssh_password: str | None = None,
     install_public_key: str | None = None,
     confirm_identity_change: Callable[[], bool] | None = None,
+    backup: bool = False,
+    confirm_backup: Callable[[dict | None], bool] | None = None,
     on_progress: Callable[[str], None] | None = None,
     on_warning: Callable[[str], None] | None = None,
 ) -> MigrateStartResult:
@@ -1336,10 +1432,24 @@ def migrate_start_instance(
                                    f"{old_dest_volume_id} ({e}) -- will retry on the next "
                                    "checkpoint; still recorded in previous_attempts above.")
 
+        backup_instance_id = None
+        if backup:
+            backup_instance_id = _take_pre_migration_backup(
+                client, name, instance, confirm_backup, on_progress, on_warning,
+                host=host, ssh_key=ssh_key, ssh_password=ssh_password)
+            if backup_instance_id is None:
+                return MigrateStartResult(outcome="backup_declined")
+            instance = engine.retry_transient(lambda: client.load(Instance, instance_id))
         try:
-            migration_state = engine.start_path_b_migration(
-                client, instance, name=name, persist_fn=_persist_migration_checkpoint
-            )
+            if backup:
+                migration_state = engine.start_path_b_migration(
+                    client, instance, name=name, persist_fn=_persist_migration_checkpoint,
+                    allow_offline=True,
+                )
+            else:
+                migration_state = engine.start_path_b_migration(
+                    client, instance, name=name, persist_fn=_persist_migration_checkpoint,
+                )
         except (ApiError, RuntimeError, TimeoutError, requests.exceptions.RequestException) as e:
             raise engine.ConfigError(
                 f"migration setup failed partway through: {e}. Whatever succeeded so far "
@@ -1382,6 +1492,7 @@ def migrate_start_instance(
         return MigrateStartResult(
             outcome="started",
             instance_id=instance.id,
+            backup_instance_id=backup_instance_id,
             dest_volume_id=migration_state["dest_volume_id"],
             dest_volume_size_gb=migration_state["dest_volume_size_gb"],
             local_disk_size_mb=migration_state["local_disk_size_mb"],
@@ -1394,11 +1505,17 @@ def cmd_migrate_start(client, args) -> int:
         answer = input(f"Type '{args.name}' to confirm this is intentional: ")
         return answer == args.name
 
+    def _confirm_backup(_estimate) -> bool:
+        return input("Create this billable backup? [y/N] ").strip().lower() in ("y", "yes")
+
+    backup = getattr(args, "backup", False) is True
     try:
         result = migrate_start_instance(
             client, args.name, args.instance_id, args.ssh_key,
             force=args.force,
             confirm_identity_change=None if args.yes else _confirm_different_instance_id,
+            backup=backup,
+            confirm_backup=None if args.yes else _confirm_backup,
             on_progress=print, on_warning=_print_to_stderr,
         )
     except InstanceLockedError as e:
@@ -1410,9 +1527,15 @@ def cmd_migrate_start(client, args) -> int:
     if result.outcome == "identity_change_declined":
         print("Aborted -- name didn't match.")
         return 1
+    if result.outcome == "backup_declined":
+        print("Aborted -- no backup was created and nothing was migrated.")
+        return 1
 
     print()
     print("=" * 70)
+    if result.backup_instance_id:
+        print(f"Pre-migration backup kept: powered-off instance {result.backup_instance_id}. "
+              f"If anything goes wrong: instance_manager.py rollback --name {args.name}")
     print(f"Destination volume created: {result.dest_volume_id} "
           f"({result.dest_volume_size_gb}GB)")
     print(f"Instance {result.instance_id} is now booted into Rescue Mode.")
@@ -3642,14 +3765,25 @@ def extend_manual_override(name: str, hours: float | None = None) -> str:
             raise NotOnboardedError(f"'{name}' is not onboarded.")
         if record.get("current_status") != "running":
             raise engine.ConfigError(f"'{name}' is not currently running -- nothing to extend.")
-        if not record.get("manual_override_expires_at"):
-            raise engine.ConfigError(
-                f"'{name}' has no active manual-override timer to extend -- it was either "
-                "started within its schedule's own on-window, has no schedule at all, or is "
-                "already following its schedule normally."
-            )
         window_hours = hours if hours is not None else DEFAULT_MANUAL_OVERRIDE_WINDOW_HOURS
-        new_expiry = (datetime.now(UTC) + timedelta(hours=window_hours)).isoformat()
+        now = datetime.now(UTC)
+        base = now
+        if not record.get("manual_override_expires_at"):
+
+
+            if get_schedule_modes().get(name) == "manual":
+                raise engine.ConfigError(
+                    f"'{name}' is manual-only -- the scheduler never stops it, so there's nothing "
+                    "to extend.")
+            schedule, _via_group = resolve_effective_schedule(name, record)
+            if not schedule_is_active(schedule):
+                raise engine.ConfigError(
+                    f"'{name}' has no active schedule -- it keeps running until you stop it, so "
+                    "there's nothing to extend.")
+            next_stop = next_scheduled_stop(schedule, now)
+            if next_stop is not None and is_within_scheduled_on_window(schedule, now):
+                base = next_stop
+        new_expiry = (base + timedelta(hours=window_hours)).isoformat()
         record["manual_override_expires_at"] = new_expiry
         _save_one_record(name, record)
         return new_expiry
@@ -3854,7 +3988,8 @@ def cmd_extend(args) -> int:
     except engine.ConfigError as e:
         print(f"Configuration error: {e}", file=sys.stderr)
         return 1
-    print(f"'{args.name}' extended -- now auto-stops at {_format_override_expiry(new_expiry)}.")
+    print(f"'{args.name}' extended -- its scheduled stop is skipped and it now stops at "
+          f"{_format_override_expiry(new_expiry)}.")
     return 0
 
 
@@ -5769,6 +5904,7 @@ def backup_full_system(
     *, local_dir: Path | None = None,
     on_progress: Callable[[str], None] | None = None,
     on_warning: Callable[[str], None] | None = None,
+    trigger: str = "cli",
 ) -> BackupResult:
 
     result = BackupResult(object_storage_configured=osb.is_configured())
@@ -5818,6 +5954,8 @@ def backup_full_system(
                         f"  WARNING: could not back up API token '{t['name']}' to Object Storage ({e})"
                     )
 
+        for entry in list_migration_backups():
+            _sync_migration_backup_record(entry["name"], on_warning)
         if on_progress is not None:
             on_progress("Uploading a full database snapshot to Object Storage...")
         try:
@@ -5863,7 +6001,221 @@ def backup_full_system(
             if on_warning is not None:
                 on_warning(f"  WARNING: could not write local database snapshot ({e})")
 
+    _record_system_backup_run(result, trigger)
     return result
+
+
+def _backup_problems(result: BackupResult) -> list[str]:
+    problems = []
+    if result.instances_failed:
+        problems.append(f"instance records failed: {', '.join(result.instances_failed)}")
+    if result.groups_failed:
+        problems.append(f"group records failed: {', '.join(result.groups_failed)}")
+    if result.tokens_failed:
+        problems.append(f"token records failed: {', '.join(result.tokens_failed)}")
+    for label, err in (("host keys", result.known_hosts_error),
+                       ("Object Storage snapshot", result.object_storage_snapshot_error),
+                       ("local snapshot", result.local_snapshot_error)):
+        if err:
+            problems.append(f"{label}: {err}")
+    if not result.object_storage_configured and not result.local_snapshot_path:
+        problems.append("nowhere to back up to (Object Storage not configured, no local folder)")
+    return problems
+
+
+def _record_system_backup_run(result: BackupResult, trigger: str) -> None:
+
+    problems = _backup_problems(result)
+
+    def _do():
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO system_backup_status (id, finished_at, ok, trigger, "
+                "object_storage_key, local_path, problems) VALUES (1, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET finished_at = excluded.finished_at, ok = excluded.ok, "
+                "trigger = excluded.trigger, object_storage_key = excluded.object_storage_key, "
+                "local_path = excluded.local_path, problems = excluded.problems",
+                (datetime.now(UTC).isoformat(), 0 if problems else 1, trigger,
+                 result.object_storage_snapshot_key, result.local_snapshot_path,
+                 json.dumps(problems)))
+            conn.commit()
+        finally:
+            conn.close()
+
+    with contextlib_suppress(Exception):
+        _retry_db(_do)
+
+
+ENV_PATH = engine.BASE_DIR / ".env"
+_env_mtime: float | None = None
+
+
+def default_backup_dir() -> Path | None:
+
+    configured = os.environ.get("LINODE_SCHEDULER_BACKUP_DIR")
+    if configured:
+        return Path(configured)
+    candidate = REGISTRY_PATH.parent.parent / "backups"
+    return candidate if candidate.is_dir() else None
+
+
+def reload_object_storage_settings_if_changed() -> bool:
+
+    global _env_mtime
+    try:
+        mtime = ENV_PATH.stat().st_mtime
+    except OSError:
+        return False
+    if _env_mtime is None:
+        _env_mtime = mtime
+        return False
+    if mtime == _env_mtime:
+        return False
+    _env_mtime = mtime
+    values = dotenv_values(ENV_PATH)
+    for key in osb.SETTING_KEYS:
+        value = values.get(key)
+        if value:
+            os.environ[key] = value
+        else:
+            os.environ.pop(key, None)
+    osb.reset_client()
+    return True
+
+
+def _write_env_settings(updates: dict[str, str | None]) -> None:
+
+    global _env_mtime
+    lines = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
+    out, done = [], set()
+    for line in lines:
+        key = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else None
+        if key in updates:
+            if updates[key] is not None and key not in done:
+                out.append(f"{key}={updates[key]}")
+                done.add(key)
+            continue
+        out.append(line)
+    for key, value in updates.items():
+        if value is not None and key not in done:
+            out.append(f"{key}={value}")
+    tmp = ENV_PATH.with_name(ENV_PATH.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(out) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, ENV_PATH)
+    for key, value in updates.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    osb.reset_client()
+    _env_mtime = ENV_PATH.stat().st_mtime
+
+
+def get_system_backup_status() -> dict:
+    def _do():
+        conn = _connect()
+        try:
+            return conn.execute(
+                "SELECT finished_at, ok, trigger, object_storage_key, local_path, problems "
+                "FROM system_backup_status WHERE id = 1").fetchone()
+        finally:
+            conn.close()
+
+    row = _retry_db(_do)
+    last = None
+    if row is not None:
+        last = {"finished_at": row[0], "ok": bool(row[1]), "trigger": row[2],
+                "object_storage_key": row[3], "local_path": row[4],
+                "problems": json.loads(row[5] or "[]")}
+    local = default_backup_dir()
+    return {"object_storage": osb.settings_summary(),
+            "local_backup_dir": str(local) if local else None,
+            "last_backup": last}
+
+
+def configure_system_backup(bucket: str, endpoint: str, access_key: str, secret_key: str, *,
+                            skip_test: bool = False) -> None:
+
+    values = {"bucket": bucket, "endpoint": endpoint, "access key": access_key,
+              "secret key": secret_key}
+    missing = [k for k, v in values.items() if not (v or "").strip()]
+    if missing:
+        raise engine.ConfigError(f"missing: {', '.join(missing)}")
+    if not endpoint.startswith("https://"):
+        raise engine.ConfigError("the endpoint must be an https:// URL, e.g. "
+                                 "https://in-maa-1.linodeobjects.com")
+    for value in values.values():
+        if any(c in value for c in "\n\r"):
+            raise engine.ConfigError("values must be single-line")
+    if not skip_test:
+        try:
+            osb.test_connection(bucket.strip(), endpoint.strip(), access_key.strip(),
+                                secret_key.strip())
+        except osb.ObjectStorageError as e:
+            raise engine.ConfigError(f"settings not saved -- {e}") from e
+    _write_env_settings({"LINODE_OBJ_STORAGE_BUCKET": bucket.strip(),
+                         "LINODE_OBJ_STORAGE_ENDPOINT": endpoint.strip(),
+                         "LINODE_OBJ_STORAGE_ACCESS_KEY": access_key.strip(),
+                         "LINODE_OBJ_STORAGE_SECRET_KEY": secret_key.strip()})
+
+
+def disable_system_backup_object_storage() -> None:
+    _write_env_settings({key: None for key in osb.SETTING_KEYS})
+
+
+def test_system_backup_settings() -> None:
+
+    if not osb.is_configured():
+        raise engine.ConfigError("Object Storage is not configured.")
+    try:
+        osb.test_connection(os.environ["LINODE_OBJ_STORAGE_BUCKET"],
+                            os.environ["LINODE_OBJ_STORAGE_ENDPOINT"],
+                            os.environ["LINODE_OBJ_STORAGE_ACCESS_KEY"],
+                            os.environ["LINODE_OBJ_STORAGE_SECRET_KEY"])
+    except osb.ObjectStorageError as e:
+        raise engine.ConfigError(str(e)) from e
+
+
+def cmd_backup_config(args) -> int:
+    try:
+        if args.disable:
+            disable_system_backup_object_storage()
+            print("Object Storage backups disabled (settings removed from .env).")
+        elif args.bucket or args.endpoint or args.access_key or args.secret_key:
+            access = args.access_key or getpass.getpass("Access key: ")
+            secret = args.secret_key or getpass.getpass("Secret key: ")
+            configure_system_backup(args.bucket or "", args.endpoint or "", access, secret)
+            print("Saved. The connection test passed (a test object was written, read back and "
+                  "deleted). The running scheduler and API pick this up within seconds.")
+        if args.test:
+            test_system_backup_settings()
+            print("Connection test passed.")
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    status = get_system_backup_status()
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+    obj = status["object_storage"]
+    if obj["configured"]:
+        print(f"Object Storage: configured -- bucket {obj['bucket']} at {obj['endpoint']} "
+              f"(access key {obj['access_key_hint']})")
+    else:
+        print("Object Storage: NOT configured -- backups stay on this host only. Set it up with "
+              "backup-config --bucket ... --endpoint ...")
+    print(f"Local backup folder: {status['local_backup_dir'] or '(none)'}")
+    last = status["last_backup"]
+    if last is None:
+        print("Last backup: never")
+    else:
+        print(f"Last backup: {last['finished_at']} ({last['trigger']}) -- "
+              + ("OK" if last["ok"] else "PROBLEMS: " + "; ".join(last["problems"])))
+    return 0
 
 
 def cmd_backup(args) -> int:
@@ -6120,6 +6472,12 @@ def restore_from_backup(
         if on_warning is not None:
             on_warning(f"WARNING: couldn't reconcile API tokens from Object Storage ({e}); "
                        "run `restore` again or `rebuild` to retry.")
+    try:
+        restore_migration_backups_from_object_storage(on_progress=on_progress,
+                                                      on_warning=on_warning)
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(f"WARNING: couldn't reconcile pre-migration backups ({e}).")
 
     result.known_hosts_restored = restore_known_hosts(
         known_hosts_file, on_progress=on_progress, on_warning=on_warning,
@@ -6846,6 +7204,27 @@ def resolve_due_boundary(
     return (best[1], best[0]) if best is not None else None
 
 
+def next_scheduled_stop(schedule: dict, now: datetime, within_hours: float = 24) -> datetime | None:
+
+    if not schedule.get("enabled", True):
+        return None
+    zone = ZoneInfo(schedule["timezone"])
+    now_utc = now.astimezone(UTC)
+    local_today = now.astimezone(zone).date()
+    best: datetime | None = None
+    for day in (local_today - timedelta(days=1), local_today, local_today + timedelta(days=1)):
+        weekday = VALID_SCHEDULE_DAYS[day.weekday()]
+        for rule in schedule.get("rules", []):
+            if weekday not in rule["days_of_week"]:
+                continue
+            boundary = _local_time_to_utc(zone, day + timedelta(days=_rule_stop_day_offset(rule)),
+                                          rule["stop_time"])
+            if now_utc < boundary <= now_utc + timedelta(hours=within_hours) and (
+                    best is None or boundary < best):
+                best = boundary
+    return best
+
+
 def schedule_is_active(schedule: dict | None) -> TypeGuard[dict]:
 
     return schedule is not None and schedule.get("enabled", True)
@@ -6954,6 +7333,8 @@ class PollTickInstanceResult:
 
 
         "in_progress", "retry_backoff", "dispatched",
+
+        "extended",
     ]
     action: Literal["create", "delete"] | None = None
     detail: str | None = None
@@ -7488,6 +7869,16 @@ def poll_tick(
                         name, "already_handled", action=action, via_group=via_group,
                     ))
                     continue
+                extended_until = record.get("manual_override_expires_at")
+                if (action == "delete" and extended_until
+                        and tick_now < datetime.fromisoformat(extended_until)):
+
+
+                    results.append(PollTickInstanceResult(
+                        name, "extended", action=action, via_group=via_group,
+                        detail=f"extended until {extended_until}",
+                    ))
+                    continue
                 desired = "running" if action == "create" else "stopped"
                 if record.get("current_status") == desired:
 
@@ -7697,6 +8088,9 @@ class PollScheduler:
     def check(self) -> PollTickResult:
 
         self.wake.clear()
+        with contextlib_suppress(Exception):
+            if reload_object_storage_settings_if_changed() and self._on_progress is not None:
+                self._on_progress("Object Storage backup settings changed in .env -- reloaded.")
         completed = self.take_completed()
         with self._lock:
             in_flight = set(self._in_flight)
@@ -7732,14 +8126,15 @@ def cmd_poll(client, args) -> int:
 
     def _report_tick(tick: PollTickResult, *, continuous: bool = False) -> None:
         for r in tick.results:
-            if r.outcome not in ("waiting_on_dependency", "waiting_on_dependents", "in_progress"):
+            if r.outcome not in ("waiting_on_dependency", "waiting_on_dependents", "in_progress",
+                                 "extended"):
                 last_waiting.pop(r.name, None)
             if r.outcome not in (
                 "fired_success", "fired_failure", "error", "auto_revert_window_reopened",
-                "waiting_on_dependency", "waiting_on_dependents",
+                "waiting_on_dependency", "waiting_on_dependents", "extended",
             ):
                 continue
-            if r.outcome.startswith("waiting"):
+            if r.outcome.startswith("waiting") or r.outcome == "extended":
                 if continuous and last_waiting.get(r.name) == (r.outcome, r.detail):
                     continue
                 last_waiting[r.name] = (r.outcome, r.detail)
@@ -7854,6 +8249,459 @@ def cmd_poll(client, args) -> int:
             signal.signal(signal.SIGTERM, previous_handler)
     record_activity("Scheduler stopped.", source="scheduler", action="tick")
     print("Stopped.")
+    return 0
+
+
+def _save_migration_backup(name: str, status: str, record: dict) -> None:
+    now = datetime.now(UTC).isoformat()
+
+    def _do():
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO migration_backups (name, status, record, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET status = excluded.status, "
+                "record = excluded.record, updated_at = excluded.updated_at",
+                (name, status, json.dumps(record), record.get("created_at") or now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    _retry_db(_do)
+
+
+def _delete_migration_backup_row(name: str) -> None:
+    def _do():
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM migration_backups WHERE name = ?", (name,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    _retry_db(_do)
+
+
+def get_migration_backup(name: str) -> dict | None:
+
+    def _do():
+        conn = _connect()
+        try:
+            return conn.execute(
+                "SELECT name, status, record, created_at, updated_at FROM migration_backups "
+                "WHERE name = ?", (name,)).fetchone()
+        finally:
+            conn.close()
+
+    row = _retry_db(_do)
+    if row is None:
+        return None
+    return {"name": row[0], "status": row[1], "record": json.loads(row[2]),
+            "created_at": row[3], "updated_at": row[4]}
+
+
+def list_migration_backups() -> list[dict]:
+    def _do():
+        conn = _connect()
+        try:
+            return conn.execute("SELECT name FROM migration_backups ORDER BY name").fetchall()
+        finally:
+            conn.close()
+
+    out = []
+    for (name,) in _retry_db(_do):
+        entry = get_migration_backup(name)
+        if entry is not None:
+            out.append(entry)
+    return out
+
+
+def migration_backup_summary(entry: dict) -> dict:
+
+    record = entry["record"]
+    orig = record.get("original", {})
+    bk = record.get("backup", {})
+    return {
+        "name": entry["name"],
+        "status": entry["status"],
+        "created_at": entry["created_at"],
+        "updated_at": entry["updated_at"],
+        "original_instance_id": orig.get("instance_id"),
+        "original_label": orig.get("label"),
+        "region": orig.get("region"),
+        "plan": orig.get("type"),
+        "public_ipv4": orig.get("public_ipv4") or [],
+        "backup_instance_id": bk.get("instance_id"),
+        "backup_label": bk.get("label"),
+        "backup_volumes": [{"slot": v.get("slot"), "volume_id": v.get("volume_id"),
+                            "size": v.get("size"), "source_volume_id": v.get("source_volume_id")}
+                           for v in bk.get("volumes") or []],
+        "estimated_monthly_cost": record.get("estimated_monthly_cost"),
+        "restored_at": record.get("restored_at"),
+    }
+
+
+def _sync_migration_backup_record(name: str, on_warning: Callable[[str], None] | None) -> None:
+
+    if not osb.is_configured():
+        return
+    try:
+        entry = get_migration_backup(name)
+        if entry is None:
+            osb.delete_migration_backup(name)
+        else:
+            osb.upload_migration_backup(name, {**entry["record"], "status": entry["status"]})
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(f"WARNING: could not mirror the backup record for '{name}' to Object "
+                       f"Storage ({e}); it is still recorded locally and tagged on the backup.")
+
+
+def restore_migration_backups_from_object_storage(
+    *, on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> int:
+
+    names = osb.list_migration_backups()
+    if names is None:
+        return 0
+    added = 0
+    for backup_name in names:
+        if get_migration_backup(backup_name) is not None:
+            continue
+        stored = osb.download_migration_backup(backup_name)
+        if not stored or stored.get("name") != backup_name or "backup" not in stored:
+            if on_warning is not None:
+                on_warning(f"WARNING: backup record '{backup_name}' in Object Storage is missing "
+                           "or failed verification -- skipped.")
+            continue
+        status = stored.pop("status", "kept")
+        _save_migration_backup(backup_name, status, stored)
+        added += 1
+        if on_progress is not None:
+            on_progress(f"Restored the pre-migration backup record for '{backup_name}' "
+                        f"({status}) from Object Storage.")
+    return added
+
+
+def untracked_backup_instances(client) -> list[tuple[str, int, str]]:
+
+    prefix = engine.MIGRATION_BACKUP_TAG_PREFIX + ":"
+    out = []
+    for inst in engine.retry_transient(lambda: list(client.linode.instances())):
+        for tag in inst.tags or []:
+            if tag.startswith(prefix):
+                name = tag[len(prefix):]
+                entry = get_migration_backup(name)
+                if entry is None or entry["record"].get("backup", {}).get("instance_id") != inst.id:
+                    out.append((name, inst.id, inst.label))
+    return out
+
+
+def _strip_scheduler_tags_from_reserved_ip(client, address: str) -> None:
+    ip = engine.retry_transient(lambda: client.load(engine.ReservedIPAddress, address))
+    tags = list(ip.tags or [])
+    kept = [t for t in tags if not t.startswith("linode-scheduler-")]
+    if kept != tags:
+        ip.tags = kept
+        engine.retry_transient(ip.save)
+
+
+def _restored_ssh_host(record: dict) -> str | None:
+    orig = record["original"]
+    public = orig.get("public_ipv4") or []
+    has_public = any(
+        (i.get("purpose") == "public") if orig["interface_generation"] == engine.INTERFACE_MODEL_LEGACY
+        else bool(i.get("public")) for i in orig.get("network_config") or [])
+    if public and (has_public or not orig.get("network_config")):
+        return public[0]
+    pairs = engine.vpc_interface_addresses(orig.get("network_config"), orig["interface_generation"])
+    if pairs:
+        return pairs[0][1]
+    for iface in orig.get("network_config") or []:
+        addr = iface.get("ipam_address") or ((iface.get("vlan") or {}).get("ipam_address"))
+        if addr:
+            return addr.split("/")[0]
+    return public[0] if public else None
+
+
+@dataclass
+class RollbackResult:
+    outcome: Literal["restored", "aborted_by_user"]
+    backup_instance_id: int | None = None
+    label: str | None = None
+    public_ipv4: list[str] = field(default_factory=list)
+    original_deleted_instance_id: int | None = None
+    reachable: bool | None = None
+    warnings: list[str] = field(default_factory=list)
+
+
+@_logs_activity("rollback")
+def rollback_to_backup(
+    client, name: str, ssh_key: str | None, *, boot: bool = True,
+    confirm: Callable[[], bool] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> RollbackResult:
+
+    warnings: list[str] = []
+
+    def warn(msg: str) -> None:
+        warnings.append(msg)
+        if on_warning is not None:
+            on_warning(msg)
+
+    def say(msg: str) -> None:
+        if on_progress is not None:
+            on_progress(msg)
+
+    with _instance_lock(name):
+        entry = get_migration_backup(name)
+        if entry is None:
+            raise engine.ConfigError(f"no pre-migration backup is recorded for '{name}'.")
+        if entry["status"] != "kept":
+            raise engine.ConfigError(
+                f"the backup for '{name}' is '{entry['status']}', not 'kept' -- "
+                + ("it has already been restored." if entry["status"] == "restored"
+                   else "it was never completed; `backup-delete` removes what exists."))
+        record = entry["record"]
+        orig = record["original"]
+        backup_id = record["backup"].get("instance_id")
+        if not backup_id:
+            raise engine.ConfigError(f"the backup record for '{name}' has no backup instance.")
+        managed = load_registry().get(name)
+        if managed is not None:
+            if managed.get("transitioning"):
+                raise engine.ConfigError(f"'{name}' is mid start/stop; wait for it to finish.")
+            if managed.get("current_status") in ("running", "unreachable") and managed.get(
+                    "current_linode_id"):
+                raise engine.ConfigError(
+                    f"'{name}' is running as a managed instance. Stop it first (`stop --name "
+                    f"{name}`, or `stop --name {name} --skip-precapture` if it can't be reached), "
+                    "then roll back.")
+        try:
+            backup = engine.retry_transient(lambda: client.load(Instance, backup_id))
+            _ = backup.status
+        except ApiError as e:
+            if e.status == 404:
+                raise engine.ConfigError(
+                    f"the backup instance {backup_id} no longer exists on Linode.") from e
+            raise
+        pairs = engine.vpc_interface_addresses(orig.get("network_config"),
+                                               orig["interface_generation"])
+        if pairs:
+            live = engine.retry_transient(lambda: list(client.vpcs.ips()))
+            allowed = {orig["instance_id"], backup_id}
+            for subnet_id, address in pairs:
+                holder = next((ip for ip in live if ip.subnet_id == subnet_id
+                               and ip.address == address), None)
+                if holder is not None and getattr(holder, "linode_id", None) not in allowed:
+                    raise engine.ConfigError(
+                        f"VPC address {address} (subnet {subnet_id}) is now used by instance "
+                        f"{getattr(holder, 'linode_id', '?')}; free it, then roll back.")
+        say(f"Rolling '{name}' back to its pre-migration backup (instance {backup_id}, taken "
+            f"{record.get('created_at')}). The original's public address(es) "
+            f"{', '.join(orig.get('public_ipv4') or []) or '(none)'} and VPC/VLAN addresses move "
+            "to the backup and the scheduler stops managing this name. If the original instance "
+            f"({orig['instance_id']}) still exists it is replaced: its volumes are detached and "
+            "kept, the instance itself is deleted.")
+        if confirm is not None and not confirm():
+            return RollbackResult(outcome="aborted_by_user")
+
+        result = engine.restore_migration_backup(client, record, boot=boot,
+                                                 on_progress=on_progress, on_warning=warn)
+
+        if managed is not None:
+            say(f"Removing '{name}' from scheduling (its migrated volumes are kept, untagged)...")
+            data_ids = [v["volume_id"] for v in managed.get("data_volumes") or []]
+            try:
+                engine.untag_managed_resources(client, name, os_volume_id=managed.get("os_volume_id"),
+                                               data_volume_ids=data_ids)
+                _strip_recovery_metadata_tags(client, managed.get("os_volume_id"))
+            except Exception as e:
+                warn(f"WARNING: could not untag the migrated volumes of '{name}' ({e}); a later "
+                     "`rebuild` may list them again -- remove their linode-scheduler-* tags.")
+            reserved = managed.get("reserved_ip")
+            if reserved:
+                try:
+                    _strip_scheduler_tags_from_reserved_ip(client, reserved)
+                except Exception as e:
+                    warn(f"WARNING: could not untag reserved IP {reserved} ({e}).")
+            _delete_one_record(name)
+        migration = load_migrations().get(name)
+        if migration is not None:
+            dest = migration.get("dest_volume_id")
+            if dest:
+                try:
+                    engine.retag_migration_volume_as_orphaned(client, dest, name)
+                except Exception as e:
+                    warn(f"WARNING: could not mark migration volume {dest} orphaned ({e}).")
+                say(f"The migration's destination volume {dest} is kept and listed by "
+                    "`migrate-orphans`; delete it there when you no longer need it.")
+            _delete_one_migration(name)
+
+        record["restored_at"] = datetime.now(UTC).isoformat()
+        record["restore_result"] = result
+        _save_migration_backup(name, "restored", record)
+        _sync_migration_backup_record(name, on_warning)
+
+    reachable = None
+    host = _restored_ssh_host(record)
+    if boot and host and ssh_key:
+        try:
+            engine.ssh_run(host, ssh_key, "true", trust_new=True)
+            reachable = True
+        except Exception as e:
+            if "IDENTIFICATION HAS CHANGED" in str(e) or "host key" in str(e).lower():
+
+
+                warn(f"WARNING: the restored instance presents new SSH host keys at {host} (it "
+                     "was a new instance to cloud-init). Expect a host-key warning from your own "
+                     "SSH clients; remove the old entry (ssh-keygen -R) after checking.")
+                try:
+                    engine.reset_known_host(host)
+                    engine.ssh_run(host, ssh_key, "true", trust_new=True)
+                    reachable = True
+                except Exception as e2:
+                    reachable = False
+                    warn(f"WARNING: the restored instance didn't answer SSH at {host} ({e2}).")
+            else:
+                reachable = False
+                warn(f"WARNING: the restored instance booted but didn't answer SSH at {host} yet "
+                     f"({e}). Check it in the Linode console.")
+    return RollbackResult(
+        outcome="restored", backup_instance_id=backup_id, label=result.get("label"),
+        public_ipv4=result.get("public_ipv4") or [],
+        original_deleted_instance_id=orig["instance_id"] if result.get("original_deleted") else None,
+        reachable=reachable, warnings=warnings,
+    )
+
+
+@dataclass
+class BackupDeleteResult:
+    outcome: Literal["deleted", "forgotten", "aborted_by_user", "incomplete"]
+    problems: list[str] = field(default_factory=list)
+
+
+@_logs_activity("backup-delete")
+def delete_migration_backup(
+    client, name: str, *, confirm: Callable[[], bool] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> BackupDeleteResult:
+
+    with _instance_lock(name):
+        entry = get_migration_backup(name)
+        if entry is None:
+            raise engine.ConfigError(f"no pre-migration backup is recorded for '{name}'.")
+        record = entry["record"]
+        if entry["status"] == "restored":
+            if on_progress is not None:
+                on_progress(f"The backup for '{name}' was restored and is now the running system "
+                            f"(instance {record['backup'].get('instance_id')}); only the record is "
+                            "removed, nothing on Linode changes.")
+            if confirm is not None and not confirm():
+                return BackupDeleteResult(outcome="aborted_by_user")
+            _delete_migration_backup_row(name)
+            _sync_migration_backup_record(name, on_warning)
+            return BackupDeleteResult(outcome="forgotten")
+        if on_progress is not None:
+            vols = record["backup"].get("volumes") or []
+            on_progress(f"This permanently deletes the backup of '{name}': instance "
+                        f"{record['backup'].get('instance_id')} and {len(vols)} cloned volume(s). "
+                        "The original system can no longer be rolled back to after this.")
+        if confirm is not None and not confirm():
+            return BackupDeleteResult(outcome="aborted_by_user")
+        problems = engine.delete_migration_backup_resources(client, record, name,
+                                                             on_progress=on_progress)
+        if problems:
+            return BackupDeleteResult(outcome="incomplete", problems=problems)
+        _delete_migration_backup_row(name)
+        _sync_migration_backup_record(name, on_warning)
+        return BackupDeleteResult(outcome="deleted")
+
+
+def _format_cost(estimate: dict | None) -> str:
+    if not estimate:
+        return "an amount Linode's price list couldn't confirm (about the instance's own plan price)"
+    return (f"about ${estimate['total_monthly']:.2f}/month (${estimate['instance_monthly']:.2f} "
+            f"for the powered-off {estimate['plan']} clone -- a powered-off Linode still bills -- "
+            f"plus ${estimate['volumes_monthly']:.2f} for {estimate['volume_gb']} GB of cloned "
+            "volumes)")
+
+
+def cmd_backup_list(args) -> int:
+    entries = [migration_backup_summary(e) for e in list_migration_backups()]
+    if getattr(args, "json", False):
+        print(json.dumps(entries, indent=2))
+        return 0
+    if not entries:
+        print("No pre-migration backups recorded.")
+        return 0
+    for e in entries:
+        cost = e.get("estimated_monthly_cost") or {}
+        print(f"{e['name']}: {e['status']}  backup instance {e['backup_instance_id']} "
+              f"({e['backup_label']}), {len(e['backup_volumes'])} cloned volume(s), taken "
+              f"{e['created_at']}" + (f", ~${cost['total_monthly']:.2f}/month" if cost else ""))
+    return 0
+
+
+def cmd_rollback(client, args) -> int:
+    def _confirm() -> bool:
+        if args.yes:
+            return True
+        return input(f"Type '{args.name}' to roll back: ").strip() == args.name
+
+    try:
+        result = rollback_to_backup(client, args.name, args.ssh_key, boot=not args.no_boot,
+                                    confirm=_confirm, on_progress=print,
+                                    on_warning=_print_to_stderr)
+    except InstanceLockedError as e:
+        print(f"{e}", file=sys.stderr)
+        return 3
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    if result.outcome == "aborted_by_user":
+        print("Aborted; nothing changed.")
+        return 1
+    print(f"Rolled back: instance {result.backup_instance_id} ('{result.label}') is the original "
+          f"system again" + (f", at {', '.join(result.public_ipv4)}" if result.public_ipv4 else "")
+          + ("." if not args.no_boot else " (left powered off)."))
+    if result.original_deleted_instance_id:
+        print(f"The original instance {result.original_deleted_instance_id} was replaced (deleted; "
+              "its volumes were detached and kept).")
+    print(f"'{args.name}' is no longer managed by the scheduler. `backup-delete --name "
+          f"{args.name}` removes the backup record (nothing on Linode is deleted for a restored "
+          "backup).")
+    return 0 if result.reachable in (True, None) else 1
+
+
+def cmd_backup_delete(client, args) -> int:
+    def _confirm() -> bool:
+        if args.yes:
+            return True
+        return input(f"Type '{args.name}' to confirm: ").strip() == args.name
+
+    try:
+        result = delete_migration_backup(client, args.name, confirm=_confirm, on_progress=print,
+                                         on_warning=_print_to_stderr)
+    except InstanceLockedError as e:
+        print(f"{e}", file=sys.stderr)
+        return 3
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    if result.outcome == "aborted_by_user":
+        print("Aborted; nothing changed.")
+        return 1
+    if result.outcome == "incomplete":
+        print("Backup NOT fully deleted -- the record is kept so you can retry:", file=sys.stderr)
+        for p in result.problems:
+            print(f"  {p}", file=sys.stderr)
+        return 1
+    print("Backup deleted." if result.outcome == "deleted" else "Backup record removed.")
     return 0
 
 
@@ -8933,6 +9781,17 @@ def rebuild_instances(
     except Exception as e:
         if on_warning is not None:
             on_warning(f"WARNING: couldn't reconcile API tokens from Object Storage ({e}).")
+    try:
+        restore_migration_backups_from_object_storage(on_progress=on_progress,
+                                                      on_warning=on_warning)
+        for backup_name, backup_id, backup_label in untracked_backup_instances(client):
+            if on_warning is not None:
+                on_warning(f"WARNING: instance {backup_id} ('{backup_label}') is tagged as the "
+                           f"pre-migration backup of '{backup_name}' but no record of it was "
+                           "recovered. It still bills; keep it or delete it in Cloud Manager.")
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(f"WARNING: couldn't check pre-migration backups ({e}).")
 
     if on_progress is not None:
         on_progress(f"Scanned tags: {len(found)} name(s) found.")
@@ -9659,9 +10518,54 @@ def build_arg_parser() -> argparse.ArgumentParser:
     migrate_start_parser.add_argument("--force", action="store_true", help="Restart an in-progress migration.")
     migrate_start_parser.add_argument(
         "--yes", action="store_true",
-        help="Skip the confirmation prompt shown when --force targets a DIFFERENT "
-        "--instance-id than the in-progress attempt being restarted.",
+        help="Skip the confirmation prompts (a --force restart at a DIFFERENT --instance-id; the "
+        "cost of --backup).",
     )
+    migrate_start_parser.add_argument(
+        "--backup", action="store_true",
+        help="Before migrating, power the instance off and keep a native clone of it (and of its "
+        "attached volumes) as a powered-off rollback point. Billable until deleted "
+        "(`backup-delete`); `rollback` puts the original back.",
+    )
+
+    backup_config_parser = subparsers.add_parser(
+        "backup-config",
+        help="Show or change where this tool backs itself up (Object Storage settings in .env), "
+        "test the connection, and see the last backup's result.",
+    )
+    backup_config_parser.add_argument("--bucket")
+    backup_config_parser.add_argument("--endpoint", help="e.g. https://in-maa-1.linodeobjects.com")
+    backup_config_parser.add_argument("--access-key", help="Prompted for if omitted.")
+    backup_config_parser.add_argument("--secret-key", help="Prompted for if omitted (recommended).")
+    backup_config_parser.add_argument("--test", action="store_true",
+                                      help="Test the saved settings (writes and deletes a test object).")
+    backup_config_parser.add_argument("--disable", action="store_true",
+                                      help="Remove the Object Storage settings.")
+    backup_config_parser.add_argument("--json", action="store_true")
+
+    backup_list_parser = subparsers.add_parser(
+        "backup-list", help="List pre-migration backups (migrate-start --backup).")
+    backup_list_parser.add_argument("--json", action="store_true")
+
+    rollback_parser = subparsers.add_parser(
+        "rollback",
+        help="Put the original system back from its pre-migration backup: the backup instance "
+        "takes the original's public/VPC/VLAN addresses and label and is booted; the scheduler "
+        "stops managing the name. Nothing is deleted.",
+    )
+    rollback_parser.add_argument("--name", required=True, type=validate_instance_name)
+    rollback_parser.add_argument("--ssh-key", default=default_ssh_key)
+    rollback_parser.add_argument("--no-boot", action="store_true",
+                                 help="Restore everything but leave the backup powered off.")
+    rollback_parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
+
+    backup_delete_parser = subparsers.add_parser(
+        "backup-delete",
+        help="Permanently delete a kept pre-migration backup (its clone instance and cloned "
+        "volumes). For a restored backup only the record is removed.",
+    )
+    backup_delete_parser.add_argument("--name", required=True, type=validate_instance_name)
+    backup_delete_parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
 
     migrate_resume_parser = subparsers.add_parser(
         "migrate-resume",
@@ -10006,8 +10910,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     extend_parser.add_argument("--name", required=True, type=validate_instance_name)
     extend_parser.add_argument(
         "--hours", type=float, default=None,
-        help=f"How many hours from now to push the auto-stop out to (default "
-        f"{DEFAULT_MANUAL_OVERRIDE_WINDOW_HOURS}).",
+        help=f"How many hours to extend by (default {DEFAULT_MANUAL_OVERRIDE_WINDOW_HOURS}): "
+        "for a manually started instance, from now; for one running on its schedule, past "
+        "today's scheduled stop (which is then skipped).",
     )
 
     group_create_parser = subparsers.add_parser(
@@ -10392,6 +11297,10 @@ def _route(args) -> int:
         return cmd_clear_lock(args)
     if args.command == "deregister":
         return cmd_deregister(args)
+    if args.command == "backup-list":
+        return cmd_backup_list(args)
+    if args.command == "backup-config":
+        return cmd_backup_config(args)
     if args.command == "reset-host-key":
         return cmd_reset_host_key(args)
     if args.command == "backup":
@@ -10458,6 +11367,10 @@ def _route(args) -> int:
         return cmd_hooks_clear(client, args)
     if args.command == "set-vpc-address":
         return cmd_set_vpc_address(client, args)
+    if args.command == "rollback":
+        return cmd_rollback(client, args)
+    if args.command == "backup-delete":
+        return cmd_backup_delete(client, args)
 
     return 1
 
