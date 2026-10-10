@@ -190,3 +190,95 @@ test('A group can be kept running past today’s stop, with skipped members and 
   await expect(page.getByText('Skipped app-2: follows its own schedule')).toBeVisible()
   expect(body).toEqual({ hours: 3 })
 })
+test('Holidays page adds a range for a group and lists it', async ({ page }) => {
+  await loginAs(page)
+  await mockInstanceList(page, {})
+  await mockGroupList(page, [
+    { id: 1, name: 'dev', timezone: 'UTC', rules: [], enabled: true, member_count: 1 },
+  ])
+  const stored: {
+    date: string
+    scope: string
+    target: string | null
+    note: string | null
+    created_at: string
+  }[] = []
+  let posted: unknown = null
+  await page.route('**/holidays*', async (route: Route) => {
+    const req = route.request()
+    if (req.method() === 'POST') {
+      posted = req.postDataJSON()
+      stored.push(
+        { date: '2026-12-24', scope: 'group', target: 'dev', note: 'Xmas', created_at: 'x' },
+        { date: '2026-12-25', scope: 'group', target: 'dev', note: 'Xmas', created_at: 'x' },
+      )
+      return route.fulfill({ json: { added: ['2026-12-24', '2026-12-25'], warnings: [] } })
+    }
+    return route.fulfill({ json: stored })
+  })
+  await page.goto('/#/holidays')
+  await page.getByLabel('Holiday date').fill('2026-12-24')
+  await page.getByLabel('Holiday end date').fill('2026-12-25')
+  await page.getByLabel('Holiday applies to').selectOption('group')
+  await page.getByLabel('Holiday target').selectOption('dev')
+  await page.getByLabel('Holiday note').fill('Xmas')
+  await page.getByRole('button', { name: 'Add holiday' }).click()
+  await expect(page.getByText('Added: 2026-12-24, 2026-12-25.')).toBeVisible()
+  await expect(page.getByText('2026-12-25', { exact: true })).toBeVisible()
+  expect(posted).toEqual({
+    date: '2026-12-24',
+    to: '2026-12-25',
+    note: 'Xmas',
+    group_name: 'dev',
+    name: null,
+  })
+})
+test('Skip tomorrow on a group adds tomorrow (group timezone) as a group holiday', async ({ page }) => {
+  await loginAs(page)
+  const rules = [{ days_of_week: ['mon'], start_time: '09:00', stop_time: '18:00' }]
+  await mockGroupList(page, [{ id: 1, name: 'app', timezone: 'UTC', rules, enabled: true, member_count: 0 }])
+  await page.route('**/groups/app', (route: Route) =>
+    route.fulfill({
+      json: {
+        id: 1,
+        name: 'app',
+        timezone: 'UTC',
+        rules,
+        enabled: true,
+        members: [],
+        depends_on: [],
+        dependents: [],
+      },
+    }),
+  )
+  await page.route('**/groups/app/savings*', (route: Route) =>
+    route.fulfill({
+      json: {
+        scheduled_savings_percent: null,
+        actual_savings_percent: null,
+        window_days: 7,
+        schedule_state: 'active',
+      },
+    }),
+  )
+  await page.route('**/groups/app/hooks', (route: Route) => route.fulfill({ json: { hooks: null } }))
+  await page.route('**/instances', (route: Route) => route.fulfill({ json: {} }))
+  let posted: {
+    date: string
+    group_name: string
+  } | null = null
+  await page.route('**/holidays*', async (route: Route) => {
+    if (route.request().method() === 'POST') {
+      posted = route.request().postDataJSON()
+      return route.fulfill({ json: { added: [posted!.date], warnings: [] } })
+    }
+    return route.fulfill({
+      json: posted ? [{ date: posted.date, scope: 'group', target: 'app', note: null, created_at: 'x' }] : [],
+    })
+  })
+  await page.goto('/ui/#/groups/app')
+  await page.getByRole('button', { name: 'Skip tomorrow' }).click()
+  await expect(page.getByRole('button', { name: 'Tomorrow is a holiday' })).toBeDisabled()
+  const expected = new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10)
+  expect(posted).toMatchObject({ date: expected, group_name: 'app' })
+})

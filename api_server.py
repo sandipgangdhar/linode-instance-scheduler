@@ -228,11 +228,16 @@ _ROUTE_SCOPES: dict[tuple[str, str], str | None] = {
     ("POST", "/instances/{name}/migrate-start"): "instances:migrate",
     ("POST", "/instances/{name}/migrate-resume"): "instances:migrate",
     ("GET", "/instances/{name}/migrate-status"): "instances:migrate",
+    ("GET", "/instances/{name}/migrate-copy"): "instances:migrate",
+    ("POST", "/instances/{name}/migrate-copy"): "instances:migrate",
     ("GET", "/linode/instances/{instance_id}/backup-estimate"): "instances:migrate",
     ("GET", "/backups"): "instances:migrate",
     ("GET", "/backups/{name}"): "instances:migrate",
     ("POST", "/backups/{name}/rollback"): "instances:migrate",
     ("POST", "/groups/{group_name}/extend"): "instances:extend",
+    ("GET", "/holidays"): "schedules:read",
+    ("POST", "/holidays"): "schedules:write",
+    ("DELETE", "/holidays"): "schedules:write",
     ("DELETE", "/backups/{name}"): "instances:migrate",
     ("POST", "/instances/{name}/offboard"): "instances:offboard",
     ("POST", "/instances/{name}/deregister"): "instances:offboard",
@@ -466,7 +471,7 @@ _TOTAL_STEPS: dict[str, int] = {
     "start": 3, "stop": 2,
 
 
-    "migrate_start": 5, "migrate_resume": 8,
+    "migrate_start": 5, "migrate_resume": 8, "migrate_copy": 12,
 }
 _OPERATION_TTL = timedelta(minutes=10)
 
@@ -1206,6 +1211,39 @@ class SystemBackupConfigRequest(BaseModel):
     secret_key: str
 
 
+class HolidayRequest(BaseModel):
+    date: str
+    to: str | None = None
+    group_name: str | None = None
+    name: str | None = None
+    note: str | None = None
+
+
+@app.get("/holidays")
+def api_list_holidays(all: bool = False, user: str = Depends(require_session)) -> list:
+
+    since = None if all else datetime.now(UTC).date() - timedelta(days=1)
+    return im.list_holidays(since=since)
+
+
+@app.post("/holidays")
+def api_add_holidays(body: HolidayRequest, user: str = Depends(require_session)) -> dict:
+
+    added, warnings = _call_collecting_warnings(
+        lambda on_warning: im.add_holidays(body.date, body.to, group_name=body.group_name,
+                                           name=body.name, note=body.note, on_warning=on_warning))
+    return {"added": added, "warnings": warnings}
+
+
+@app.delete("/holidays")
+def api_remove_holidays(date: str, to: str | None = None, group_name: str | None = None,
+                        name: str | None = None, user: str = Depends(require_session)) -> dict:
+    removed, warnings = _call_collecting_warnings(
+        lambda on_warning: im.remove_holidays(date, to, group_name=group_name, name=name,
+                                              on_warning=on_warning))
+    return {"removed": removed, "warnings": warnings}
+
+
 @app.get("/system/backup")
 def api_system_backup_status(user: str = Depends(require_session)) -> dict:
 
@@ -1290,6 +1328,36 @@ def api_migrate_resume(name: str, request: Request, user: str = Depends(require_
 
     threading.Thread(target=_run_job, args=(op_id, _do), daemon=True).start()
     return {"operation_id": op_id, "total_steps": _TOTAL_STEPS["migrate_resume"]}
+
+
+@app.get("/instances/{name}/migrate-copy")
+def api_migrate_copy_readiness(name: str, request: Request, user: str = Depends(require_session)) -> dict:
+
+    return im.assisted_copy_readiness(_client(request), name, _ssh_key(request))
+
+
+@app.post("/instances/{name}/migrate-copy")
+def api_migrate_copy(name: str, request: Request, user: str = Depends(require_session)) -> dict:
+
+    client, ssh_key = _client(request), _ssh_key(request)
+    op_id = _start_operation("migrate_copy")
+    counted = _make_progress_and_warning_reporter(op_id)
+
+    def _on_progress(message: str) -> None:
+        if message.startswith("Copied ") and " so far " in message:
+            with _operations_lock:
+                op = _operations.get(op_id)
+                if op is not None:
+                    op.current_step = message
+            return
+        counted(message)
+
+    def _do() -> im.AssistedCopyResult:
+        return im.run_assisted_migration_copy(
+            client, name, ssh_key, on_progress=_on_progress, on_warning=_make_warning_reporter(op_id))
+
+    threading.Thread(target=_run_job, args=(op_id, _do), daemon=True).start()
+    return {"operation_id": op_id, "total_steps": _TOTAL_STEPS["migrate_copy"]}
 
 
 @app.post("/instances/{name}/extend")
@@ -1872,13 +1940,14 @@ def api_log_tail(
 
 CONSOLE_COMMANDS = (
     "list", "status", "history", "start", "stop", "extend", "onboard", "offboard", "deregister",
-    "migrate-start", "migrate-resume", "migrate-orphans", "schedule-set", "schedule-show",
+    "migrate-start", "migrate-resume", "migrate-copy", "migrate-orphans", "schedule-set",
+    "schedule-show",
     "schedule-clear", "hooks-set", "hooks-show", "hooks-clear", "hooks-run", "set-mode",
     "group-create", "group-schedule-set", "group-show", "group-list", "group-depends",
     "group-delete", "group-add", "group-remove", "api-token-list", "api-token-scopes",
     "api-token-revoke",
     "clear-lock", "set-vpc-address", "reset-host-key", "rebuild", "backup",
-    "backup-list", "rollback", "backup-delete",
+    "backup-list", "rollback", "backup-delete", "holiday-add", "holiday-remove", "holiday-list",
 )
 CONSOLE_MAX_RUNTIME_S = 3 * 3600
 CONSOLE_MAX_LINES = 20000

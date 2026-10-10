@@ -7,6 +7,7 @@ import { HooksCard } from '../components/HooksCard'
 import { DependencyCard } from '../components/DependencyCard'
 import { GroupActionsCard } from '../components/GroupActionsCard'
 import { GroupExtendCard } from '../components/GroupExtendCard'
+import { GroupHolidayCard } from '../components/GroupHolidayCard'
 import { ScheduleEditor } from '../components/ScheduleEditor'
 import {
   Button,
@@ -329,6 +330,7 @@ export function GroupDetailPage() {
           </Card>
           <GroupActionsCard key={`actions:${group.name}`} group={group} onChanged={reload} />
           <GroupExtendCard key={`extend:${group.name}`} group={group} onChanged={reload} />
+          <GroupHolidayCard key={`holiday:${group.name}`} group={group} />
           <DependencyCard key={`dependency:${group.name}`} group={group} onChanged={reload} />
           <HooksCard key={group.name} target={{ kind: 'group', name: group.name }} />
         </div>

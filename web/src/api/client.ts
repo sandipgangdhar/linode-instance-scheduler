@@ -3,6 +3,7 @@ import type {
   BackupEstimate,
   DeregisterResult,
   GroupExtendResult,
+  Holiday,
   MigrationBackup,
   RollbackResult,
   SystemBackupStatus,
@@ -13,6 +14,8 @@ import type {
   InstanceRecord,
   LinodeRawInstance,
   MigrateResumeResult,
+  AssistedCopyReadiness,
+  AssistedCopyResult,
   MigrateStartResult,
   MigrateStatus,
   OffboardResult,
@@ -242,6 +245,18 @@ export const api = {
     }>('POST', `/instances/${encodeURIComponent(name)}/migrate-resume`)
     return pollOperation<MigrateResumeResult>(kickoff.operation_id, onProgress, onWarning)
   },
+  getAssistedCopy: (name: string) =>
+    request<AssistedCopyReadiness>('GET', `/instances/${encodeURIComponent(name)}/migrate-copy`),
+  runAssistedCopy: async (
+    name: string,
+    onProgress?: (percent: number, currentStep: string | null) => void,
+    onWarning?: (warnings: string[]) => void,
+  ) => {
+    const kickoff = await request<{
+      operation_id: string
+    }>('POST', `/instances/${encodeURIComponent(name)}/migrate-copy`)
+    return pollOperation<AssistedCopyResult>(kickoff.operation_id, onProgress, onWarning)
+  },
   getBackupEstimate: (instanceId: number) =>
     request<BackupEstimate>('GET', `/linode/instances/${instanceId}/backup-estimate`),
   listBackups: () => request<MigrationBackup[]>('GET', '/backups'),
@@ -284,6 +299,33 @@ export const api = {
       object_storage_key: string | null
       local_path: string | null
     }>(kickoff.operation_id, onProgress)
+  },
+  listHolidays: (all = false) => request<Holiday[]>('GET', `/holidays${all ? '?all=true' : ''}`),
+  addHolidays: (body: {
+    date: string
+    to?: string | null
+    group_name?: string | null
+    name?: string | null
+    note?: string | null
+  }) =>
+    request<{
+      added: string[]
+      warnings: string[]
+    }>('POST', '/holidays', body),
+  removeHolidays: (params: {
+    date: string
+    to?: string | null
+    group_name?: string | null
+    name?: string | null
+  }) => {
+    const q = new URLSearchParams({ date: params.date })
+    if (params.to) q.set('to', params.to)
+    if (params.group_name) q.set('group_name', params.group_name)
+    if (params.name) q.set('name', params.name)
+    return request<{
+      removed: number
+      warnings: string[]
+    }>('DELETE', `/holidays?${q.toString()}`)
   },
   extendGroup: (name: string, hours: number) =>
     request<GroupExtendResult>('POST', `/groups/${encodeURIComponent(name)}/extend`, { hours }),

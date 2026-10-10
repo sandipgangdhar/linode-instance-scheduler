@@ -167,3 +167,18 @@ CREATE TABLE IF NOT EXISTS system_backup_status (
     local_path TEXT,
     problems TEXT
 );
+
+CREATE TABLE IF NOT EXISTS override_sources (
+    instance_name TEXT PRIMARY KEY,
+    source TEXT NOT NULL CHECK (source IN ('instance', 'group', 'hold')),
+    expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS holidays (
+    date TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('all', 'group', 'instance')),
+    target TEXT NOT NULL DEFAULT '',
+    note TEXT,
+    created_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (date, scope, target)
+);

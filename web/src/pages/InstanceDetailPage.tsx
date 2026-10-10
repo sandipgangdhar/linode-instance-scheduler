@@ -331,6 +331,12 @@ export function InstanceDetailPage() {
                 <WarningBanner messages={actionWarnings} />
               </div>
             )}
+            {record.holiday_today && (
+              <div className="mx-5 mb-4 rounded-md bg-amber-50 px-4 py-3 text-sm text-amber-800 ring-1 ring-inset ring-amber-200">
+                Today is a holiday for {record.holiday_today} — scheduled starts are skipped; scheduled stops
+                still happen.
+              </div>
+            )}
             {record.manual_override_expires_at && (
               <div className="mx-5 mb-4 rounded-md bg-indigo-50 px-4 py-3 text-sm text-indigo-800 ring-1 ring-inset ring-indigo-200">
                 Running past its scheduled hours — stops at{' '}
@@ -431,7 +437,7 @@ export function InstanceDetailPage() {
                     disabled={busy !== null}
                     title={
                       record.manual_override_expires_at
-                        ? 'Push the auto-stop out by this many hours from now'
+                        ? 'Push the stop out to this many hours from now (never earlier); overrides a group extension'
                         : "Skip today's scheduled stop and keep it running this many hours past it"
                     }
                     onClick={() => run('extend', () => api.extendOverride(name, extendHours))}

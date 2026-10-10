@@ -9,6 +9,7 @@ import { ConsolePage } from './pages/ConsolePage'
 import { DashboardLayout } from './pages/DashboardLayout'
 import { GroupDetailPage } from './pages/GroupDetailPage'
 import { GroupsPage } from './pages/GroupsPage'
+import { HolidaysPage } from './pages/HolidaysPage'
 import { InstanceDetailPage } from './pages/InstanceDetailPage'
 import { InstancesPage } from './pages/InstancesPage'
 import { LoginPage } from './pages/LoginPage'
@@ -45,6 +46,7 @@ function AppRoutes() {
         <Route path="/groups" element={<GroupsPage />} />
         <Route path="/groups/:name" element={<GroupDetailPage />} />
         <Route path="/tokens" element={<TokensPage />} />
+        <Route path="/holidays" element={<HolidaysPage />} />
         <Route path="/backups" element={<BackupsPage />} />
         <Route path="/system-backup" element={<SystemBackupPage />} />
         <Route path="/activity" element={<ActivityPage />} />

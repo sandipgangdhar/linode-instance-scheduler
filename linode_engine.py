@@ -2156,6 +2156,176 @@ def rescue_copy_command(dest_volume_label: str, local_disk_size_mb: int) -> str:
     )
 
 
+class LishAccessError(ConfigError):
+    pass
+
+
+RESCUE_SHELL_PROMPT = r"root@finnix:\S*# "
+_DD_PROGRESS_RE = re.compile(r"(\d+) bytes \(([^)]*)\) copied, ([0-9.]+) s, ([^\r\n]+)")
+
+
+def lish_gateway(region: str) -> str:
+
+    return f"lish-{region}.linode.com"
+
+
+def _key_body(public_key: str) -> str:
+
+    return " ".join(public_key.split()[:2])
+
+
+def lish_key_status(client, public_key: str) -> dict:
+
+    profile = retry_transient(lambda: client.get("/profile"))
+    method = profile.get("lish_auth_method") or "password_keys"
+    wanted = _key_body(public_key)
+    registered = any(_key_body(k) == wanted for k in (profile.get("authorized_keys") or []))
+    return {
+        "username": profile.get("username"),
+        "auth_method": method,
+        "keys_allowed": method != "password_only",
+        "key_registered": registered,
+    }
+
+
+def _lish_spawn(username: str, region: str, instance_label: str, ssh_key_path: str,
+                known_hosts_path: str | Path | None, log_path: str | Path | None = None):
+    import pexpect
+
+    if known_hosts_path is None:
+        known_hosts_path = BASE_DIR / "state" / "lish_known_hosts"
+    Path(known_hosts_path).parent.mkdir(parents=True, exist_ok=True)
+    child = pexpect.spawn(
+        "ssh",
+        ["-t", "-i", ssh_key_path, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+         "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={known_hosts_path}",
+         "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6",
+         f"{username}@{lish_gateway(region)}", instance_label],
+        encoding="utf-8", codec_errors="replace", timeout=30,
+        env={**os.environ, "TERM": "xterm"}, dimensions=(40, 200),
+    )
+    if log_path is not None:
+        child.logfile_read = open(log_path, "a")
+    return child
+
+
+def _lish_close(child) -> None:
+    log = getattr(child, "logfile_read", None)
+    with suppress(Exception):
+        child.close(force=True)
+    if log is not None:
+        with suppress(Exception):
+            log.close()
+
+
+def check_lish_access(username: str, region: str, instance_label: str, ssh_key_path: str, *,
+                      known_hosts_path: str | Path | None = None, wait_s: int = 25) -> None:
+
+    import pexpect
+
+    child = _lish_spawn(username, region, instance_label, ssh_key_path, known_hosts_path)
+    try:
+        i = child.expect([r"Permission denied", r"Host key verification failed", pexpect.EOF,
+                          pexpect.TIMEOUT], timeout=wait_s)
+        if i == 3:
+            return
+        seen = (child.before or "").strip()[-300:]
+        if i == 0:
+            raise LishAccessError(
+                f"Lish refused the login for {username}@{lish_gateway(region)} -- add this "
+                "deployment's public key to the Linode profile's Lish keys (Cloud Manager: "
+                "Profile > LISH Console Settings) and allow key login.")
+        if i == 1:
+            raise LishAccessError(
+                f"the Lish gateway's host key changed for {lish_gateway(region)}; remove its line "
+                "from state/lish_known_hosts if this is expected.")
+        raise LishAccessError(f"Lish closed the session for '{instance_label}': {seen or 'no output'}")
+    finally:
+        _lish_close(child)
+
+
+def run_rescue_copy_over_lish(
+    username: str, region: str, instance_label: str, ssh_key_path: str, command: str, *,
+    on_progress: Callable[[str], None] | None = None,
+    known_hosts_path: str | Path | None = None,
+    log_path: str | Path | None = None,
+    prompt_timeout_s: int = 900,
+    copy_timeout_s: int = 6 * 3600,
+    progress_every_s: int = 30,
+) -> None:
+
+    import pexpect
+
+    def _say(msg: str) -> None:
+        if on_progress is not None:
+            on_progress(msg)
+
+    deadline = time.monotonic() + prompt_timeout_s
+    child = None
+    try:
+        while True:
+            if child is None:
+                child = _lish_spawn(username, region, instance_label, ssh_key_path,
+                                    known_hosts_path, log_path)
+            try:
+                child.send("\r")
+                i = child.expect([RESCUE_SHELL_PROMPT, r"Permission denied"], timeout=10)
+                if i == 1:
+                    raise LishAccessError(
+                        f"Lish refused the login for {username}@{lish_gateway(region)} -- add "
+                        "this deployment's public key to the Linode profile's Lish keys.")
+                break
+            except pexpect.TIMEOUT:
+                pass
+            except (pexpect.EOF, OSError):
+                _lish_close(child)
+                child = None
+                time.sleep(15)
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"the Rescue Mode shell never appeared on the console within "
+                    f"{prompt_timeout_s // 60} minutes -- nothing was copied")
+        _say("Rescue shell ready on the console; starting the copy.")
+        child.expect([pexpect.TIMEOUT], timeout=2)
+        child.send("stty -echo; export TERM=dumb PS1='FX# '\r")
+        child.expect([pexpect.TIMEOUT], timeout=2)
+        child.send("echo LISH_$((6*7))_READY\r")
+        child.expect(r"LISH_42_READY", timeout=60)
+        child.send(command + "\r")
+
+
+        i = child.expect([r"\nCopying (/dev/\S+) -> (/dev/\S+)",
+                          r"nothing copied:\s*\r?\n\s*/dev/"], timeout=180)
+        if i == 1:
+            child.expect([pexpect.TIMEOUT], timeout=3)
+            raise RuntimeError(
+                "the copy command could not identify the disks unambiguously, so nothing was "
+                "copied. Console output: " + (child.before or "").strip()[-400:])
+        _say(f"Copying {child.match.group(1)} -> {child.match.group(2)}.")
+        end = time.monotonic() + copy_timeout_s
+        last_report = 0.0
+        while True:
+            i = child.expect([r"\nCOPY_DONE", r"\nCOPY_FAILED", _DD_PROGRESS_RE, pexpect.TIMEOUT],
+                             timeout=60)
+            if i == 0:
+                _say("Copy finished (COPY_DONE).")
+                return
+            if i == 1:
+                raise RuntimeError("the copy failed on the console (COPY_FAILED) -- dd or sync "
+                                   "reported an error")
+            if i == 2 and time.monotonic() - last_report >= progress_every_s:
+                last_report = time.monotonic()
+                _say(f"Copied {child.match.group(2)} so far ({child.match.group(4).strip()}).")
+            if time.monotonic() > end:
+                raise RuntimeError(f"the copy did not finish within {copy_timeout_s // 3600} hours")
+    except pexpect.EOF as e:
+        raise RuntimeError("the console session closed before the copy finished -- it may still "
+                           "be running; check the Lish console") from e
+    finally:
+        if child is not None:
+            _lish_close(child)
+
+
 def _root_device_matches_volume_command(filesystem_path: str) -> str:
 
     target = shlex.quote(filesystem_path)

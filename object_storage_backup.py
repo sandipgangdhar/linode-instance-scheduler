@@ -561,6 +561,18 @@ def delete_migration_backup(name: str) -> None:
 def list_migration_backups() -> list[str] | None:
     return _list_record_names(_MIGRATION_BACKUP_PREFIX)
 
+
+_HOLIDAYS_KEY = "holidays/all.json"
+
+
+def upload_holidays(record: dict, *, attempts: int = DEFAULT_ATTEMPTS,
+                    delay_s: float = DEFAULT_DELAY_S) -> None:
+    _upload_record(_HOLIDAYS_KEY, "holidays", record, attempts=attempts, delay_s=delay_s)
+
+
+def download_holidays() -> dict | None:
+    return _download_record(_HOLIDAYS_KEY)
+
 def sync_object_storage_backup(
     name: str, record: dict, *, on_warning: Callable[[str], None] | None = None
 ) -> None:

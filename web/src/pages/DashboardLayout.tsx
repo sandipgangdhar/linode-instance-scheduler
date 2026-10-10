@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { to: '/activity', label: 'Activity', icon: PulseIcon },
   { to: '/logs', label: 'Logs', icon: LogsIcon },
   { to: '/console', label: 'Console', icon: TerminalIcon },
+  { to: '/holidays', label: 'Holidays', icon: CalendarIcon },
   { to: '/backups', label: 'Backups', icon: ArchiveIcon },
   { to: '/system-backup', label: 'System backup', icon: ShieldIcon },
   { to: '/tokens', label: 'API tokens', icon: KeyIcon },
@@ -148,6 +149,14 @@ function ShieldIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
       <path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6l7-3z" />
       <path d="M9 12l2 2 4-4" />
+    </svg>
+  )
+}
+function CalendarIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <rect x="3" y="5" width="18" height="16" rx="2" />
+      <path d="M3 10h18M8 3v4M16 3v4" />
     </svg>
   )
 }

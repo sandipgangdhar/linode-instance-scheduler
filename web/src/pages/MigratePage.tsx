@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, ApiError, errorWarnings } from '../api/client'
-import type { BackupEstimate } from '../api/types'
+import type { AssistedCopyReadiness, BackupEstimate, MigrateResumeResult } from '../api/types'
 import {
   Button,
   Card,
@@ -71,6 +71,9 @@ export function MigratePage() {
   const [ddOutput, setDdOutput] = useState('')
   const [confirmName, setConfirmName] = useState('')
   const [keepBackup, setKeepBackup] = useState(false)
+  const [assisted, setAssisted] = useState<AssistedCopyReadiness | null>(null)
+  const [assistedChecking, setAssistedChecking] = useState(false)
+  const [assistedCopyDone, setAssistedCopyDone] = useState(false)
   const [backupEstimate, setBackupEstimate] = useState<BackupEstimate | 'unavailable' | null>(null)
   const [copyState, setCopyState] = useState<{
     text: string
@@ -83,6 +86,8 @@ export function MigratePage() {
   const currentKeyRef = useRef<string | null>(migrationKey)
   useEffect(() => {
     currentKeyRef.current = migrationKey
+    setAssisted(null)
+    setAssistedCopyDone(false)
     return () => {
       currentKeyRef.current = null
     }
@@ -241,32 +246,66 @@ export function MigratePage() {
       if (requestedKey === currentKeyRef.current) setProgress(null)
     }
   }
-  const resumeMigration = async () => {
+  const checkAssistedCopy = async () => {
+    const requestedKey = migrationKey
+    setAssistedChecking(true)
+    try {
+      const r = await api.getAssistedCopy(name)
+      if (requestedKey === currentKeyRef.current) setAssisted(r)
+    } catch {
+      if (requestedKey === currentKeyRef.current) setAssisted(null)
+    } finally {
+      if (requestedKey === currentKeyRef.current) setAssistedChecking(false)
+    }
+  }
+  useEffect(() => {
+    if (step === 'manual' && name) void checkAssistedCopy()
+  }, [step, migrationKey])
+  const resumeMigration = async (assisted = false) => {
     const requestedKey = migrationKey
     setStep('resuming')
     setError(null)
     setMigrateWarnings([])
     setProgress({ percent: 0, label: null })
     try {
-      const result = await statusBar.run(
-        `Finishing migration for "${name}"`,
-        (report) =>
-          api.migrateResume(
-            name,
-            (percent, currentStep) => {
-              if (requestedKey === currentKeyRef.current) {
-                setProgress({ percent, label: currentStep })
-              }
-              report(percent, currentStep)
-            },
-            (warnings) => {
-              if (requestedKey === currentKeyRef.current) {
-                setMigrateWarnings((prev) => [...prev, ...warnings])
-              }
-            },
-          ),
-        { onNavigate: returnToThisMigration, viewPath: migrationPath, key: migrationKey, phase: 'resume' },
-      )
+      const onProgress =
+        (report: (p: number, s: string | null) => void) => (percent: number, currentStep: string | null) => {
+          if (requestedKey === currentKeyRef.current) {
+            setProgress({ percent, label: currentStep })
+          }
+          report(percent, currentStep)
+        }
+      const onWarning = (warnings: string[]) => {
+        if (requestedKey === currentKeyRef.current) {
+          setMigrateWarnings((prev) => [...prev, ...warnings])
+        }
+      }
+      let result: MigrateResumeResult
+      if (assisted) {
+        const copied = await statusBar.run(
+          `Copying and finishing migration for "${name}"`,
+          (report) => api.runAssistedCopy(name, onProgress(report), onWarning),
+          { onNavigate: returnToThisMigration, viewPath: migrationPath, key: migrationKey, phase: 'resume' },
+        )
+        if (copied.outcome !== 'resumed' || copied.resume === null) {
+          if (requestedKey === currentKeyRef.current) {
+            setAssistedCopyDone(true)
+            setError(
+              `The copy finished, but finishing the migration failed: ${copied.detail ?? 'unknown error'}. ` +
+                'Click "Finish migration" to try again.',
+            )
+            setStep('manual')
+          }
+          return
+        }
+        result = copied.resume
+      } else {
+        result = await statusBar.run(
+          `Finishing migration for "${name}"`,
+          (report) => api.migrateResume(name, onProgress(report), onWarning),
+          { onNavigate: returnToThisMigration, viewPath: migrationPath, key: migrationKey, phase: 'resume' },
+        )
+      }
       if (result.outcome === 'resumed') {
         const resumeNotes: string[] = []
         if (result.previous_attempts_count > 0) {
@@ -302,7 +341,13 @@ export function MigratePage() {
       if (requestedKey !== currentKeyRef.current) return
       const carried = errorWarnings(e)
       if (carried) setMigrateWarnings((prev) => [...prev, ...carried])
-      setError(e instanceof ApiError ? e.message : 'Could not resume migration.')
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : assisted
+            ? 'The assisted copy failed.'
+            : 'Could not resume migration.',
+      )
       setStep('manual')
     } finally {
       if (requestedKey === currentKeyRef.current) setProgress(null)
@@ -565,6 +610,63 @@ export function MigratePage() {
                   </div>
                 )}
 
+                {step === 'manual' && assistedCopyDone && (
+                  <div className="rounded-md border border-emerald-300 bg-emerald-50 p-4 space-y-2 text-sm">
+                    <p className="text-emerald-900">The copy already finished. Only the last step is left.</p>
+                    <Button variant="primary" onClick={() => resumeMigration()}>
+                      Finish migration
+                    </Button>
+                  </div>
+                )}
+                {step === 'manual' && !assistedCopyDone && assisted?.backup_kept && (
+                  <div className="rounded-md border border-indigo-200 bg-indigo-50 p-4 space-y-3 text-sm">
+                    <p className="font-medium text-slate-900">Let the tool run the copy for you</p>
+                    <p className="text-slate-700">
+                      A backup of this instance is kept, so you can roll back whatever happens. The tool opens
+                      this instance's Rescue Mode console over Lish, runs the same copy command shown below,
+                      waits for it to finish, then finishes the migration and onboards the instance.
+                    </p>
+                    {assisted.available ? (
+                      <Button variant="primary" onClick={() => resumeMigration(true)}>
+                        Run the copy for me
+                      </Button>
+                    ) : (
+                      <div className="space-y-2">
+                        <p className="text-slate-700">
+                          First, let this deployment's key log in to Lish: in Cloud Manager open{' '}
+                          <strong>Profile → LISH Console Settings</strong>, allow key login, and add this
+                          public key
+                          {assisted.username ? (
+                            <>
+                              {' '}
+                              (Lish user <strong>{assisted.username}</strong>)
+                            </>
+                          ) : null}
+                          :
+                        </p>
+                        {assisted.public_key && (
+                          <pre className="overflow-x-auto rounded bg-white p-2 text-xs text-slate-800">
+                            {assisted.public_key}
+                          </pre>
+                        )}
+                        <ul className="list-disc pl-5 text-xs text-slate-600">
+                          {assisted.reasons.map((r) => (
+                            <li key={r}>{r}</li>
+                          ))}
+                        </ul>
+                        <Button
+                          variant="secondary"
+                          disabled={assistedChecking}
+                          onClick={() => void checkAssistedCopy()}
+                        >
+                          {assistedChecking ? 'Checking…' : 'Check again'}
+                        </Button>
+                      </div>
+                    )}
+                    <p className="text-xs text-slate-500">Or do it yourself with the steps below.</p>
+                  </div>
+                )}
+
                 {manualPhase === 'lsblk' && step === 'manual' && (
                   <div className="space-y-3 text-sm text-slate-700">
                     <p className="font-medium text-slate-900">Step 1 of 3 — identify the devices</p>
@@ -770,7 +872,7 @@ export function MigratePage() {
                           variant="primary"
                           className="flex-1"
                           disabled={!ddOutput.trim() || ddOutputVerification.status === 'looks_failed'}
-                          onClick={resumeMigration}
+                          onClick={() => resumeMigration()}
                         >
                           I've completed the copy — finish migration
                         </Button>

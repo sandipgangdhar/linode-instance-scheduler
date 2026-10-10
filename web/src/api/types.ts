@@ -19,6 +19,7 @@ export interface InstanceRecord {
   reserved_ip: string | null
   group_id: number | null
   schedule_mode?: 'auto' | 'manual'
+  holiday_today?: string
   current_linode_id: number | null
   current_status: InstanceStatus
   transitioning: boolean
@@ -146,6 +147,22 @@ export interface MigrateResumeResult {
   previous_attempts_count: number
   detail: string | null
   fstab_entries_disabled: string[]
+}
+export interface AssistedCopyReadiness {
+  available: boolean
+  reasons: string[]
+  username: string | null
+  gateway: string | null
+  public_key: string | null
+  key_registered: boolean
+  keys_allowed: boolean
+  backup_kept: boolean
+  instance_id: number | null
+}
+export interface AssistedCopyResult {
+  outcome: 'resumed' | 'copied' | 'resume_failed'
+  resume: MigrateResumeResult | null
+  detail: string | null
 }
 export interface MigrateStatus {
   in_progress: boolean
@@ -405,4 +422,11 @@ export interface GroupExtendResult {
     reason: string
   }[]
   dependencies_held: string[]
+}
+export interface Holiday {
+  date: string
+  scope: 'all' | 'group' | 'instance'
+  target: string | null
+  note: string | null
+  created_at: string
 }

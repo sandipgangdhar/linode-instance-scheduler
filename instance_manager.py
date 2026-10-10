@@ -1714,6 +1714,166 @@ def cmd_migrate_resume(client, args) -> int:
     return 0
 
 
+def _deployment_public_key(ssh_key: str) -> str:
+    path = Path(ssh_key + ".pub")
+    try:
+        text = path.read_text().strip()
+    except OSError as e:
+        raise engine.ConfigError(f"could not read this deployment's public key {path}: {e}") from e
+    if not text:
+        raise engine.ConfigError(f"this deployment's public key {path} is empty")
+    return text
+
+
+def _kept_backup_for(name: str, instance_id: int | None) -> dict | None:
+    entry = get_migration_backup(name)
+    if entry is None or entry["status"] != "kept":
+        return None
+    original_id = (entry["record"].get("original") or {}).get("instance_id")
+    if instance_id is not None and original_id is not None and int(original_id) != int(instance_id):
+        return None
+    return entry
+
+
+def assisted_copy_readiness(client, name: str, ssh_key: str) -> dict:
+
+    reasons: list[str] = []
+    migration = load_migrations().get(name)
+    instance_id = migration.get("instance_id") if migration else None
+    if migration is None:
+        reasons.append(f"no migration in progress for '{name}'")
+    elif migration.get("phase") != "awaiting_manual_dd":
+        reasons.append(f"the migration is at phase {migration.get('phase')!r}, not waiting for the copy")
+    backup_kept = _kept_backup_for(name, instance_id) is not None
+    if not backup_kept:
+        reasons.append("no pre-migration backup is kept for this migration (start it with a backup "
+                       "to use the assisted copy)")
+    public_key = None
+    try:
+        public_key = _deployment_public_key(ssh_key)
+    except engine.ConfigError as e:
+        reasons.append(str(e))
+    status = {"username": None, "keys_allowed": False, "key_registered": False}
+    gateway = None
+    if public_key is not None:
+        try:
+            status = engine.lish_key_status(client, public_key)
+        except (ApiError, requests.exceptions.RequestException) as e:
+            reasons.append(f"could not read the Linode profile's Lish settings: {e}")
+        else:
+            if not status["keys_allowed"]:
+                reasons.append("the Linode profile allows only password login to Lish; allow keys "
+                               "(Profile > LISH Console Settings)")
+            if not status["key_registered"]:
+                reasons.append("this deployment's public key is not one of the profile's Lish keys "
+                               "(Profile > LISH Console Settings)")
+    if instance_id is not None:
+        try:
+            instance = engine.retry_transient(lambda: client.load(Instance, instance_id))
+            gateway = engine.lish_gateway(instance.region.id)
+        except (ApiError, requests.exceptions.RequestException) as e:
+            reasons.append(f"could not load instance {instance_id}: {e}")
+    return {
+        "available": not reasons,
+        "reasons": reasons,
+        "username": status.get("username"),
+        "gateway": gateway,
+        "public_key": public_key,
+        "key_registered": bool(status.get("key_registered")),
+        "keys_allowed": bool(status.get("keys_allowed")),
+        "backup_kept": backup_kept,
+        "instance_id": instance_id,
+    }
+
+
+@dataclass
+class AssistedCopyResult:
+
+    outcome: Literal["resumed", "copied", "resume_failed"]
+    resume: MigrateResumeResult | None = None
+    detail: str | None = None
+
+
+@_logs_activity("migrate-copy")
+def run_assisted_migration_copy(
+    client, name: str, ssh_key: str, *,
+    resume: bool = True,
+    on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> AssistedCopyResult:
+
+    readiness = assisted_copy_readiness(client, name, ssh_key)
+    if not readiness["available"]:
+        raise engine.ConfigError("the assisted copy can't run: " + "; ".join(readiness["reasons"]))
+    with _instance_lock(name):
+        migration = load_migrations().get(name)
+        if migration is None or migration.get("phase") != "awaiting_manual_dd":
+            raise engine.ConfigError(f"'{name}' is no longer waiting for its copy")
+        try:
+            instance = engine.retry_transient(lambda: client.load(Instance, migration["instance_id"]))
+            volume = engine.retry_transient(lambda: client.load(Volume, migration["dest_volume_id"]))
+            region, label, volume_label = instance.region.id, instance.label, volume.label
+        except (ApiError, requests.exceptions.RequestException) as e:
+            raise engine.ConfigError(f"could not load the instance or its new volume: {e}") from e
+        command = engine.rescue_copy_command(volume_label, migration.get("local_disk_size_mb") or 0)
+        log_dir = REGISTRY_PATH.parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        if on_progress is not None:
+            on_progress(f"Opening the Rescue Mode console of instance {instance.id} over Lish "
+                        f"({readiness['username']}@{readiness['gateway']})...")
+        try:
+            engine.run_rescue_copy_over_lish(
+                readiness["username"], region, label, ssh_key, command,
+                on_progress=on_progress, log_path=log_dir / f"lish-{name}.log")
+        except RuntimeError as e:
+            raise engine.ConfigError(
+                f"the assisted copy did not complete: {e}. The migration is still waiting for "
+                "its copy: run it again, or run the copy by hand in the Lish console. Rollback "
+                f"is available: instance_manager.py rollback --name {name}") from e
+    if not resume:
+        return AssistedCopyResult(outcome="copied")
+    try:
+        resumed = migrate_resume_instance(client, name, ssh_key, on_progress=on_progress,
+                                          on_warning=on_warning)
+    except (engine.ConfigError, InstanceLockedError) as e:
+        return AssistedCopyResult(outcome="resume_failed", detail=str(e))
+    return AssistedCopyResult(outcome="resumed", resume=resumed)
+
+
+def cmd_migrate_copy(client, args) -> int:
+    if getattr(args, "check", False):
+        r = assisted_copy_readiness(client, args.name, args.ssh_key)
+        print(json.dumps(r, indent=2))
+        return 0 if r["available"] else 1
+    try:
+        result = run_assisted_migration_copy(
+            client, args.name, args.ssh_key, resume=not args.no_resume,
+            on_progress=print, on_warning=_print_to_stderr)
+    except InstanceLockedError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 3
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    if result.outcome == "copied":
+        print(f"Copy done. Next: instance_manager.py migrate-resume --name {args.name}")
+        return 0
+    if result.outcome == "resume_failed":
+        print(f"Copy done, but migrate-resume failed: {result.detail}", file=sys.stderr)
+        print(f"Run it again: instance_manager.py migrate-resume --name {args.name}", file=sys.stderr)
+        return 1
+    r = result.resume
+    assert r is not None
+    if r.outcome == "incomplete":
+        print(f"Migration finished, but local bookkeeping failed: {r.detail}", file=sys.stderr)
+        print(f"Onboard directly: instance_manager.py onboard --name {args.name} "
+              f"--instance-id {r.instance_id}", file=sys.stderr)
+        return 1
+    print(f"Migration complete: instance {r.instance_id} now boots from volume {r.os_volume_id}.")
+    print(f"Next: instance_manager.py onboard --name {args.name} --instance-id {r.instance_id}")
+    return 0
+
+
 def _migration_conflict_reason_text(c: dict) -> str:
 
     if c["reason"] == "multiple_names":
@@ -3755,9 +3915,54 @@ def _print_stop_result(name: str, result: StopResult) -> int:
     return 0
 
 
+def _set_override_source(name: str, source: str, expires_at: str) -> None:
+    def _do():
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO override_sources (instance_name, source, expires_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(instance_name) DO UPDATE SET source = excluded.source, "
+                "expires_at = excluded.expires_at", (name, source, expires_at))
+            conn.commit()
+        finally:
+            conn.close()
+
+    _retry_db(_do)
+
+
+def override_source(name: str, record: dict) -> str | None:
+
+    expires = record.get("manual_override_expires_at")
+    if not expires:
+        return None
+
+    def _do():
+        conn = _connect()
+        try:
+            return conn.execute("SELECT source, expires_at FROM override_sources WHERE "
+                                "instance_name = ?", (name,)).fetchone()
+        finally:
+            conn.close()
+
+    row = _retry_db(_do)
+    return row[0] if row and row[1] == expires else "instance"
+
+
+def _extension_target(name: str, record: dict, hours: float, now: datetime) -> datetime:
+
+    base = now
+    schedule, _via = resolve_effective_schedule(name, record)
+    if schedule_is_active(schedule) and is_within_scheduled_on_window(schedule, now):
+        next_stop = next_scheduled_stop(schedule, now)
+        if next_stop is not None:
+            base = next_stop
+    return base + timedelta(hours=hours)
+
+
 def extend_manual_override(name: str, hours: float | None = None) -> str:
 
     _validate_override_window_hours(hours)
+    window_hours = hours if hours is not None else DEFAULT_MANUAL_OVERRIDE_WINDOW_HOURS
     with _instance_lock(name):
         registry = load_registry()
         record = registry.get(name)
@@ -3765,12 +3970,9 @@ def extend_manual_override(name: str, hours: float | None = None) -> str:
             raise NotOnboardedError(f"'{name}' is not onboarded.")
         if record.get("current_status") != "running":
             raise engine.ConfigError(f"'{name}' is not currently running -- nothing to extend.")
-        window_hours = hours if hours is not None else DEFAULT_MANUAL_OVERRIDE_WINDOW_HOURS
         now = datetime.now(UTC)
-        base = now
-        if not record.get("manual_override_expires_at"):
-
-
+        source = override_source(name, record)
+        if source is None:
             if get_schedule_modes().get(name) == "manual":
                 raise engine.ConfigError(
                     f"'{name}' is manual-only -- the scheduler never stops it, so there's nothing "
@@ -3780,12 +3982,14 @@ def extend_manual_override(name: str, hours: float | None = None) -> str:
                 raise engine.ConfigError(
                     f"'{name}' has no active schedule -- it keeps running until you stop it, so "
                     "there's nothing to extend.")
-            next_stop = next_scheduled_stop(schedule, now)
-            if next_stop is not None and is_within_scheduled_on_window(schedule, now):
-                base = next_stop
-        new_expiry = (base + timedelta(hours=window_hours)).isoformat()
+        target = _extension_target(name, record, window_hours, now)
+        if source == "instance":
+            current = datetime.fromisoformat(record["manual_override_expires_at"])
+            target = max(target, current)
+        new_expiry = target.isoformat()
         record["manual_override_expires_at"] = new_expiry
         _save_one_record(name, record)
+        _set_override_source(name, "instance", new_expiry)
         group_id = record.get("group_id")
     if group_id is not None:
 
@@ -3808,18 +4012,22 @@ def _dependency_group_ids(group_id: int) -> set[int]:
     return seen
 
 
-def _hold_until(name: str, expiry: str) -> bool:
+def _hold_until(name: str, expiry: str, source: str) -> str:
 
     with _instance_lock(name):
         record = load_registry().get(name)
         if record is None or record.get("current_status") != "running":
-            return False
+            return "not running"
+        current_source = override_source(name, record)
+        if source == "group" and current_source == "instance":
+            return "own"
         current = record.get("manual_override_expires_at")
         if current and datetime.fromisoformat(current) >= datetime.fromisoformat(expiry):
-            return False
+            return "later"
         record["manual_override_expires_at"] = expiry
         _save_one_record(name, record)
-        return True
+        _set_override_source(name, source, expiry)
+        return "set"
 
 
 def _hold_dependency_groups(group_id: int, expiry: str) -> list[str]:
@@ -3842,7 +4050,7 @@ def _hold_dependency_groups(group_id: int, expiry: str) -> list[str]:
         if next_stop is not None and next_stop >= until:
             continue
         with contextlib_suppress(InstanceLockedError):
-            if _hold_until(name, expiry):
+            if _hold_until(name, expiry, "hold") == "set":
                 held.append(name)
     return held
 
@@ -3888,10 +4096,14 @@ def extend_group(group_name: str, hours: float | None = None) -> GroupExtendResu
             result.skipped.append({"name": name, "reason": "follows its own schedule"})
             continue
         try:
-            if _hold_until(name, expiry):
+            outcome = _hold_until(name, expiry, "group")
+            if outcome == "set":
                 result.extended.append(name)
             else:
-                result.skipped.append({"name": name, "reason": "already running later"})
+                result.skipped.append({"name": name, "reason": {
+                    "own": "has its own extension (it overrides the group's)",
+                    "later": "already running later",
+                    "not running": "not running"}[outcome]})
         except InstanceLockedError:
             result.skipped.append({"name": name, "reason": "busy (a start/stop is in progress)"})
     result.dependencies_held = _hold_dependency_groups(group["id"], expiry)
@@ -6079,6 +6291,7 @@ def backup_full_system(
 
         for entry in list_migration_backups():
             _sync_migration_backup_record(entry["name"], on_warning)
+        _sync_holidays(on_warning)
         if on_progress is not None:
             on_progress("Uploading a full database snapshot to Object Storage...")
         try:
@@ -6595,6 +6808,11 @@ def restore_from_backup(
         if on_warning is not None:
             on_warning(f"WARNING: couldn't reconcile API tokens from Object Storage ({e}); "
                        "run `restore` again or `rebuild` to retry.")
+    try:
+        restore_holidays_from_object_storage(on_progress=on_progress, on_warning=on_warning)
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(f"WARNING: couldn't restore holidays from Object Storage ({e}).")
     try:
         restore_migration_backups_from_object_storage(on_progress=on_progress,
                                                       on_warning=on_warning)
@@ -7458,6 +7676,8 @@ class PollTickInstanceResult:
         "in_progress", "retry_backoff", "dispatched",
 
         "extended",
+
+        "holiday",
     ]
     action: Literal["create", "delete"] | None = None
     detail: str | None = None
@@ -7848,6 +8068,7 @@ def poll_tick(
     registry = load_registry()
     dep_map = _group_dependency_map()
     schedule_modes = get_schedule_modes()
+    holiday_set = _holiday_set()
     round_names: list[str] = list(registry)
     while True:
         for name in round_names:
@@ -7992,6 +8213,15 @@ def poll_tick(
                         name, "already_handled", action=action, via_group=via_group,
                     ))
                     continue
+                if action == "create":
+                    local_date = boundary.astimezone(ZoneInfo(schedule["timezone"])).date()
+                    holiday = holiday_for(name, record, local_date, holiday_set)
+                    if holiday is not None:
+                        results.append(PollTickInstanceResult(
+                            name, "holiday", action=action, via_group=via_group,
+                            detail=f"{local_date} is a holiday for {holiday}; scheduled start skipped",
+                        ))
+                        continue
                 extended_until = record.get("manual_override_expires_at")
                 if (action == "delete" and extended_until
                         and tick_now < datetime.fromisoformat(extended_until)):
@@ -8250,14 +8480,14 @@ def cmd_poll(client, args) -> int:
     def _report_tick(tick: PollTickResult, *, continuous: bool = False) -> None:
         for r in tick.results:
             if r.outcome not in ("waiting_on_dependency", "waiting_on_dependents", "in_progress",
-                                 "extended"):
+                                 "extended", "holiday"):
                 last_waiting.pop(r.name, None)
             if r.outcome not in (
                 "fired_success", "fired_failure", "error", "auto_revert_window_reopened",
-                "waiting_on_dependency", "waiting_on_dependents", "extended",
+                "waiting_on_dependency", "waiting_on_dependents", "extended", "holiday",
             ):
                 continue
-            if r.outcome.startswith("waiting") or r.outcome == "extended":
+            if r.outcome.startswith("waiting") or r.outcome in ("extended", "holiday"):
                 if continuous and last_waiting.get(r.name) == (r.outcome, r.detail):
                     continue
                 last_waiting[r.name] = (r.outcome, r.detail)
@@ -8828,6 +9058,230 @@ def cmd_backup_delete(client, args) -> int:
     return 0
 
 
+_HOLIDAY_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+MAX_HOLIDAY_RANGE_DAYS = 366
+
+
+def _parse_holiday_date(value: str) -> date:
+    if not isinstance(value, str) or not _HOLIDAY_DATE_RE.fullmatch(value.strip()):
+        raise engine.ConfigError(f"'{value}' is not a date in YYYY-MM-DD form.")
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError as e:
+        raise engine.ConfigError(f"'{value}' is not a valid date.") from e
+
+
+def _holiday_scope(group_name: str | None, name: str | None) -> tuple[str, str]:
+    if group_name and name:
+        raise engine.ConfigError("a holiday is for every node, one group, or one node -- not both.")
+    if group_name:
+        if get_schedule_group(group_name) is None:
+            raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+        return "group", group_name
+    if name:
+        if name not in load_registry():
+            raise NotOnboardedError(f"'{name}' is not onboarded.")
+        return "instance", name
+    return "all", ""
+
+
+def list_holidays(*, since: date | None = None) -> list[dict]:
+    def _do():
+        conn = _connect()
+        try:
+            return conn.execute(
+                "SELECT date, scope, target, note, created_at FROM holidays ORDER BY date, scope, "
+                "target").fetchall()
+        finally:
+            conn.close()
+
+    out = []
+    for d, scope, target, note, created in _retry_db(_do):
+        if since is not None and d < since.isoformat():
+            continue
+        out.append({"date": d, "scope": scope, "target": target or None, "note": note,
+                    "created_at": created})
+    return out
+
+
+def _sync_holidays(on_warning: Callable[[str], None] | None = None) -> None:
+    if not osb.is_configured():
+        return
+    try:
+        osb.upload_holidays({"holidays": list_holidays()})
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(f"WARNING: could not back up holidays to Object Storage ({e}).")
+
+
+def add_holidays(start: str, end: str | None = None, *, group_name: str | None = None,
+                 name: str | None = None, note: str | None = None,
+                 on_warning: Callable[[str], None] | None = None) -> list[str]:
+
+    first = _parse_holiday_date(start)
+    last = _parse_holiday_date(end) if end else first
+    if last < first:
+        raise engine.ConfigError("the end date is before the start date.")
+    if (last - first).days >= MAX_HOLIDAY_RANGE_DAYS:
+        raise engine.ConfigError(f"a range can cover at most {MAX_HOLIDAY_RANGE_DAYS} days.")
+    if note is not None and (len(note) > 200 or "\n" in note):
+        raise engine.ConfigError("a note is one line of at most 200 characters.")
+    scope, target = _holiday_scope(group_name, name)
+    days = [(first + timedelta(days=i)).isoformat() for i in range((last - first).days + 1)]
+    now = datetime.now(UTC).isoformat()
+
+    def _do():
+        conn = _connect()
+        try:
+            added = []
+            for d in days:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO holidays (date, scope, target, note, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)", (d, scope, target, note, now))
+                if cur.rowcount:
+                    added.append(d)
+            conn.commit()
+            return added
+        finally:
+            conn.close()
+
+    added = _retry_db(_do)
+    _sync_holidays(on_warning)
+    return added
+
+
+def remove_holidays(start: str, end: str | None = None, *, group_name: str | None = None,
+                    name: str | None = None,
+                    on_warning: Callable[[str], None] | None = None) -> int:
+
+    first = _parse_holiday_date(start)
+    last = _parse_holiday_date(end) if end else first
+    if last < first:
+        raise engine.ConfigError("the end date is before the start date.")
+    scope, target = ("group", group_name) if group_name else (
+        ("instance", name) if name else ("all", ""))
+
+    def _do():
+        conn = _connect()
+        try:
+            cur = conn.execute("DELETE FROM holidays WHERE date >= ? AND date <= ? AND scope = ? "
+                               "AND target = ?", (first.isoformat(), last.isoformat(), scope, target))
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
+    removed = _retry_db(_do)
+    _sync_holidays(on_warning)
+    return removed
+
+
+def _holiday_set() -> set[tuple[str, str, str]]:
+    return {(h["date"], h["scope"], h["target"] or "") for h in list_holidays()}
+
+
+def holiday_for(name: str, record: dict, local_date: date,
+                holidays: set[tuple[str, str, str]] | None = None) -> str | None:
+
+    holidays = _holiday_set() if holidays is None else holidays
+    d = local_date.isoformat()
+    if (d, "all", "") in holidays:
+        return "every node"
+    if (d, "instance", name) in holidays:
+        return "this node"
+    group_id = record.get("group_id")
+    if group_id is not None:
+        group = _group_row_by_id(group_id)
+        if group is not None and (d, "group", group["name"]) in holidays:
+            return f"group '{group['name']}'"
+    return None
+
+
+def holiday_today(name: str, record: dict) -> str | None:
+
+    schedule, _via = resolve_effective_schedule(name, record)
+    zone = ZoneInfo(schedule["timezone"]) if schedule else UTC
+    return holiday_for(name, record, datetime.now(UTC).astimezone(zone).date())
+
+
+def restore_holidays_from_object_storage(
+    *, on_progress: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> int:
+
+    stored = osb.download_holidays()
+    if not stored or not isinstance(stored.get("holidays"), list):
+        return 0
+    existing = _holiday_set()
+    rows = []
+    for h in stored["holidays"]:
+        try:
+            d = _parse_holiday_date(h["date"]).isoformat()
+            scope = h["scope"]
+            target = h.get("target") or ""
+        except Exception:
+            continue
+        if scope in ("all", "group", "instance") and (d, scope, target) not in existing:
+            rows.append((d, scope, target, h.get("note"), h.get("created_at") or
+                         datetime.now(UTC).isoformat()))
+
+    def _do():
+        conn = _connect()
+        try:
+            conn.executemany("INSERT OR IGNORE INTO holidays (date, scope, target, note, created_at) "
+                             "VALUES (?, ?, ?, ?, ?)", rows)
+            conn.commit()
+        finally:
+            conn.close()
+
+    if rows:
+        _retry_db(_do)
+        if on_progress is not None:
+            on_progress(f"Restored {len(rows)} holiday(s) from Object Storage.")
+    return len(rows)
+
+
+def cmd_holiday_add(args) -> int:
+    try:
+        added = add_holidays(args.date, args.to, group_name=args.group_name, name=args.name,
+                             note=args.note, on_warning=_print_to_stderr)
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    who = (f"group '{args.group_name}'" if args.group_name else
+           f"'{args.name}'" if args.name else "every node")
+    print(f"Holiday(s) added for {who}: {', '.join(added) or '(already present)'}. Scheduled starts "
+          "on these dates are skipped; scheduled stops still happen.")
+    return 0
+
+
+def cmd_holiday_remove(args) -> int:
+    try:
+        removed = remove_holidays(args.date, args.to, group_name=args.group_name, name=args.name,
+                                  on_warning=_print_to_stderr)
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+    print(f"Removed {removed} holiday(s).")
+    return 0
+
+
+def cmd_holiday_list(args) -> int:
+    since = None if args.all else datetime.now(UTC).date() - timedelta(days=1)
+    items = list_holidays(since=since)
+    if args.json:
+        print(json.dumps(items, indent=2))
+        return 0
+    if not items:
+        print("No holidays" + ("" if args.all else " from today on") + ".")
+        return 0
+    for h in items:
+        who = ("every node" if h["scope"] == "all" else
+               f"group {h['target']}" if h["scope"] == "group" else f"node {h['target']}")
+        print(f"{h['date']}  {who}" + (f"  -- {h['note']}" if h["note"] else ""))
+    return 0
+
+
 def cmd_serve_api(args) -> int:
 
     import api_server
@@ -8844,9 +9298,24 @@ def list_instances() -> dict:
 
     registry = load_registry()
     modes = get_schedule_modes()
+    holidays = _holiday_set()
     for name, record in registry.items():
         record["schedule_mode"] = modes.get(name, "auto")
+        holiday = _holiday_today_cached(name, record, holidays)
+        if holiday:
+            record["holiday_today"] = holiday
     return registry
+
+
+def _holiday_today_cached(name: str, record: dict, holidays: set[tuple[str, str, str]]) -> str | None:
+    if not holidays:
+        return None
+    try:
+        schedule, _via = resolve_effective_schedule(name, record)
+        zone = ZoneInfo(schedule["timezone"]) if schedule else UTC
+        return holiday_for(name, record, datetime.now(UTC).astimezone(zone).date(), holidays)
+    except Exception:
+        return None
 
 
 def cmd_list(args) -> int:
@@ -8876,6 +9345,9 @@ def get_instance_status(name: str) -> dict:
     if record is None:
         raise NotOnboardedError(f"'{name}' is not onboarded.")
     record["schedule_mode"] = get_schedule_mode(name)
+    holiday = _holiday_today_cached(name, record, _holiday_set())
+    if holiday:
+        record["holiday_today"] = holiday
     return record
 
 
@@ -9905,6 +10377,11 @@ def rebuild_instances(
         if on_warning is not None:
             on_warning(f"WARNING: couldn't reconcile API tokens from Object Storage ({e}).")
     try:
+        restore_holidays_from_object_storage(on_progress=on_progress, on_warning=on_warning)
+    except Exception as e:
+        if on_warning is not None:
+            on_warning(f"WARNING: couldn't restore holidays from Object Storage ({e}).")
+    try:
         restore_migration_backups_from_object_storage(on_progress=on_progress,
                                                       on_warning=on_warning)
         for backup_name, backup_id, backup_label in untracked_backup_instances(client):
@@ -10651,6 +11128,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "(`backup-delete`); `rollback` puts the original back.",
     )
 
+    for cmd, helptext in (("holiday-add", "Add a holiday: scheduled starts on that date (or "
+                                             "range) are skipped; stops still happen."),
+                          ("holiday-remove", "Remove a holiday (or a range of them).")):
+        hp = subparsers.add_parser(cmd, help=helptext)
+        hp.add_argument("--date", required=True, help="YYYY-MM-DD (in each schedule's timezone).")
+        hp.add_argument("--to", help="Last date of a range, YYYY-MM-DD (inclusive).")
+        scope = hp.add_mutually_exclusive_group()
+        scope.add_argument("--group-name", type=validate_instance_name,
+                           help="Only this group's members (default: every node).")
+        scope.add_argument("--name", type=validate_instance_name,
+                           help="Only this node (default: every node).")
+        if cmd == "holiday-add":
+            hp.add_argument("--note", help="e.g. 'Diwali'.")
+    holiday_list_parser = subparsers.add_parser("holiday-list", help="List holidays.")
+    holiday_list_parser.add_argument("--all", action="store_true",
+                                     help="Include past dates (default: from yesterday on).")
+    holiday_list_parser.add_argument("--json", action="store_true")
+
     backup_config_parser = subparsers.add_parser(
         "backup-config",
         help="Show or change where this tool backs itself up (Object Storage settings in .env), "
@@ -10696,6 +11191,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     migrate_resume_parser.add_argument("--name", required=True, type=validate_instance_name)
     migrate_resume_parser.add_argument("--ssh-key", default=default_ssh_key)
+
+    migrate_copy_parser = subparsers.add_parser(
+        "migrate-copy",
+        help="Path B: run the copy step for you over the Lish console, then migrate-resume. "
+        "Needs a kept pre-migration backup and this deployment's key in the profile's Lish keys.",
+    )
+    migrate_copy_parser.add_argument("--name", required=True, type=validate_instance_name)
+    migrate_copy_parser.add_argument("--ssh-key", default=default_ssh_key)
+    migrate_copy_parser.add_argument("--no-resume", action="store_true",
+                                     help="Stop after the copy instead of running migrate-resume.")
+    migrate_copy_parser.add_argument("--check", action="store_true",
+                                     help="Only report whether the assisted copy can run (JSON).")
 
     migrate_orphans_parser = subparsers.add_parser(
         "migrate-orphans",
@@ -11428,6 +11935,12 @@ def _route(args) -> int:
         return cmd_backup_list(args)
     if args.command == "backup-config":
         return cmd_backup_config(args)
+    if args.command == "holiday-add":
+        return cmd_holiday_add(args)
+    if args.command == "holiday-remove":
+        return cmd_holiday_remove(args)
+    if args.command == "holiday-list":
+        return cmd_holiday_list(args)
     if args.command == "reset-host-key":
         return cmd_reset_host_key(args)
     if args.command == "backup":
@@ -11460,6 +11973,8 @@ def _route(args) -> int:
         return cmd_migrate_start(client, args)
     if args.command == "migrate-resume":
         return cmd_migrate_resume(client, args)
+    if args.command == "migrate-copy":
+        return cmd_migrate_copy(client, args)
     if args.command == "migrate-orphans":
         return cmd_migrate_orphans(client, args)
     if args.command == "onboard":

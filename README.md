@@ -261,6 +261,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `migrate-start` | **One-time, only for a node whose OS is still on local disk.** Starts moving it onto Block Storage — creates the destination volume and boots the node into Rescue Mode. Prints one manual command for you to run. |
 | `rollback` / `backup-list` / `backup-delete` | Put the original system back from the backup `migrate-start --backup` kept, list backups, or delete one when you no longer need it. See §6.5. |
 | `migrate-resume` | Finishes what `migrate-start` began, after you've run that one manual command. Boots the node from its new Block Storage volume and reserves its IP. |
+| `migrate-copy` | Optional: runs the copy step for you in the Rescue Mode console, then `migrate-resume`. Only when a pre-migration backup is kept (§6.6). |
 | `migrate-orphans` | Lists (or `--cleanup`s) destination volumes left behind by a `migrate-start --force` restart — see §6.4. You'll rarely need this. |
 | `onboard` | Registers an already-running, already volume-based node with this tool by name. Pure capture — reads the node's current state, changes nothing on it. |
 | `start` | Brings a stopped node back online — recreated identically at the same IP. With `--group-name`, starts every member of a group at once. See §8.13. |
@@ -292,6 +293,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `reset-host-key` | Admin escape hatch — re-establishes SSH trust for a node after a genuine, confirmed key change. You should rarely need this either; see [§8](#8-day-to-day-usage) and the one-time migration note below. |
 | `rebuild` | Disaster recovery — reconstructs your local registry from tags on your own Linode account, in case the machine running this tool (and its local records) is ever lost. You should rarely need this either. |
 | `backup` | On-demand, whole-system backup — re-syncs every node's and group's Object Storage record, takes a full local/remote database snapshot, and saves the trusted host keys. Meant to be run on a schedule (cron/systemd timer). See §8.10. |
+| `holiday-add` / `holiday-remove` / `holiday-list` | Holidays: dates on which scheduled starts are skipped (every node, one group or one node); stops still happen. See §8.14. |
 | `backup-config` | Shows where this tool backs itself up and how the last backup went; sets, tests or removes the Object Storage settings. See §8.10. |
 | `restore` | On a replacement host: puts the newest (or a chosen, or a local) database snapshot in place, plus the trusted host keys. Run `rebuild` afterward. See §8.10. |
 | `ssh-key-backup` / `ssh-key-restore` | Store the deployment SSH key in Object Storage, encrypted with a passphrase you keep, and get it back on a replacement host. See §8.10. |
@@ -554,6 +556,40 @@ still carries this backup's tag). For a backup that has already been rolled back
 removes the record -- that instance is your running system. In the dashboard, the same actions are
 on the **Backups** page; the migration wizard offers "Keep a backup of the original first" on its
 confirmation step.
+
+
+### 6.6 Letting the tool run the copy (optional)
+
+If a pre-migration backup is kept (§6.5), the tool can run the copy for you instead of you pasting
+the command into the Lish console. It opens the instance's Rescue Mode console over Lish (Linode's
+SSH console gateway, `lish-<region>.linode.com`), types exactly the command `migrate-start`
+printed, follows `dd`'s progress, waits for `COPY_DONE`, and then runs `migrate-resume`:
+
+```
+python instance_manager.py migrate-copy --name web-1
+```
+
+**One-time setup.** The console is opened as your Linode user with this deployment's SSH key, so
+that key has to be one of your profile's Lish keys. In Cloud Manager open **Profile → LISH Console
+Settings**, allow key authentication, and add the deployment's public key (the `.pub` file next to
+the key in `LINODE_SSH_KEY_PATH`). The tool only reads your profile to check this; it never
+changes it. `--check` reports whether everything is in place and what's missing:
+
+```
+python instance_manager.py migrate-copy --name web-1 --check
+```
+
+**What it refuses.** Without a kept backup of this same instance it does nothing (the backup is
+what makes the copy safe to automate: whatever happens, `rollback` puts the original back). It
+also refuses unless the migration is waiting for its copy. If the copy command can't identify the
+disks, or `dd` fails, nothing further happens: the migration keeps waiting for its copy, so you can
+run `migrate-copy` again, do the copy yourself, or roll back. If the copy finishes but
+`migrate-resume` fails, run `migrate-resume` again. `--no-resume` stops after the copy.
+
+The console session is recorded in `state/logs/lish-<name>.log`. In the dashboard, the migration's
+copy step shows **Run the copy for me** when a backup is kept and the key is registered, or the
+setup steps above (with the key to paste) when it isn't. After the copy it finishes the migration
+and onboards the instance, the same as the manual path.
 
 ## 7. Onboarding
 
@@ -1277,8 +1313,9 @@ python instance_manager.py extend --name redis-standby-1
 python instance_manager.py extend --name redis-standby-1 --hours 4    # a different window, just this once
 ```
 
-Each `extend` resets the countdown to `--hours` (or the 2h default) from **now**, not stacked on
-top of the old one. `poll` (§8.5) is what actually enforces the auto-stop — as long as it's
+Each `extend` sets the stop to `--hours` (or the 2h default) from **now** -- but never earlier
+than it already was: extending by 1 hour when 3 hours are left keeps the 3 hours. To stop sooner,
+just stop it. `poll` (§8.5) is what actually enforces the auto-stop — as long as it's
 running (continuously, or on a cron via `--once`), an expired override gets stopped
 automatically on the next tick, the same way a normal schedule does.
 
@@ -1302,8 +1339,13 @@ python instance_manager.py extend --group-name app --hours 2
 
 Every running member that follows the group's schedule keeps running 2 hours past the group's next
 scheduled stop (the group page's **Keep running past today's stop** card does the same). Members
-with their own schedule, stopped members and manual-only members are skipped, and listed; a member
-already extended further keeps its later time.
+with their own schedule, stopped members and manual-only members are skipped, and listed.
+
+**A node's own extension overrides its group's**, the same way its own schedule does, whichever was
+set first. With a 10 PM stop: the group extended by 2 hours (midnight) and one member by 1 hour --
+that member stops at 11 PM and the rest at midnight. A group extension skips members with their own
+extension ("has its own extension"). Repeating an extension at the same level never makes it stop
+earlier.
 
 **Start order is kept.** Extending a node or a group also holds the running members of every group
 it depends on (directly or through others) until the same time, when their own stop would come
@@ -1829,6 +1871,30 @@ with the still-running operation to keep polling. Group actions are
 `POST /groups/{name}/start|stop` with `{"with_dependencies": true}` (optional), and also accept
 `?wait=true`. Switch a node to manual-only over the API with `PATCH /instances/{name}` and
 `{"schedule_mode": "manual"}`.
+
+### 8.14 Holidays — keep everything down on a date it would normally run
+
+Tomorrow is a holiday and nothing should start:
+
+```
+python instance_manager.py holiday-add --date 2026-10-12 --note "Dussehra"
+```
+
+On that date the scheduler skips every node's scheduled starts. Scheduled stops still happen, so
+anything left running the evening before is shut down as usual, and the next normal day starts on
+schedule -- nothing to remember to undo.
+
+- **A range:** `holiday-add --date 2026-12-24 --to 2026-12-31`.
+- **Only some nodes:** `--group-name dev` (that group's members) or `--name web-1` (one node).
+- **The date is each schedule's own local date** -- a group on `Asia/Kolkata` uses the Indian date.
+- **Manual and API starts are never blocked** -- you can still start a node by hand on a holiday.
+- **Changed your mind?** `holiday-remove --date 2026-10-12` (same `--group-name`/`--name` as when
+  added). A start skipped earlier that day catches up within the usual hour.
+- `holiday-list` shows what's coming up (`--all` includes past dates).
+
+In the dashboard: the **Holidays** page, and **Skip tomorrow** on each group's page. A node whose
+day is a holiday says so on its page. Holidays are included in backups and come back with
+`restore`/`rebuild`.
 
 ## 9. Costs
 
