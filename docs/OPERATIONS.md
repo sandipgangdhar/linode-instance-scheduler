@@ -522,7 +522,8 @@ a week, rehearse at your real scale, then onboard production in waves.
 - [ ] **Regional capacity** for your plans at your peak start time, for fleets of 100+.
 - [ ] **Instances with only VPC/VLAN interfaces**: the scheduler host must reach them over SSH
       at their private address — run it inside the same VPC (or on the same VLAN). For VPC 1:1
-      NAT (Linode Interfaces), reserve the NAT address if its public address must stay the same.
+      NAT (either networking model), reserve the NAT address if its public address must stay the
+      same.
 
 ### 2. Deploy
 

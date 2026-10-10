@@ -589,12 +589,19 @@ interface) is fully supported — onboard, stop, start, schedules, groups, hooks
   that differs from one already on record is still refused. Nodes reached over a public reserved
   IP always use the strict check.
 - **VPC 1:1 NAT** (a public address mapped onto the VPC interface instead of a separate public
-  interface) is supported on Linode Interfaces. The guest is set up exactly like a VPC-only
-  node. Linode releases an ordinary NAT address when the instance is deleted, so unless the
-  address is **reserved**, every start gives the node a new public address (the start says
-  which). Reserve it in Cloud Manager to keep it: a reserved NAT address is reused on every
-  start. Onboarding warns when it isn't reserved. Under the older (legacy config) networking
-  model, a node whose only public address is VPC 1:1 NAT is refused at onboarding.
+  interface) is supported under both networking models. The guest is set up exactly like a
+  VPC-only node, and the scheduler reaches it over its VPC address. Linode releases an ordinary
+  NAT address when the instance is deleted, so unless the address is **reserved**, every start
+  gives the node a new public address (the start says which). Reserve it in Cloud Manager to
+  keep it: a reserved NAT address is reused on every start. Onboarding warns when it isn't
+  reserved. Under the older (legacy config) model the NAT address is the instance's own public
+  IPv4, so only one NAT address per node is supported; a node mapping two is refused at
+  onboarding.
+- **A reserved public IP that has since been assigned to another instance** (or released from
+  the account) can't be given back to a stopped node, so its next start fails straight away with
+  a message saying so, before anything is created. Unassign the address from the other instance
+  in Cloud Manager (Networking -> Reserved IPs), then start the node again; a scheduled start is
+  retried on every poller tick until its catch-up window ends.
 - A **VLAN-only** node gets no default route or DNS from the tool — a VLAN has no gateway — so
   anything it needs beyond its own VLAN must come from its own configuration.
 

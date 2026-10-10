@@ -2191,12 +2191,14 @@ def onboard_instance(
 
 
             captured = engine.capture_network_config(instance, configs=configs)
-            if engine.legacy_nat_only(captured["network_config"], captured["network_interface_model"]):
+
+
+            if (engine.legacy_nat_only(captured["network_config"], captured["network_interface_model"])
+                    and len(engine.nat_1_1_addresses(
+                        captured["network_config"], captured["network_interface_model"])) > 1):
                 raise _OnboardRefusal(
-                    "this instance reaches the internet only through VPC 1:1 NAT under the older "
-                    "(legacy config) networking model, which can't be recreated after a stop. "
-                    "Give it a public interface, or use Linode Interfaces, where VPC 1:1 NAT is "
-                    "supported."
+                    "this instance maps more than one public address with VPC 1:1 NAT under the "
+                    "older (legacy config) networking model; only one can be recreated after a stop."
                 )
 
 
@@ -2859,6 +2861,9 @@ def _start_instance_locked(
 
         if on_progress is not None:
             on_progress(f"Starting '{name}'...")
+        ip_problem = _reserved_ip_unavailable(client, record.get("reserved_ip"))
+        if ip_problem is not None:
+            return StartResult(outcome="create_failed", detail=ip_problem)
         trust_new_once = False
         try:
             trust_new_once = _reclaim_vpc_addresses_locked(
@@ -7950,6 +7955,19 @@ def _move_vpc_address_locked(
     return carried
 
 
+@contextmanager
+def _vpc_subnet_lock(subnet_id):
+
+    locks_dir = Path(REGISTRY_PATH).parent / "locks"
+    locks_dir.mkdir(parents=True, exist_ok=True)
+    with open(locks_dir / f"vpc-subnet-{subnet_id}.lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def _free_vpc_address(registry: dict, subnet_id, current: str, prefix, live: list) -> str | None:
 
     if not prefix:
@@ -7971,6 +7989,34 @@ def _free_vpc_address(registry: dict, subnet_id, current: str, prefix, live: lis
     return None
 
 
+def _reserved_ip_unavailable(client, address: str | None) -> str | None:
+
+    if not address:
+        return None
+    try:
+        ip = engine.retry_transient(lambda: client.get(f"/networking/reserved/ips/{address}"))
+    except ApiError as e:
+        if e.status == 404:
+            return (
+                f"reserved IP {address} is no longer reserved on this account, so it can't be given "
+                "back to this node. Reserve it again in Cloud Manager (if it's still free), or "
+                "re-onboard the node with a new address."
+            )
+        return None
+    except requests.exceptions.RequestException:
+        return None
+    if not isinstance(ip, dict):
+        return None
+    holder = ip.get("linode_id")
+    if holder:
+        label = (ip.get("assigned_entity") or {}).get("label") or holder
+        return (
+            f"reserved IP {address} is assigned to another instance ({label}). Unassign it in "
+            "Cloud Manager (Networking -> Reserved IPs), then start this node again."
+        )
+    return None
+
+
 def _reclaim_vpc_addresses_locked(
     client, name: str, record: dict, registry: dict,
     on_progress: Callable[[str], None] | None, on_warning: Callable[[str], None] | None,
@@ -7987,7 +8033,17 @@ def _reclaim_vpc_addresses_locked(
         )
         if holder is None:
             continue
-        new_address = _free_vpc_address(registry, subnet_id, address, record.get("vpc_prefix"), live)
+
+
+        with _vpc_subnet_lock(subnet_id):
+            registry.update({k: v for k, v in load_registry().items() if k != name})
+            new_address = _free_vpc_address(
+                registry, subnet_id, address, record.get("vpc_prefix"), live,
+            )
+            if new_address is not None:
+                carried = _move_vpc_address_locked(
+                    name, record, registry, subnet_id, address, new_address, on_warning,
+                )
         if new_address is None:
             if on_warning is not None:
                 on_warning(
@@ -7996,9 +8052,6 @@ def _reclaim_vpc_addresses_locked(
                     "will fail. Free an address in the subnet, or move it with set-vpc-address."
                 )
             continue
-        carried = _move_vpc_address_locked(
-            name, record, registry, subnet_id, address, new_address, on_warning,
-        )
         trust_new_once = trust_new_once or not carried
         if on_warning is not None:
             on_warning(

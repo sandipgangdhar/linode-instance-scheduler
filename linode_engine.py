@@ -582,9 +582,14 @@ def replace_vpc_address(
 
 def nat_1_1_addresses(network_config: list[dict] | None, model: str | None) -> list[str]:
 
-    if model == INTERFACE_MODEL_LEGACY:
-        return []
     out: list[str] = []
+    if model == INTERFACE_MODEL_LEGACY:
+        for iface in network_config or []:
+            if iface.get("purpose") == "vpc":
+                address = (iface.get("ipv4") or {}).get("nat_1_1")
+                if address and address != "any":
+                    out.append(address)
+        return out
     for iface in network_config or []:
         if iface.get("vpc"):
             for a in ((iface["vpc"].get("ipv4") or {}).get("addresses")) or []:
@@ -611,10 +616,32 @@ def prepare_nat_1_1_for_recreate(
 
     import copy
 
-    if model == INTERFACE_MODEL_LEGACY or not nat_1_1_addresses(network_config, model):
+    if not nat_1_1_addresses(network_config, model):
         return network_config, []
     result = copy.deepcopy(network_config)
     lost: list[str] = []
+
+    def _keep(address: str) -> bool:
+        try:
+            ip = retry_transient(lambda: client.get(f"/networking/reserved/ips/{address}"))
+        except ApiError as e:
+            if e.status != 404:
+                raise
+            return False
+        return bool(ip and ip.get("reserved") and not ip.get("linode_id"))
+
+    if model == INTERFACE_MODEL_LEGACY:
+
+
+        for iface in result or []:
+            ipv4 = iface.get("ipv4") or {}
+            address = ipv4.get("nat_1_1")
+            if iface.get("purpose") != "vpc" or not address or address == "any":
+                continue
+            if not _keep(address):
+                ipv4["nat_1_1"] = "any"
+                lost.append(address)
+        return result, lost
     for iface in result or []:
         if not iface.get("vpc"):
             continue
@@ -622,13 +649,7 @@ def prepare_nat_1_1_for_recreate(
             address = a.get("nat_1_1_address")
             if not address or address == "auto":
                 continue
-            try:
-                ip = retry_transient(lambda address=address: client.get(f"/networking/reserved/ips/{address}"))
-            except ApiError as e:
-                if e.status != 404:
-                    raise
-                ip = None
-            if not (ip and ip.get("reserved") and not ip.get("linode_id")):
+            if not _keep(address):
                 a["nat_1_1_address"] = "auto"
                 lost.append(address)
     return result, lost
@@ -1262,13 +1283,13 @@ def create_and_boot_instance(
 
 
         if legacy_nat_only(captured_network["network_config"], INTERFACE_MODEL_LEGACY):
-            raise ConfigError(
-                "This instance appears to use VPC 1:1 NAT for its public IP (no dedicated "
-                "public interface) -- this topology isn't supported for automated recreate "
-                "yet under the older (legacy config) networking model. Assigning the reserved "
-                "IP via the normal path regardless would risk creating an unwanted additional "
-                "public interface alongside the existing NAT config."
-            )
+            kept = nat_1_1_addresses(captured_network["network_config"], INTERFACE_MODEL_LEGACY)
+            if len(kept) > 1:
+                raise ConfigError(
+                    "This instance maps more than one public address with VPC 1:1 NAT under the "
+                    "older (legacy config) networking model; only one can be recreated."
+                )
+            reserved_ip = kept[0] if kept else None
 
 
         extra_create_kwargs = {"ipv4": [reserved_ip]} if reserved_ip is not None else {}
