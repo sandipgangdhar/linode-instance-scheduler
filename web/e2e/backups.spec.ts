@@ -138,3 +138,55 @@ test('A running scheduled instance can be kept running past today’s stop', asy
   await page.getByRole('button', { name: 'Keep running past today’s stop' }).click()
   await expect.poll(() => extendBody).toEqual({ hours: 3 })
 })
+test('A group can be kept running past today’s stop, with skipped members and held dependencies shown', async ({
+  page,
+}) => {
+  await loginAs(page)
+  const rules = [{ days_of_week: ['mon'], start_time: '09:00', stop_time: '18:00' }]
+  await mockGroupList(page, [{ id: 1, name: 'app', timezone: 'UTC', rules, enabled: true, member_count: 2 }])
+  await page.route('**/groups/app', (route: Route) =>
+    route.fulfill({
+      json: {
+        id: 1,
+        name: 'app',
+        timezone: 'UTC',
+        rules,
+        enabled: true,
+        members: [],
+        depends_on: ['db'],
+        dependents: [],
+      },
+    }),
+  )
+  await page.route('**/groups/app/savings*', (route: Route) =>
+    route.fulfill({
+      json: {
+        scheduled_savings_percent: null,
+        actual_savings_percent: null,
+        window_days: 7,
+        schedule_state: 'active',
+      },
+    }),
+  )
+  await page.route('**/groups/app/hooks', (route: Route) => route.fulfill({ json: { hooks: null } }))
+  await page.route('**/instances', (route: Route) => route.fulfill({ json: {} }))
+  let body: unknown = null
+  await page.route('**/groups/app/extend', async (route: Route) => {
+    body = route.request().postDataJSON()
+    await route.fulfill({
+      json: {
+        group: 'app',
+        stops_at: '2026-10-10T21:00:00Z',
+        extended: ['app-1'],
+        skipped: [{ name: 'app-2', reason: 'follows its own schedule' }],
+        dependencies_held: ['db-1'],
+      },
+    })
+  })
+  await page.goto('/ui/#/groups/app')
+  await page.getByLabel('Extend group by hours').selectOption('3')
+  await page.getByRole('button', { name: 'Extend the group' }).click()
+  await expect(page.getByText(/Also held \(start order\): db-1/)).toBeVisible()
+  await expect(page.getByText('Skipped app-2: follows its own schedule')).toBeVisible()
+  expect(body).toEqual({ hours: 3 })
+})

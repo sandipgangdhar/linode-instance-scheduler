@@ -2,6 +2,7 @@ import type {
   BackupDeleteResult,
   BackupEstimate,
   DeregisterResult,
+  GroupExtendResult,
   MigrationBackup,
   RollbackResult,
   SystemBackupStatus,
@@ -284,6 +285,8 @@ export const api = {
       local_path: string | null
     }>(kickoff.operation_id, onProgress)
   },
+  extendGroup: (name: string, hours: number) =>
+    request<GroupExtendResult>('POST', `/groups/${encodeURIComponent(name)}/extend`, { hours }),
   extendOverride: (name: string, hours?: number) =>
     request<{
       manual_override_expires_at: string

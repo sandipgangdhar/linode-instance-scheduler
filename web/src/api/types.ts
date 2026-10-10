@@ -396,3 +396,13 @@ export interface SystemBackupStatus {
     problems: string[]
   } | null
 }
+export interface GroupExtendResult {
+  group: string
+  stops_at: string
+  extended: string[]
+  skipped: {
+    name: string
+    reason: string
+  }[]
+  dependencies_held: string[]
+}

@@ -232,6 +232,7 @@ _ROUTE_SCOPES: dict[tuple[str, str], str | None] = {
     ("GET", "/backups"): "instances:migrate",
     ("GET", "/backups/{name}"): "instances:migrate",
     ("POST", "/backups/{name}/rollback"): "instances:migrate",
+    ("POST", "/groups/{group_name}/extend"): "instances:extend",
     ("DELETE", "/backups/{name}"): "instances:migrate",
     ("POST", "/instances/{name}/offboard"): "instances:offboard",
     ("POST", "/instances/{name}/deregister"): "instances:offboard",
@@ -1295,6 +1296,12 @@ def api_migrate_resume(name: str, request: Request, user: str = Depends(require_
 def api_extend(name: str, body: ExtendRequest, user: str = Depends(require_session)) -> dict:
     new_expiry = im.extend_manual_override(name, body.hours)
     return {"manual_override_expires_at": new_expiry}
+
+
+@app.post("/groups/{group_name}/extend")
+def api_extend_group(group_name: str, body: ExtendRequest, user: str = Depends(require_session)) -> dict:
+
+    return _asdict(im.extend_group(group_name, body.hours))
 
 
 @app.get("/instances/{name}/hooks")

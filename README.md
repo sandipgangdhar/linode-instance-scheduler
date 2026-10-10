@@ -283,7 +283,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `group-remove` | Removes a node from its group — asks what to do about its schedule if it doesn't have one of its own. See §8.6. |
 | `poll` | Runs the scheduler — checks every node's individual AND group schedule and starts/stops it if due, and auto-reverts any expired manual override. Run it continuously (the normal way), or `--once` from cron. See §8.5/§8.6/§8.7. |
 | `serve-api` | Runs the optional REST API server — the same capabilities as the CLI, over HTTP, with "Login with Linode" auth. See §8.8. |
-| `extend` | Pushes an active manual-override auto-stop timer further out, or keeps a node running past today's scheduled stop. See §8.7. |
+| `extend` | Pushes an active manual-override auto-stop timer further out, or keeps a node (`--name`) or every member of a group (`--group-name`) running past today's scheduled stop. See §8.7. |
 | `hooks-set` | Sets a node's (or a group's) pre-stop hook and/or post-start check — your own command, script path, or uploaded script, run on the node right before every stop and right after every start. See §8.12. |
 | `hooks-show` | Shows a node's own hooks and the ones that actually apply to it (its own, or inherited from its group), or a group's hooks. |
 | `hooks-clear` | Removes a node's own hooks (its group's then apply), or a group's hooks. |
@@ -1293,6 +1293,23 @@ python instance_manager.py extend --name redis-standby-1 --hours 3
 The scheduler holds the scheduled stop until then, and stops the node when the extension runs out.
 Tomorrow's schedule is unaffected. In the dashboard: **Keep running past today's stop** on the
 node's page. A manual-only node, or one with no active schedule, has nothing to extend.
+
+**A whole group at once:**
+
+```
+python instance_manager.py extend --group-name app --hours 2
+```
+
+Every running member that follows the group's schedule keeps running 2 hours past the group's next
+scheduled stop (the group page's **Keep running past today's stop** card does the same). Members
+with their own schedule, stopped members and manual-only members are skipped, and listed; a member
+already extended further keeps its later time.
+
+**Start order is kept.** Extending a node or a group also holds the running members of every group
+it depends on (directly or through others) until the same time, when their own stop would come
+earlier -- otherwise their stop would be due while the dependent group is still up, wait for it, and
+could be missed. When the extension runs out, the dependent group stops first and the groups it
+depends on right after it.
 
 **What does NOT get a timer:**
 - A `start` that happens to land *inside* your node's own scheduled hours — nothing to revert

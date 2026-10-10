@@ -3786,7 +3786,116 @@ def extend_manual_override(name: str, hours: float | None = None) -> str:
         new_expiry = (base + timedelta(hours=window_hours)).isoformat()
         record["manual_override_expires_at"] = new_expiry
         _save_one_record(name, record)
-        return new_expiry
+        group_id = record.get("group_id")
+    if group_id is not None:
+
+
+        _hold_dependency_groups(group_id, new_expiry)
+    return new_expiry
+
+
+def _dependency_group_ids(group_id: int) -> set[int]:
+
+    dep_map = _group_dependency_map()
+    seen: set[int] = set()
+    stack = list(dep_map.get(group_id, ()))
+    while stack:
+        gid = stack.pop()
+        if gid in seen or gid == group_id:
+            continue
+        seen.add(gid)
+        stack.extend(dep_map.get(gid, ()))
+    return seen
+
+
+def _hold_until(name: str, expiry: str) -> bool:
+
+    with _instance_lock(name):
+        record = load_registry().get(name)
+        if record is None or record.get("current_status") != "running":
+            return False
+        current = record.get("manual_override_expires_at")
+        if current and datetime.fromisoformat(current) >= datetime.fromisoformat(expiry):
+            return False
+        record["manual_override_expires_at"] = expiry
+        _save_one_record(name, record)
+        return True
+
+
+def _hold_dependency_groups(group_id: int, expiry: str) -> list[str]:
+
+    deps = _dependency_group_ids(group_id)
+    if not deps:
+        return []
+    until = datetime.fromisoformat(expiry)
+    modes = get_schedule_modes()
+    held = []
+    for name, record in load_registry().items():
+        if record.get("group_id") not in deps or record.get("current_status") != "running":
+            continue
+        if modes.get(name) == "manual":
+            continue
+        schedule, _via = resolve_effective_schedule(name, record)
+        if not schedule_is_active(schedule):
+            continue
+        next_stop = next_scheduled_stop(schedule, datetime.now(UTC))
+        if next_stop is not None and next_stop >= until:
+            continue
+        with contextlib_suppress(InstanceLockedError):
+            if _hold_until(name, expiry):
+                held.append(name)
+    return held
+
+
+@dataclass
+class GroupExtendResult:
+    group: str
+    stops_at: str
+    extended: list[str] = field(default_factory=list)
+    skipped: list[dict] = field(default_factory=list)
+    dependencies_held: list[str] = field(default_factory=list)
+
+
+def extend_group(group_name: str, hours: float | None = None) -> GroupExtendResult:
+
+    _validate_override_window_hours(hours)
+    group = get_schedule_group(group_name)
+    if group is None:
+        raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+    if not group.get("enabled", True) or not group.get("rules"):
+        raise engine.ConfigError(
+            f"group '{group_name}' has no active schedule -- nothing stops its members, so "
+            "there's nothing to extend.")
+    now = datetime.now(UTC)
+    window_hours = hours if hours is not None else DEFAULT_MANUAL_OVERRIDE_WINDOW_HOURS
+    schedule = {"timezone": group["timezone"], "rules": group["rules"], "enabled": True}
+    next_stop = next_scheduled_stop(schedule, now)
+    base = next_stop if next_stop is not None and is_within_scheduled_on_window(schedule, now) else now
+    expiry = (base + timedelta(hours=window_hours)).isoformat()
+    result = GroupExtendResult(group=group_name, stops_at=expiry)
+    modes = get_schedule_modes()
+    for name, record in sorted(load_registry().items()):
+        if record.get("group_id") != group["id"]:
+            continue
+        if record.get("current_status") != "running":
+            result.skipped.append({"name": name, "reason": "not running"})
+            continue
+        if modes.get(name) == "manual":
+            result.skipped.append({"name": name, "reason": "manual-only"})
+            continue
+        _schedule, via_group = resolve_effective_schedule(name, record)
+        if via_group != group_name:
+            result.skipped.append({"name": name, "reason": "follows its own schedule"})
+            continue
+        try:
+            if _hold_until(name, expiry):
+                result.extended.append(name)
+            else:
+                result.skipped.append({"name": name, "reason": "already running later"})
+        except InstanceLockedError:
+            result.skipped.append({"name": name, "reason": "busy (a start/stop is in progress)"})
+    result.dependencies_held = _hold_dependency_groups(group["id"], expiry)
+    return result
 
 
 @_logs_activity("hook-run", name_arg=0)
@@ -3975,6 +4084,20 @@ def cmd_hooks_run(args) -> int:
 
 
 def cmd_extend(args) -> int:
+    if isinstance(getattr(args, "group_name", None), str):
+        try:
+            result = extend_group(args.group_name, args.hours)
+        except engine.ConfigError as e:
+            print(f"Configuration error: {e}", file=sys.stderr)
+            return 1
+        print(f"Group '{result.group}' extended -- its members now stop at "
+              f"{_format_override_expiry(result.stops_at)}: "
+              f"{', '.join(result.extended) or '(none running)'}.")
+        for item in result.skipped:
+            print(f"  skipped {item['name']}: {item['reason']}")
+        if result.dependencies_held:
+            print(f"  also held (start order): {', '.join(result.dependencies_held)}")
+        return 0
     try:
         new_expiry = extend_manual_override(args.name, args.hours)
     except NotOnboardedError as e:
@@ -10905,9 +11028,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     extend_parser = subparsers.add_parser(
         "extend",
-        help="Push a currently-active manual-override auto-revert timer further out. Refuses if the instance isn't running or has no active override to extend.",
+        help="Keep a running node (--name) or every running member of a group (--group-name) "
+        "running longer: pushes a manual start's auto-stop out, or skips today's scheduled stop. "
+        "The groups it depends on are held to the same time.",
     )
-    extend_parser.add_argument("--name", required=True, type=validate_instance_name)
+    extend_target = extend_parser.add_mutually_exclusive_group(required=True)
+    extend_target.add_argument("--name", type=validate_instance_name)
+    extend_target.add_argument("--group-name", type=validate_instance_name)
     extend_parser.add_argument(
         "--hours", type=float, default=None,
         help=f"How many hours to extend by (default {DEFAULT_MANUAL_OVERRIDE_WINDOW_HOURS}): "
