@@ -3367,13 +3367,41 @@ def retry_transient_or_already_done(
         time.sleep(backoff_delay(attempt, delay_s, exc=last_exc))
 
 
-MIGRATION_BACKUP_TAG_PREFIX = "linode-scheduler-backup-of"
+MIGRATION_BACKUP_TAG_PREFIX = "lis-backup-of"
+
+
+LEGACY_MIGRATION_BACKUP_TAG_PREFIXES = ("linode-scheduler-backup-of",)
+MAX_TAG_LENGTH = 50
 _LEGACY_INTERFACE_WRITE_KEYS = ("purpose", "label", "ipam_address", "subnet_id", "ipv4", "primary",
                                 "ip_ranges")
 
 
 def migration_backup_tag(name: str) -> str:
+
     return f"{MIGRATION_BACKUP_TAG_PREFIX}:{name}"
+
+
+def migration_backup_tags(name: str) -> set[str]:
+
+    return {f"{p}:{name}" for p in (MIGRATION_BACKUP_TAG_PREFIX, *LEGACY_MIGRATION_BACKUP_TAG_PREFIXES)}
+
+
+def migration_backup_name_from_tag(tag: str) -> str | None:
+    for p in (MIGRATION_BACKUP_TAG_PREFIX, *LEGACY_MIGRATION_BACKUP_TAG_PREFIXES):
+        if tag.startswith(p + ":"):
+            return tag[len(p) + 1:]
+    return None
+
+
+def is_backup_resource(resource, name: str, recorded_label: str | None) -> bool:
+
+    tags = list(resource.tags or [])
+    if migration_backup_tags(name) & set(tags):
+        return True
+    owned_prefixes = ("linode-scheduler-", MIGRATION_BACKUP_TAG_PREFIX + ":",
+                      *(p + ":" for p in LEGACY_MIGRATION_BACKUP_TAG_PREFIXES))
+    return (recorded_label is not None and resource.label == recorded_label
+            and not any(t.startswith(owned_prefixes) for t in tags))
 
 
 def _is_public_ipv4(address: str) -> bool:
@@ -3491,6 +3519,9 @@ def create_migration_backup(
         "backup": {"instance_id": None, "label": None, "volumes": [], "public_ipv4": []},
     }
     tag = migration_backup_tag(name)
+    if len(tag) > MAX_TAG_LENGTH:
+        raise ConfigError(f"the backup tag {tag!r} would exceed Linode's {MAX_TAG_LENGTH}-character "
+                          "tag limit -- use a shorter name. Nothing was cloned.")
     label = truncated_random_label(f"{instance.label}-backup", max_len=64)
     if on_progress is not None:
         on_progress(f"Cloning instance {instance.id} into a powered-off backup '{label}' "
@@ -3755,8 +3786,9 @@ def delete_migration_backup_resources(
     if backup_id:
         try:
             inst = retry_transient(lambda: client.load(Instance, backup_id))
-            if tag not in (inst.tags or []):
-                problems.append(f"instance {backup_id} no longer carries {tag!r}; not deleted")
+            if not is_backup_resource(inst, name, record.get("backup", {}).get("label")):
+                problems.append(f"instance {backup_id} carries neither {tag!r} nor this backup's "
+                                "recorded label; not deleted")
             else:
                 if on_progress is not None:
                     on_progress(f"Deleting backup instance {backup_id}...")
@@ -3774,8 +3806,9 @@ def delete_migration_backup_resources(
         vid = vol["volume_id"]
         try:
             v = retry_transient(lambda vid=vid: client.load(Volume, vid))
-            if tag not in (v.tags or []):
-                problems.append(f"volume {vid} no longer carries {tag!r}; not deleted")
+            if not is_backup_resource(v, name, vol.get("label")):
+                problems.append(f"volume {vid} carries neither {tag!r} nor this backup's recorded "
+                                "label; not deleted")
                 continue
             if v.linode_id:
                 poll_until_status(lambda vid=vid: client.load(Volume, vid), ("active",),

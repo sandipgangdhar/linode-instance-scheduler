@@ -1121,6 +1121,10 @@ def _take_pre_migration_backup(
         if on_progress is not None:
             on_progress(msg)
 
+    if len(engine.migration_backup_tag(name)) > engine.MAX_TAG_LENGTH:
+        raise engine.ConfigError(
+            f"'{name}' is too long for the backup tag (Linode tags are at most "
+            f"{engine.MAX_TAG_LENGTH} characters) -- use a shorter name. Nothing was changed.")
     existing = get_migration_backup(name)
     if existing is not None and existing["status"] in ("kept", "creating", "failed"):
         rec = existing["record"]
@@ -8770,12 +8774,11 @@ def restore_migration_backups_from_object_storage(
 
 def untracked_backup_instances(client) -> list[tuple[str, int, str]]:
 
-    prefix = engine.MIGRATION_BACKUP_TAG_PREFIX + ":"
     out = []
     for inst in engine.retry_transient(lambda: list(client.linode.instances())):
         for tag in inst.tags or []:
-            if tag.startswith(prefix):
-                name = tag[len(prefix):]
+            name = engine.migration_backup_name_from_tag(tag)
+            if name is not None:
                 entry = get_migration_backup(name)
                 if entry is None or entry["record"].get("backup", {}).get("instance_id") != inst.id:
                     out.append((name, inst.id, inst.label))
