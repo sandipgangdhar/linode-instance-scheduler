@@ -217,6 +217,8 @@ EnvironmentFile=/opt/linode-instance-scheduler/.env
 ExecStart=/opt/linode-instance-scheduler/.venv/bin/python instance_manager.py poll
 Restart=always
 RestartSec=5
+# Stopping lets a start/stop already in progress finish first (up to 15 minutes).
+TimeoutStopSec=900
 
 [Install]
 WantedBy=multi-user.target
@@ -242,8 +244,9 @@ pollers at once is a correctness risk (both could race to fire the same schedule
 net. Don't scale this to more than one instance.
 
 **Prefer cron over a supervisor?** `poll --once` runs exactly one check and exits — schedule that
-on whatever interval you'd otherwise poll on (a 5-minute cron entry matches the poller's own
-default). Either approach is fine; pick whichever this host's existing operational conventions
+on whatever interval you'd otherwise poll on (every minute or every few minutes). The continuous
+`poll` is the better choice: it checks every 15 seconds and reacts as soon as a start or stop
+finishes, so a start order (group dependencies) advances without waiting for the next cron run. Either approach is fine; pick whichever this host's existing operational conventions
 already use.
 
 Every schedule edit (via the CLI or, if you run it, the API) takes effect on the poller's *next*

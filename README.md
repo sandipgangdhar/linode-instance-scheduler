@@ -1003,15 +1003,19 @@ python instance_manager.py schedule-clear --name redis-standby-1
 python instance_manager.py poll
 ```
 
-Runs forever (every 5 minutes by default — `--interval-seconds` to change it), checking every
-onboarded node's schedule and firing `start`/`stop` if due. Stop it with Ctrl-C. In production,
+Runs forever, checking every onboarded node's schedule every 15 seconds (`--interval-seconds`
+to change it) and starting/stopping whatever is due. A check only reads the local database; the
+starts and stops themselves run on separate workers, so a slow start (or a long post-start check)
+never delays the checks, and a check also runs the moment any start or stop finishes. A scheduled
+action therefore fires within about 15 seconds of its time. Stop it with Ctrl-C: it takes no new
+work and waits for any start or stop already running to finish. In production,
 run it under a supervisor (e.g. a systemd unit with `Restart=always`) so it comes back up on its
 own after a crash or reboot — the same way you'd run any other long-lived process. Prefer cron
 over a supervisor? `poll --once` runs exactly one check and exits — schedule that on whatever
 interval you'd otherwise poll on.
 
-Every schedule edit takes effect on the *next* tick automatically — there's no separate "reload"
-step, and nothing to restart.
+Every schedule edit takes effect on the next check (within about 15 seconds) automatically —
+there's no separate "reload" step, and nothing to restart.
 
 **Large fleets and catching up.** `poll` runs due starts and stops in parallel — up to 10 at a
 time by default (`--max-parallel`, up to 50) — so a whole fleet due at 09:00 is started together
@@ -1021,7 +1025,8 @@ That means:
 
 - if `poll` was briefly down or a check ran long, the action still happens when it's back;
 - if a start fails (for example, the region is temporarily out of capacity for that plan), it's
-  tried again on every following check until it succeeds or the hour is up — and each failure
+  tried again after a pause — 1, 2, 5, then every 10 minutes — until it succeeds or the hour is
+  up — and each failure
   shows up in `history` and makes `poll --once` exit non-zero, so your monitoring sees it;
 - a deliberate manual action after the scheduled time is always respected: stop a node by hand
   at 09:30 and the scheduler won't start it again until its next scheduled start.
@@ -1129,10 +1134,15 @@ With that in place:
 
 - **Starting:** when `app`'s members are due to start, the scheduler holds them ("waiting on
   dependency") until every member of `db` is running and, if `db` has a post-start hook (§8.12),
-  that check has succeeded since its latest start. They start on the next tick after that,
-  usually within a minute. Give the database group a readiness check such as `pg_isready -q` so
+  that check has succeeded since its latest start. `app` starts within seconds of `db` being up
+  and ready — straight away when the scheduler itself started `db` (it checks again the moment a
+  start finishes), otherwise on the next check, at most about 15 seconds later — whatever brought
+  `db` up: its own schedule, a different schedule from `app`'s, or a manual start. A chain such as
+  `web` → `app` → `db` therefore runs one link after another with no idle time between them.
+  Give the database group a readiness check such as `pg_isready -q` so
   "up" means the database is really accepting connections, not just that the machine booted.
-- **Stopping:** the reverse — `db`'s members wait until every member of `app` is stopped.
+- **Stopping:** the reverse — `db`'s members wait until every member of `app` is stopped, and
+  stop within seconds once they are.
 - The scheduler keeps rechecking every tick for as long as `poll`'s catch-up window allows
   (an hour by default), so a slow database doesn't make the app servers miss their start. If the
   database never becomes ready within that window, the app servers aren't started that day.

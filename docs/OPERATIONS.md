@@ -80,8 +80,10 @@ Guide's own Deployment Model chapter for why installation looks like this.
 
 Two long-lived processes matter for day-to-day operation:
 
-- **The scheduler (`poll`)** — evaluates every managed instance's effective schedule on a
-  short, fixed interval and fires a start or stop the moment a configured boundary is crossed.
+- **The scheduler (`poll`)** — checks every managed instance's effective schedule every 15
+  seconds (and again whenever a start or stop finishes) and hands each due start or stop to a
+  pool of workers. When it is stopped (`systemctl stop`, an upgrade, a pod shutdown) it takes no
+  new work and waits for any start or stop already running to finish before exiting.
   Nothing about manual `start`/`stop` requires this to be running, but no schedule or group
   membership is enforced automatically unless it is.
 - **The API server (`serve-api`)** — serves the REST API and, once built, the web dashboard.
@@ -96,7 +98,7 @@ Run exactly **one** instance of `poll`, ever — never two running at once, and 
 standby waiting to take over. This is a deliberate design choice, not a gap:
 
 - **The scheduler doesn't serve live traffic.** It evaluates schedules on a short, fixed
-  interval with a tolerant matching window (typically a few minutes either side), not on every
+  interval with a tolerant matching window (an hour by default), not on every
   incoming request. If the process is briefly down — a crash, a host reboot, a deploy — the
   next due action just fires a few seconds late once your process supervisor restarts it.
   Nothing downstream is waiting on it in real time, so nothing breaks. Manual `start`/`stop`
@@ -144,6 +146,8 @@ WorkingDirectory=/opt/instance-scheduler
 ExecStart=/opt/instance-scheduler/.venv/bin/python3 instance_manager.py poll
 Restart=always
 RestartSec=15
+# Stopping lets a start/stop already in progress finish first (up to 15 minutes).
+TimeoutStopSec=900
 StandardOutput=append:/var/log/instance-scheduler-poll.log
 StandardError=append:/var/log/instance-scheduler-poll.log
 

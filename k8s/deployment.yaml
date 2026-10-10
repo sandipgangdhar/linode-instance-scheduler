@@ -63,6 +63,9 @@ spec:
         fsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
+      # On shutdown the scheduler stops taking work and lets any start/stop already running
+      # finish (a recreate plus its post-start check can take several minutes) before exiting.
+      terminationGracePeriodSeconds: 900
       containers:
         - name: scheduler
           image: ${IMAGE}
@@ -75,7 +78,7 @@ spec:
           args:
             - >-
               exec python3 instance_manager.py poll
-              --interval-seconds "${POLL_INTERVAL_SECONDS:-300}"
+              --interval-seconds "${POLL_INTERVAL_SECONDS:-15}"
               --window-seconds "${POLL_WINDOW_SECONDS:-3600}"
               --max-parallel "${POLL_MAX_PARALLEL:-10}"
           envFrom:

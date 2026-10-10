@@ -6,6 +6,7 @@ import argparse
 import errno
 import fcntl
 import hashlib
+import functools
 import json
 import math
 import os
@@ -15,9 +16,10 @@ import shlex
 import sqlite3
 import sys
 import tempfile
+import signal
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import contextmanager, redirect_stdout
 from contextlib import suppress as contextlib_suppress
 from concurrent.futures import ThreadPoolExecutor
@@ -6764,7 +6766,10 @@ def cmd_group_remove(client, args) -> int:
     return 0
 
 
-DEFAULT_POLL_INTERVAL_SECONDS = 300
+DEFAULT_POLL_INTERVAL_SECONDS = 15
+
+
+POLL_RETRY_BACKOFF_SECONDS = (60, 120, 300, 600)
 DEFAULT_POLL_WINDOW_SECONDS = 300
 
 
@@ -6774,9 +6779,6 @@ DEFAULT_POLL_CATCH_UP_SECONDS = 3600
 DEFAULT_POLL_MAX_PARALLEL = 10
 DEFAULT_GROUP_ACTION_MAX_PARALLEL = 10
 MAX_POLL_MAX_PARALLEL = 50
-
-
-MIN_POLL_SLEEP_SECONDS = 2.0
 
 
 DEFAULT_MANUAL_OVERRIDE_WINDOW_HOURS = 2.0
@@ -6949,6 +6951,9 @@ class PollTickInstanceResult:
         "already_handled", "already_in_desired_state",
         "fired_success", "fired_noop", "fired_failure", "error", "auto_revert_window_reopened",
         "waiting_on_dependency", "waiting_on_dependents", "manual_only",
+
+
+        "in_progress", "retry_backoff", "dispatched",
     ]
     action: Literal["create", "delete"] | None = None
     detail: str | None = None
@@ -7304,6 +7309,10 @@ def group_action(
     return result
 
 
+_POLL_WAITING_OUTCOMES = frozenset({"waiting_on_dependency", "waiting_on_dependents"})
+MAX_POLL_DEPENDENCY_ROUNDS = 20
+
+
 def poll_tick(
     client, ssh_key: str, *,
     window_seconds: int = DEFAULT_POLL_WINDOW_SECONDS,
@@ -7311,11 +7320,21 @@ def poll_tick(
     on_warning: Callable[[str], None] | None = None,
     max_parallel: int = 1,
     client_factory: Callable[[], object] | None = None,
+    in_flight: Collection[str] | None = None,
+    hold_until: dict[str, datetime] | None = None,
+    submit: Callable[[str, Callable[[], PollTickInstanceResult]], None] | None = None,
 ) -> PollTickResult:
 
+    in_flight = set(in_flight or ())
+    hold_until = hold_until or {}
     results: list[PollTickInstanceResult | None] = []
     jobs: list[tuple[int, str, Callable[[object], PollTickInstanceResult], str | None, str | None, bool]] = []
     tick_now = datetime.now(UTC)
+
+
+    ready_now = tick_now
+    final_results: list[PollTickInstanceResult] = []
+    round_number = 1
 
     def _queue(job_name: str, fn: Callable[[object], PollTickInstanceResult], *,
                job_action: str | None, job_via_group: str | None, job_via_revert: bool) -> None:
@@ -7325,225 +7344,270 @@ def poll_tick(
     registry = load_registry()
     dep_map = _group_dependency_map()
     schedule_modes = get_schedule_modes()
-    for name, record in registry.items():
-        action: Literal["create", "delete"] | None = None
-        via_group: str | None = None
-        if schedule_modes.get(name) == "manual":
+    round_names: list[str] = list(registry)
+    while True:
+        for name in round_names:
+            record = registry.get(name)
+            if record is None:
+                continue
+            action: Literal["create", "delete"] | None = None
+            via_group: str | None = None
+            if schedule_modes.get(name) == "manual":
 
-            results.append(PollTickInstanceResult(name, "manual_only"))
-            continue
-
-
-        via_auto_revert = False
-        try:
-            expires_at_raw = record.get("manual_override_expires_at")
-            is_due_for_revert = False
-            if record.get("current_status") == "running" and expires_at_raw:
-
-
-                action = "delete"
-                via_auto_revert = True
-                is_due_for_revert = tick_now >= datetime.fromisoformat(expires_at_raw)
-                if not is_due_for_revert:
-                    action = None
-                    via_auto_revert = False
-            if is_due_for_revert:
-                if record.get("transitioning"):
+                results.append(PollTickInstanceResult(name, "manual_only"))
+                continue
+            if name in in_flight:
+                results.append(PollTickInstanceResult(name, "in_progress"))
+                continue
+            held = hold_until.get(name)
+            if held is not None and tick_now < held:
+                results.append(PollTickInstanceResult(
+                    name, "retry_backoff", detail=f"retrying after {held.isoformat()}"))
+                continue
 
 
-                    results.append(PollTickInstanceResult(
-                        name, "already_transitioning", action="delete", via_auto_revert=True,
-                    ))
-                    continue
+            via_auto_revert = False
+            try:
+                expires_at_raw = record.get("manual_override_expires_at")
+                is_due_for_revert = False
+                if record.get("current_status") == "running" and expires_at_raw:
 
 
-                effective_schedule, _via_group_for_revert = resolve_effective_schedule(name, record)
-                if schedule_is_active(effective_schedule) and is_within_scheduled_on_window(
-                    effective_schedule, tick_now,
-                ):
-                    timer_cleared = False
-                    with _instance_lock(name):
-                        fresh = load_registry().get(name)
-                        if fresh is not None and fresh.get("manual_override_expires_at") == expires_at_raw:
-                            fresh["manual_override_expires_at"] = None
-                            _save_one_record(name, fresh)
-                            timer_cleared = True
+                    action = "delete"
+                    via_auto_revert = True
+                    is_due_for_revert = tick_now >= datetime.fromisoformat(expires_at_raw)
+                    if not is_due_for_revert:
+                        action = None
+                        via_auto_revert = False
+                if is_due_for_revert:
+                    if record.get("transitioning"):
 
 
-                    if timer_cleared:
-                        if on_progress is not None:
-                            on_progress(
-                                f"'{name}': manual override expiry reached, but the instance is now "
-                                "inside its own scheduled on-window -- clearing the timer instead of "
-                                "stopping."
-                            )
                         results.append(PollTickInstanceResult(
-                            name, "auto_revert_window_reopened", via_auto_revert=True,
+                            name, "already_transitioning", action="delete", via_auto_revert=True,
                         ))
-                    else:
+                        continue
 
 
+                    effective_schedule, _via_group_for_revert = resolve_effective_schedule(name, record)
+                    if schedule_is_active(effective_schedule) and is_within_scheduled_on_window(
+                        effective_schedule, tick_now,
+                    ):
+                        timer_cleared = False
+                        with _instance_lock(name):
+                            fresh = load_registry().get(name)
+                            if fresh is not None and fresh.get("manual_override_expires_at") == expires_at_raw:
+                                fresh["manual_override_expires_at"] = None
+                                _save_one_record(name, fresh)
+                                timer_cleared = True
+
+
+                        if timer_cleared:
+                            if on_progress is not None:
+                                on_progress(
+                                    f"'{name}': manual override expiry reached, but the instance is now "
+                                    "inside its own scheduled on-window -- clearing the timer instead of "
+                                    "stopping."
+                                )
+                            results.append(PollTickInstanceResult(
+                                name, "auto_revert_window_reopened", via_auto_revert=True,
+                            ))
+                        else:
+
+
+                            results.append(PollTickInstanceResult(
+                                name, "not_due", via_auto_revert=True,
+                                detail="manual override expiry was concurrently changed; skipped "
+                                "this tick.",
+                            ))
+                        continue
+
+
+                    with _instance_lock(name):
+                        fresh_for_revert = load_registry().get(name)
+                        still_due = (
+                            fresh_for_revert is not None
+                            and fresh_for_revert.get("manual_override_expires_at") == expires_at_raw
+                        )
+                    if not still_due:
                         results.append(PollTickInstanceResult(
                             name, "not_due", via_auto_revert=True,
                             detail="manual override expiry was concurrently changed; skipped "
                             "this tick.",
                         ))
+                        continue
+                    wait = dependents_wait_reason(record, registry, dep_map)
+                    if wait is not None:
+                        results.append(PollTickInstanceResult(
+                            name, "waiting_on_dependents", action="delete", via_auto_revert=True,
+                            detail=wait,
+                        ))
+                        continue
+                    if on_progress is not None:
+                        on_progress(f"'{name}': manual override expired, auto-reverting (stop)...")
+
+                    def _revert(worker_client, name=name) -> PollTickInstanceResult:
+                        revert_result = stop_instance(
+                            worker_client, name, ssh_key, triggered_by="schedule",
+                            on_progress=on_progress, on_warning=on_warning,
+                        )
+                        if _STOP_EVENT_RESULTS.get(revert_result.outcome) == "success":
+                            return PollTickInstanceResult(
+                                name, "fired_success", action="delete", via_auto_revert=True,
+                            )
+                        return PollTickInstanceResult(
+                            name, "fired_failure", action="delete",
+                            detail=f"outcome={revert_result.outcome}", via_auto_revert=True,
+                        )
+                    _queue(name, _revert, job_action="delete", job_via_group=None, job_via_revert=True)
                     continue
 
+                schedule, via_group = resolve_effective_schedule(name, record)
+                if schedule is None:
+                    results.append(PollTickInstanceResult(name, "no_schedule"))
+                    continue
+                if not schedule.get("enabled", True):
+                    results.append(PollTickInstanceResult(name, "disabled", via_group=via_group))
+                    continue
+                due = resolve_due_boundary(schedule, tick_now, window_seconds)
+                if due is None:
+                    results.append(PollTickInstanceResult(name, "not_due", via_group=via_group))
+                    continue
+                action, boundary = due
+                if record.get("transitioning"):
 
-                with _instance_lock(name):
-                    fresh_for_revert = load_registry().get(name)
-                    still_due = (
-                        fresh_for_revert is not None
-                        and fresh_for_revert.get("manual_override_expires_at") == expires_at_raw
-                    )
-                if not still_due:
+
                     results.append(PollTickInstanceResult(
-                        name, "not_due", via_auto_revert=True,
-                        detail="manual override expiry was concurrently changed; skipped "
-                        "this tick.",
+                        name, "already_transitioning", action=action, via_group=via_group,
                     ))
                     continue
-                wait = dependents_wait_reason(record, registry, dep_map)
+                if transition_recorded_since(name, boundary):
+
+
+                    results.append(PollTickInstanceResult(
+                        name, "already_handled", action=action, via_group=via_group,
+                    ))
+                    continue
+                desired = "running" if action == "create" else "stopped"
+                if record.get("current_status") == desired:
+
+
+                    results.append(PollTickInstanceResult(
+                        name, "already_in_desired_state", action=action, via_group=via_group,
+                    ))
+                    continue
+
+
+                wait = (dependency_wait_reason(record, registry, dep_map, ready_now)
+                        if action == "create" else dependents_wait_reason(record, registry, dep_map))
                 if wait is not None:
                     results.append(PollTickInstanceResult(
-                        name, "waiting_on_dependents", action="delete", via_auto_revert=True,
-                        detail=wait,
+                        name, "waiting_on_dependency" if action == "create" else "waiting_on_dependents",
+                        action=action, via_group=via_group, detail=wait,
                     ))
                     continue
-                if on_progress is not None:
-                    on_progress(f"'{name}': manual override expired, auto-reverting (stop)...")
 
-                def _revert(worker_client, name=name) -> PollTickInstanceResult:
-                    revert_result = stop_instance(
-                        worker_client, name, ssh_key, triggered_by="schedule",
-                        on_progress=on_progress, on_warning=on_warning,
-                    )
-                    if _STOP_EVENT_RESULTS.get(revert_result.outcome) == "success":
+                if on_progress is not None:
+                    via = f" via group '{via_group}'" if via_group else ""
+                    on_progress(f"'{name}': {action} due{via}, firing (triggered_by=schedule)...")
+
+                def _fire(
+                    worker_client, name=name, action=action, via_group=via_group,
+                ) -> PollTickInstanceResult:
+                    op_result: StartResult | StopResult
+                    if action == "create":
+                        op_result = start_instance(
+                            worker_client, name, ssh_key, triggered_by="schedule",
+                            on_progress=on_progress, on_warning=on_warning,
+                        )
+                        event_result = _START_EVENT_RESULTS.get(op_result.outcome)
+                        is_noop = op_result.outcome in _POLL_NOOP_START_OUTCOMES
+                    else:
+                        op_result = stop_instance(
+                            worker_client, name, ssh_key, triggered_by="schedule",
+                            on_progress=on_progress, on_warning=on_warning,
+                        )
+                        event_result = _STOP_EVENT_RESULTS.get(op_result.outcome)
+                        is_noop = op_result.outcome in _POLL_NOOP_STOP_OUTCOMES
+
+
+                    if event_result == "success":
                         return PollTickInstanceResult(
-                            name, "fired_success", action="delete", via_auto_revert=True,
+                            name, "fired_success", action=action, via_group=via_group,
+                        )
+                    if is_noop:
+                        return PollTickInstanceResult(
+                            name, "fired_noop", action=action, detail=f"outcome={op_result.outcome}",
+                            via_group=via_group,
                         )
                     return PollTickInstanceResult(
-                        name, "fired_failure", action="delete",
-                        detail=f"outcome={revert_result.outcome}", via_auto_revert=True,
-                    )
-                _queue(name, _revert, job_action="delete", job_via_group=None, job_via_revert=True)
-                continue
-
-            schedule, via_group = resolve_effective_schedule(name, record)
-            if schedule is None:
-                results.append(PollTickInstanceResult(name, "no_schedule"))
-                continue
-            if not schedule.get("enabled", True):
-                results.append(PollTickInstanceResult(name, "disabled", via_group=via_group))
-                continue
-            due = resolve_due_boundary(schedule, tick_now, window_seconds)
-            if due is None:
-                results.append(PollTickInstanceResult(name, "not_due", via_group=via_group))
-                continue
-            action, boundary = due
-            if record.get("transitioning"):
-
-
-                results.append(PollTickInstanceResult(
-                    name, "already_transitioning", action=action, via_group=via_group,
-                ))
-                continue
-            if transition_recorded_since(name, boundary):
-
-
-                results.append(PollTickInstanceResult(
-                    name, "already_handled", action=action, via_group=via_group,
-                ))
-                continue
-            desired = "running" if action == "create" else "stopped"
-            if record.get("current_status") == desired:
-
-
-                results.append(PollTickInstanceResult(
-                    name, "already_in_desired_state", action=action, via_group=via_group,
-                ))
-                continue
-
-
-            wait = (dependency_wait_reason(record, registry, dep_map, tick_now)
-                    if action == "create" else dependents_wait_reason(record, registry, dep_map))
-            if wait is not None:
-                results.append(PollTickInstanceResult(
-                    name, "waiting_on_dependency" if action == "create" else "waiting_on_dependents",
-                    action=action, via_group=via_group, detail=wait,
-                ))
-                continue
-
-            if on_progress is not None:
-                via = f" via group '{via_group}'" if via_group else ""
-                on_progress(f"'{name}': {action} due{via}, firing (triggered_by=schedule)...")
-
-            def _fire(
-                worker_client, name=name, action=action, via_group=via_group,
-            ) -> PollTickInstanceResult:
-                op_result: StartResult | StopResult
-                if action == "create":
-                    op_result = start_instance(
-                        worker_client, name, ssh_key, triggered_by="schedule",
-                        on_progress=on_progress, on_warning=on_warning,
-                    )
-                    event_result = _START_EVENT_RESULTS.get(op_result.outcome)
-                    is_noop = op_result.outcome in _POLL_NOOP_START_OUTCOMES
-                else:
-                    op_result = stop_instance(
-                        worker_client, name, ssh_key, triggered_by="schedule",
-                        on_progress=on_progress, on_warning=on_warning,
-                    )
-                    event_result = _STOP_EVENT_RESULTS.get(op_result.outcome)
-                    is_noop = op_result.outcome in _POLL_NOOP_STOP_OUTCOMES
-
-
-                if event_result == "success":
-                    return PollTickInstanceResult(
-                        name, "fired_success", action=action, via_group=via_group,
-                    )
-                if is_noop:
-                    return PollTickInstanceResult(
-                        name, "fired_noop", action=action, detail=f"outcome={op_result.outcome}",
+                        name, "fired_failure", action=action, detail=f"outcome={op_result.outcome}",
                         via_group=via_group,
                     )
-                return PollTickInstanceResult(
-                    name, "fired_failure", action=action, detail=f"outcome={op_result.outcome}",
-                    via_group=via_group,
+                _queue(name, _fire, job_action=action, job_via_group=via_group, job_via_revert=False)
+            except Exception as e:
+
+
+                results.append(PollTickInstanceResult(
+                    name, "error", action=action, detail=str(e), via_group=via_group,
+                    via_auto_revert=via_auto_revert,
+                ))
+
+        def _run(job) -> tuple[int, PollTickInstanceResult]:
+            index, job_name, fn, job_action, job_via_group, job_via_revert = job
+            started = datetime.now(UTC)
+            try:
+                worker_client = client if client_factory is None else client_factory()
+                result = fn(worker_client)
+            except Exception as e:
+                result = PollTickInstanceResult(
+                    job_name, "error", action=job_action, detail=str(e), via_group=job_via_group,
+                    via_auto_revert=job_via_revert,
                 )
-            _queue(name, _fire, job_action=action, job_via_group=via_group, job_via_revert=False)
-        except Exception as e:
+            result.started_at, result.finished_at = started, datetime.now(UTC)
+            result.worker = threading.current_thread().name
+            return index, result
+
+        def _run_result(job) -> PollTickInstanceResult:
+            return _run(job)[1]
+
+        if submit is not None:
+            for job in jobs:
+                index, job_name, _fn, job_action, job_via_group, job_via_revert = job
+                submit(job_name, functools.partial(_run_result, job))
+                results[index] = PollTickInstanceResult(
+                    job_name, "dispatched", action=job_action,
+                    via_group=job_via_group, via_auto_revert=job_via_revert,
+                )
+            return PollTickResult(results=[r for r in results if r is not None])
+        if max_parallel <= 1 or len(jobs) <= 1:
+            outcomes = [_run(job) for job in jobs]
+        else:
+            with ThreadPoolExecutor(max_workers=min(max_parallel, len(jobs))) as pool:
+                outcomes = list(pool.map(_run, jobs))
+        for index, result in outcomes:
+            results[index] = result
+        round_results = [r for r in results if r is not None]
+        waiting_names = [r.name for r in round_results if r.outcome in _POLL_WAITING_OUTCOMES]
+        progressed = any(r.outcome == "fired_success" for r in round_results)
 
 
-            results.append(PollTickInstanceResult(
-                name, "error", action=action, detail=str(e), via_group=via_group,
-                via_auto_revert=via_auto_revert,
-            ))
-
-    def _run(job) -> tuple[int, PollTickInstanceResult]:
-        index, job_name, fn, job_action, job_via_group, job_via_revert = job
-        started = datetime.now(UTC)
-        try:
-            worker_client = client if client_factory is None else client_factory()
-            result = fn(worker_client)
-        except Exception as e:
-            result = PollTickInstanceResult(
-                job_name, "error", action=job_action, detail=str(e), via_group=job_via_group,
-                via_auto_revert=job_via_revert,
-            )
-        result.started_at, result.finished_at = started, datetime.now(UTC)
-        result.worker = threading.current_thread().name
-        return index, result
-
-    if max_parallel <= 1 or len(jobs) <= 1:
-        outcomes = [_run(job) for job in jobs]
-    else:
-        with ThreadPoolExecutor(max_workers=min(max_parallel, len(jobs))) as pool:
-            outcomes = list(pool.map(_run, jobs))
-    for index, result in outcomes:
-        results[index] = result
-    return PollTickResult(results=[r for r in results if r is not None])
+        if waiting_names and progressed and round_number < MAX_POLL_DEPENDENCY_ROUNDS:
+            final_results.extend(r for r in round_results if r.outcome not in _POLL_WAITING_OUTCOMES)
+            if on_progress is not None:
+                on_progress(f"Re-checking {len(waiting_names)} instance(s) waiting on a dependency, "
+                            "now that this round's starts/stops have finished...")
+            results.clear()
+            jobs.clear()
+            round_names = waiting_names
+            round_number += 1
+            ready_now = datetime.now(UTC)
+            registry = load_registry()
+            dep_map = _group_dependency_map()
+            schedule_modes = get_schedule_modes()
+            continue
+        final_results.extend(round_results)
+        return PollTickResult(results=final_results)
 
 
 def _per_thread_client_factory() -> Callable[[], object]:
@@ -7560,35 +7624,152 @@ def _per_thread_client_factory() -> Callable[[], object]:
     return _client
 
 
+class PollScheduler:
+
+
+    def __init__(
+        self, client, ssh_key: str, *, window_seconds: int, max_parallel: int,
+        client_factory: Callable[[], object] | None = None,
+        on_progress: Callable[[str], None] | None = None,
+        on_warning: Callable[[str], None] | None = None,
+    ) -> None:
+        self._client = client
+        self._ssh_key = ssh_key
+        self._window_seconds = window_seconds
+        self._max_parallel = max_parallel
+        self._client_factory = client_factory
+        self._on_progress = on_progress
+        self._on_warning = on_warning
+        self._executor = ThreadPoolExecutor(max_workers=max_parallel,
+                                            thread_name_prefix="poll-worker")
+        self._lock = threading.Lock()
+        self._in_flight: set[str] = set()
+        self._completed: list[PollTickInstanceResult] = []
+        self._failures: dict[str, tuple[int, datetime]] = {}
+        self.hold_until: dict[str, datetime] = {}
+        self.wake = threading.Event()
+
+    @property
+    def in_flight_count(self) -> int:
+        with self._lock:
+            return len(self._in_flight)
+
+    def _submit(self, name: str, fn: Callable[[], PollTickInstanceResult]) -> None:
+        with self._lock:
+            self._in_flight.add(name)
+        future = self._executor.submit(fn)
+        future.add_done_callback(functools.partial(self._done, name))
+
+    def _done(self, name: str, future) -> None:
+        try:
+            result = future.result()
+        except BaseException as e:
+            result = PollTickInstanceResult(name, "error", detail=f"job did not run: {e!r}")
+        with self._lock:
+            self._in_flight.discard(name)
+            self._completed.append(result)
+        self.wake.set()
+
+    def _note_outcome(self, result: PollTickInstanceResult, now: datetime) -> None:
+        if result.outcome in ("fired_failure", "error"):
+            count, last = self._failures.get(result.name, (0, now))
+            if (now - last).total_seconds() > self._window_seconds:
+                count = 0
+            count += 1
+            self._failures[result.name] = (count, now)
+            delay = POLL_RETRY_BACKOFF_SECONDS[min(count, len(POLL_RETRY_BACKOFF_SECONDS)) - 1]
+            self.hold_until[result.name] = now + timedelta(seconds=delay)
+            note = f"retrying in {delay}s"
+            result.detail = f"{result.detail}; {note}" if result.detail else note
+        elif result.outcome in ("fired_success", "fired_noop"):
+            self._failures.pop(result.name, None)
+            self.hold_until.pop(result.name, None)
+
+    def take_completed(self) -> list[PollTickInstanceResult]:
+
+        with self._lock:
+            completed, self._completed = self._completed, []
+        now = datetime.now(UTC)
+        for result in completed:
+            self._note_outcome(result, now)
+        return completed
+
+    def check(self) -> PollTickResult:
+
+        self.wake.clear()
+        completed = self.take_completed()
+        with self._lock:
+            in_flight = set(self._in_flight)
+        tick = poll_tick(
+            self._client, self._ssh_key, window_seconds=self._window_seconds,
+            max_parallel=self._max_parallel, client_factory=self._client_factory,
+            on_progress=self._on_progress, on_warning=self._on_warning,
+            in_flight=in_flight, hold_until=dict(self.hold_until), submit=self._submit,
+        )
+        now = datetime.now(UTC)
+        for result in tick.results:
+            if result.outcome == "error":
+                self._note_outcome(result, now)
+        return PollTickResult(results=completed + tick.results)
+
+    def wait(self, timeout: float) -> None:
+
+        self.wake.wait(timeout)
+
+    def shutdown(self) -> None:
+
+        self._executor.shutdown(wait=True, cancel_futures=True)
+
+
 def _hms(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%H:%M:%S.%f")[:-3]
 
 
 def cmd_poll(client, args) -> int:
-    def _report_tick(tick: PollTickResult) -> None:
+
+
+    last_waiting: dict[str, tuple[str, str | None]] = {}
+
+    def _report_tick(tick: PollTickResult, *, continuous: bool = False) -> None:
         for r in tick.results:
-            if r.outcome in (
+            if r.outcome not in ("waiting_on_dependency", "waiting_on_dependents", "in_progress"):
+                last_waiting.pop(r.name, None)
+            if r.outcome not in (
                 "fired_success", "fired_failure", "error", "auto_revert_window_reopened",
                 "waiting_on_dependency", "waiting_on_dependents",
             ):
-                detail = f" ({r.detail})" if r.detail else ""
-                via = f" via_group={r.via_group}" if r.via_group else ""
-                revert = " auto_revert=true" if r.via_auto_revert else ""
-                timing = ""
-                if r.started_at is not None and r.finished_at is not None:
-                    timing = (f" started={_hms(r.started_at)} finished={_hms(r.finished_at)} "
-                              f"took={r.duration_s:.1f}s worker={r.worker}")
-                print(f"  {r.name}: {r.outcome} action={r.action}{via}{revert}{timing}{detail}")
-                record_activity(
-                    f"scheduler: {r.outcome} action={r.action}{via}{revert}{timing}{detail}",
-                    level="error" if r.outcome in ("fired_failure", "error") else (
-                        "warning" if r.outcome.startswith("waiting") else "info"),
-                    source="scheduler", instance_name=r.name, action="tick",
-                )
+                continue
+            if r.outcome.startswith("waiting"):
+                if continuous and last_waiting.get(r.name) == (r.outcome, r.detail):
+                    continue
+                last_waiting[r.name] = (r.outcome, r.detail)
+            detail = f" ({r.detail})" if r.detail else ""
+            via = f" via_group={r.via_group}" if r.via_group else ""
+            revert = " auto_revert=true" if r.via_auto_revert else ""
+            timing = ""
+            if r.started_at is not None and r.finished_at is not None:
+                timing = (f" started={_hms(r.started_at)} finished={_hms(r.finished_at)} "
+                          f"took={r.duration_s:.1f}s worker={r.worker}")
+            print(f"  {r.name}: {r.outcome} action={r.action}{via}{revert}{timing}{detail}")
+            record_activity(
+                f"scheduler: {r.outcome} action={r.action}{via}{revert}{timing}{detail}",
+                level="error" if r.outcome in ("fired_failure", "error") else (
+                    "warning" if r.outcome.startswith("waiting") else "info"),
+                source="scheduler", instance_name=r.name, action="tick",
+            )
         write_scheduler_heartbeat(
             interval_seconds=None if args.once else args.interval_seconds,
             instances_checked=len(tick.results), fired=tick.fired_count, failed=tick.failed_count,
         )
+        if continuous:
+            dispatched = sum(1 for r in tick.results if r.outcome == "dispatched")
+            finished = sum(1 for r in tick.results if r.started_at is not None)
+            if dispatched or finished:
+                waiting = (f", {tick.waiting_count} waiting on a dependency"
+                           if tick.waiting_count else "")
+                print(f"Check: {dispatched} started now, {finished} finished ({tick.fired_count} "
+                      f"succeeded, {tick.failed_count} failed){waiting}.")
+            return
         if tick.results:
             waiting = f", {tick.waiting_count} waiting on a dependency" if tick.waiting_count else ""
             print(f"Tick complete: {tick.fired_count} fired, {tick.failed_count} failed{waiting}, "
@@ -7617,49 +7798,63 @@ def cmd_poll(client, args) -> int:
         _report_tick(tick)
         return 1 if tick.failed_count else 0
 
+    if args.interval_seconds < 1:
+        print("Configuration error: --interval-seconds must be at least 1.", file=sys.stderr)
+        return 1
+
 
     if args.window_seconds < args.interval_seconds:
         print(
             f"Configuration error: --window-seconds ({args.window_seconds}) is smaller than "
             f"--interval-seconds ({args.interval_seconds}) -- a real gap would exist between "
-            "ticks where a scheduled action could be silently skipped for an entire day. Raise "
+            "checks where a scheduled action could be silently skipped for an entire day. Raise "
             "--window-seconds to at least --interval-seconds, or lower --interval-seconds.",
             file=sys.stderr,
         )
         return 1
 
-    print(f"Polling every {args.interval_seconds}s (Ctrl-C to stop)...")
+    scheduler = PollScheduler(
+        client, args.ssh_key, window_seconds=args.window_seconds, max_parallel=args.max_parallel,
+        client_factory=client_factory, on_progress=print, on_warning=_print_to_stderr,
+    )
+    stopping = threading.Event()
+
+    def _on_sigterm(_signum, _frame) -> None:
+        stopping.set()
+        scheduler.wake.set()
+
+    previous_handler = None
+    if threading.current_thread() is threading.main_thread():
+        previous_handler = signal.signal(signal.SIGTERM, _on_sigterm)
+    print(f"Checking schedules every {args.interval_seconds}s, and whenever a start/stop "
+          f"finishes; up to {args.max_parallel} start/stop(s) at once (Ctrl-C to stop)...")
     record_activity(
         f"Scheduler started: checking every {args.interval_seconds}s, catch-up window "
         f"{args.window_seconds}s, up to {args.max_parallel} at once.", source="scheduler",
         action="tick",
     )
     try:
-        while True:
-            tick_started = time.monotonic()
-            tick = poll_tick(
-                client, args.ssh_key, window_seconds=args.window_seconds,
-                max_parallel=args.max_parallel, client_factory=client_factory,
-                on_progress=print, on_warning=_print_to_stderr,
-            )
-            _report_tick(tick)
-            elapsed = time.monotonic() - tick_started
-
-
-            if elapsed > args.interval_seconds:
-                overrun = (
-                    f"WARNING: this tick took {elapsed:.1f}s, longer than the "
-                    f"{args.interval_seconds}s poll interval -- a schedule's match window may "
-                    "have been skipped entirely this cycle."
-                )
-                print(overrun, file=sys.stderr)
-                record_activity(overrun, level="warning", source="scheduler", action="tick")
-
-
-            time.sleep(max(MIN_POLL_SLEEP_SECONDS, args.interval_seconds - elapsed))
+        while not stopping.is_set():
+            _report_tick(scheduler.check(), continuous=True)
+            if stopping.is_set():
+                break
+            scheduler.wait(args.interval_seconds)
     except KeyboardInterrupt:
-        print("Stopped.")
-        return 0
+        pass
+    finally:
+        running = scheduler.in_flight_count
+        if running:
+            print(f"Stopping: waiting for {running} start/stop(s) already running to finish "
+                  "(queued ones are not started)...")
+        scheduler.shutdown()
+        leftover = scheduler.take_completed()
+        if leftover:
+            _report_tick(PollTickResult(results=leftover), continuous=True)
+        if previous_handler is not None:
+            signal.signal(signal.SIGTERM, previous_handler)
+    record_activity("Scheduler stopped.", source="scheduler", action="tick")
+    print("Stopped.")
+    return 0
 
 
 def cmd_serve_api(args) -> int:
@@ -9635,7 +9830,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     poll_parser.add_argument(
         "--interval-seconds", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS,
-        help="Seconds between ticks when running continuously (default 300, on this project's own recommended cadence of every 1-5 minutes). Ignored with --once.",
+        help=f"How often to check what is due, in seconds (default {DEFAULT_POLL_INTERVAL_SECONDS}). "
+        "A check only reads the local database; starts/stops run on separate workers, and a "
+        "check also runs as soon as one finishes. Ignored with --once.",
     )
     poll_parser.add_argument(
         "--once", action="store_true",

@@ -13,10 +13,10 @@ metadata:
   name: linode-instance-scheduler-config
   namespace: linode-instance-scheduler
 data:
-  # Seconds between scheduler ticks. 300 (5 min) matches this project's own documented
-  # "runs every 1-5 min" design and is a sensible default for most fleets -- see
-  # the customer guide's `poll` section before lowering this.
-  POLL_INTERVAL_SECONDS: "300"
+  # How often the scheduler checks what is due, in seconds. A check only reads the local
+  # database (no Linode API calls); starts/stops run on separate workers, and a check also runs
+  # as soon as one finishes. 15 is the `poll` command's own default.
+  POLL_INTERVAL_SECONDS: "15"
   # How long after a schedule rule's start_time/stop_time the action stays due. Within this
   # window a missed or failed start/stop (a slow tick, a brief outage, no capacity in the
   # region) is retried on every tick, unless something already started/stopped the instance

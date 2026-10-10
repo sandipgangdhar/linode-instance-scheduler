@@ -30,9 +30,8 @@ export function SchedulerBanner({ status }: { status: SchedulerStatus | null }) 
       </div>
     )
   }
-  const every = status.interval_seconds
-    ? ` (checks every ${Math.round(status.interval_seconds / 60) || 1} min)`
-    : ''
+  const secs = status.interval_seconds
+  const every = secs ? ` (checks every ${secs < 60 ? `${secs} s` : `${Math.round(secs / 60)} min`})` : ''
   const counts =
     status.instances_checked !== undefined
       ? ` — last check: ${status.instances_checked} instance(s), ${status.fired ?? 0} action(s), ${status.failed ?? 0} failed`

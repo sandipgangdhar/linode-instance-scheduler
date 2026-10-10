@@ -523,6 +523,8 @@ WorkingDirectory=$INSTALL_DIR
 ExecStart=$PY instance_manager.py poll
 Restart=always
 RestartSec=5
+# On stop/restart the scheduler lets a start/stop already running finish before exiting.
+TimeoutStopSec=900
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
