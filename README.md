@@ -294,6 +294,7 @@ Every command below is run from the repository root, with the virtual environmen
 | `rebuild` | Disaster recovery — reconstructs your local registry from tags on your own Linode account, in case the machine running this tool (and its local records) is ever lost. You should rarely need this either. |
 | `backup` | On-demand, whole-system backup — re-syncs every node's and group's Object Storage record, takes a full local/remote database snapshot, and saves the trusted host keys. Meant to be run on a schedule (cron/systemd timer). See §8.10. |
 | `holiday-add` / `holiday-remove` / `holiday-list` | Holidays: dates on which scheduled starts are skipped (every node, one group or one node); stops still happen. See §8.14. |
+| `holiday-settings` | Whether account-wide holidays apply to a group or a node (a node's own setting overrides its group's). See §8.14. |
 | `backup-config` | Shows where this tool backs itself up and how the last backup went; sets, tests or removes the Object Storage settings. See §8.10. |
 | `restore` | On a replacement host: puts the newest (or a chosen, or a local) database snapshot in place, plus the trusted host keys. Run `rebuild` afterward. See §8.10. |
 | `ssh-key-backup` / `ssh-key-restore` | Store the deployment SSH key in Object Storage, encrypted with a passphrase you keep, and get it back on a replacement host. See §8.10. |
@@ -1892,9 +1893,32 @@ schedule -- nothing to remember to undo.
   added). A start skipped earlier that day catches up within the usual hour.
 - `holiday-list` shows what's coming up (`--all` includes past dates).
 
-In the dashboard: the **Holidays** page, and **Skip tomorrow** on each group's page. A node whose
-day is a holiday says so on its page. Holidays are included in backups and come back with
-`restore`/`rebuild`.
+**Groups or nodes that must keep running on account-wide holidays.** A holiday added without
+`--group-name`/`--name` is account-wide and applies to every node by default. A group can opt out:
+
+```
+python instance_manager.py holiday-settings --group-name prod --ignore-account-wide
+```
+
+Its members then start as usual on account-wide holidays. Holidays added for that group (or for
+one of its nodes) still apply. A node's own setting always overrides its group's, the same way its
+own schedule does:
+
+```
+python instance_manager.py holiday-settings --name web-1 --follow-account-wide   # skips them even if its group runs
+python instance_manager.py holiday-settings --name db-1 --ignore-account-wide    # runs on them, with or without a group
+python instance_manager.py holiday-settings --name web-1 --inherit               # back to the group's choice
+```
+
+`holiday-settings --group-name prod` or `--name web-1` without a choice shows the current setting;
+`status` shows the setting in effect for a node and where it comes from.
+
+In the dashboard: the **Holidays** page; each group's page has a **Holidays** card (its upcoming
+holidays, adding a date or range for that group, **Run on account-wide holidays**, and **Skip
+tomorrow**); each node's page has an **Account-wide holidays** choice. A node whose day is a
+holiday says so on its page. Holidays and these settings are included in backups and come back
+with `restore`/`rebuild` (the settings are also kept in tags on each node's OS volume and in the
+group's Object Storage record).
 
 ## 9. Costs
 

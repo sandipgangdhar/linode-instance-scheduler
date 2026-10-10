@@ -229,6 +229,8 @@ _ROUTE_SCOPES: dict[tuple[str, str], str | None] = {
     ("POST", "/instances/{name}/migrate-resume"): "instances:migrate",
     ("GET", "/instances/{name}/migrate-status"): "instances:migrate",
     ("GET", "/instances/{name}/migrate-copy"): "instances:migrate",
+    ("PUT", "/groups/{group_name}/holiday-setting"): "schedules:write",
+    ("PUT", "/instances/{name}/holiday-setting"): "schedules:write",
     ("POST", "/instances/{name}/migrate-copy"): "instances:migrate",
     ("GET", "/linode/instances/{instance_id}/backup-estimate"): "instances:migrate",
     ("GET", "/backups"): "instances:migrate",
@@ -1700,6 +1702,46 @@ def api_patch_group(
     return result
 
 
+class HolidaySettingRequest(BaseModel):
+
+    account_holidays: Literal["follow", "ignore", "inherit"]
+
+
+@app.put("/groups/{group_name}/holiday-setting")
+def api_set_group_holiday_setting(
+    group_name: str, body: HolidaySettingRequest, request: Request,
+    user: str = Depends(require_session),
+) -> dict:
+    if body.account_holidays == "inherit":
+        raise HTTPException(422, "a group follows or ignores account-wide holidays; 'inherit' is "
+                                 "for a node.")
+    mode: str = body.account_holidays
+    _, warnings = _call_collecting_warnings(
+        lambda on_warning: im.set_group_account_holidays(
+            _client(request), group_name, mode, on_warning=on_warning)
+    )
+    result: dict = {"account_holidays": mode}
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+@app.put("/instances/{name}/holiday-setting")
+def api_set_instance_holiday_setting(
+    name: str, body: HolidaySettingRequest, request: Request,
+    user: str = Depends(require_session),
+) -> dict:
+    mode = None if body.account_holidays == "inherit" else body.account_holidays
+    result, warnings = _call_collecting_warnings(
+        lambda on_warning: im.set_instance_account_holidays(
+            _client(request), name, mode, on_warning=on_warning)
+    )
+    out: dict = dict(result)
+    if warnings:
+        out["warnings"] = warnings
+    return out
+
+
 @app.delete("/groups/{group_name}")
 def api_delete_group(group_name: str, user: str = Depends(require_session)) -> dict:
     im.delete_schedule_group(group_name)
@@ -1947,7 +1989,7 @@ CONSOLE_COMMANDS = (
     "group-delete", "group-add", "group-remove", "api-token-list", "api-token-scopes",
     "api-token-revoke",
     "clear-lock", "set-vpc-address", "reset-host-key", "rebuild", "backup",
-    "backup-list", "rollback", "backup-delete", "holiday-add", "holiday-remove", "holiday-list",
+    "backup-list", "rollback", "backup-delete", "holiday-add", "holiday-remove", "holiday-list", "holiday-settings",
 )
 CONSOLE_MAX_RUNTIME_S = 3 * 3600
 CONSOLE_MAX_LINES = 20000

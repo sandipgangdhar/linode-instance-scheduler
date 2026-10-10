@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS schedule_groups (
     timezone TEXT NOT NULL,
     rules TEXT NOT NULL DEFAULT '[]',
     enabled INTEGER NOT NULL DEFAULT 1,
+    account_holidays TEXT NOT NULL DEFAULT 'follow',
     depends_on_group_id INTEGER REFERENCES schedule_groups(id)
 );
 
@@ -100,7 +101,8 @@ CREATE TABLE IF NOT EXISTS api_sessions (
 
 CREATE TABLE IF NOT EXISTS instance_settings (
     instance_name TEXT PRIMARY KEY REFERENCES instances(name) ON DELETE CASCADE,
-    schedule_mode TEXT NOT NULL DEFAULT 'auto' CHECK (schedule_mode IN ('auto', 'manual'))
+    schedule_mode TEXT NOT NULL DEFAULT 'auto' CHECK (schedule_mode IN ('auto', 'manual')),
+    account_holidays TEXT
 );
 
 CREATE TABLE IF NOT EXISTS instance_hooks (

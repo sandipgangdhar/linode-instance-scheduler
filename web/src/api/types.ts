@@ -20,6 +20,7 @@ export interface InstanceRecord {
   group_id: number | null
   schedule_mode?: 'auto' | 'manual'
   holiday_today?: string
+  account_holidays?: AccountHolidaySetting
   current_linode_id: number | null
   current_status: InstanceStatus
   transitioning: boolean
@@ -85,6 +86,7 @@ export interface ScheduleGroup {
   members: string[]
   depends_on?: string[]
   dependents?: string[]
+  account_holidays?: 'follow' | 'ignore'
   warnings?: string[]
 }
 export interface ScheduleGroupSummary {
@@ -95,6 +97,7 @@ export interface ScheduleGroupSummary {
   enabled: boolean
   member_count: number
   depends_on?: string[]
+  account_holidays?: 'follow' | 'ignore'
 }
 export interface ScheduleEvent {
   action: 'create' | 'delete'
@@ -429,4 +432,9 @@ export interface Holiday {
   target: string | null
   note: string | null
   created_at: string
+}
+export interface AccountHolidaySetting {
+  own: 'follow' | 'ignore' | null
+  effective: 'follow' | 'ignore'
+  source: 'instance' | 'group' | 'default'
 }

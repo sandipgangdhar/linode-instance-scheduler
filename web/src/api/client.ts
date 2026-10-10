@@ -15,6 +15,7 @@ import type {
   LinodeRawInstance,
   MigrateResumeResult,
   AssistedCopyReadiness,
+  AccountHolidaySetting,
   AssistedCopyResult,
   MigrateStartResult,
   MigrateStatus,
@@ -327,6 +328,17 @@ export const api = {
       warnings: string[]
     }>('DELETE', `/holidays?${q.toString()}`)
   },
+  setGroupHolidaySetting: (group: string, mode: 'follow' | 'ignore') =>
+    request<{
+      account_holidays: string
+      warnings?: string[]
+    }>('PUT', `/groups/${encodeURIComponent(group)}/holiday-setting`, { account_holidays: mode }),
+  setInstanceHolidaySetting: (name: string, mode: 'follow' | 'ignore' | 'inherit') =>
+    request<
+      AccountHolidaySetting & {
+        warnings?: string[]
+      }
+    >('PUT', `/instances/${encodeURIComponent(name)}/holiday-setting`, { account_holidays: mode }),
   extendGroup: (name: string, hours: number) =>
     request<GroupExtendResult>('POST', `/groups/${encodeURIComponent(name)}/extend`, { hours }),
   extendOverride: (name: string, hours?: number) =>

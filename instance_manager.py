@@ -225,6 +225,19 @@ def _migrate_add_manual_override_column(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_add_account_holidays_columns(conn: sqlite3.Connection) -> None:
+
+    for table, ddl in (
+        ("schedule_groups", "ALTER TABLE schedule_groups ADD COLUMN account_holidays TEXT NOT NULL "
+                            "DEFAULT 'follow'"),
+        ("instance_settings", "ALTER TABLE instance_settings ADD COLUMN account_holidays TEXT"),
+    ):
+        columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if columns and "account_holidays" not in columns:
+            conn.execute(ddl)
+            conn.commit()
+
+
 def _migrate_add_schedule_events_actor_column(conn: sqlite3.Connection) -> None:
 
     row = conn.execute(
@@ -297,6 +310,7 @@ def _connect() -> sqlite3.Connection:
         conn.executescript(SCHEMA_PATH.read_text())
 
         _migrate_group_dependencies_table(conn)
+        _migrate_add_account_holidays_columns(conn)
     except sqlite3.DatabaseError as e:
         conn.close()
         if isinstance(e, sqlite3.OperationalError):
@@ -3342,6 +3356,8 @@ def _resync_config_tags_locked(
     _attempt("group", _group)
     _attempt("manual-only", lambda: _sync_schedule_mode_tag_locked(
         client, name, record, get_schedule_mode(name)))
+    _attempt("holiday setting", lambda: _sync_holiday_setting_tag_locked(
+        client, name, record, get_instance_account_holidays(name)))
 
 
 def _is_host_key_mismatch(e: Exception) -> bool:
@@ -4341,7 +4357,8 @@ def _is_recovery_metadata_tag(tag: str) -> bool:
             or _is_schedule_tag(tag, prefix=_GROUP_SCHEDULE_TAG_PREFIX)
             or tag.startswith(_GROUP_NAME_TAG_PREFIX)
             or tag.startswith(_GROUP_DEP_TAG_PREFIX)
-            or tag == _SCHEDULE_MODE_MANUAL_TAG
+            or tag in (_SCHEDULE_MODE_MANUAL_TAG, _GROUP_HOLIDAY_IGNORE_TAG)
+            or tag.startswith(_HOLIDAY_SETTING_TAG_PREFIX)
             or _is_hook_tag(tag)
             or _is_extra_recovery_tag(tag))
 
@@ -5715,6 +5732,9 @@ _GROUP_NAME_TAG_PREFIX = "grp-name:"
 _GROUP_DEP_TAG_PREFIX = "grp-dep:"
 
 
+_GROUP_HOLIDAY_IGNORE_TAG = "grp-hol:ignore"
+
+
 def _group_id_for_name(conn: sqlite3.Connection, group_name: str) -> int:
 
     row = conn.execute("SELECT id FROM schedule_groups WHERE name = ?", (group_name,)).fetchone()
@@ -5729,7 +5749,8 @@ def _group_row_by_id(group_id: int) -> dict | None:
         conn = _connect()
         try:
             row = conn.execute(
-                "SELECT name, timezone, rules, enabled FROM schedule_groups WHERE id = ?",
+                "SELECT name, timezone, rules, enabled, account_holidays FROM schedule_groups "
+                "WHERE id = ?",
                 (group_id,),
             ).fetchone()
             if row is None:
@@ -5737,6 +5758,7 @@ def _group_row_by_id(group_id: int) -> dict | None:
             return {
                 "id": group_id, "name": row[0], "timezone": row[1], "rules": json.loads(row[2]),
                 "enabled": bool(row[3]), "depends_on": _group_dependency_names(conn, group_id),
+                "account_holidays": row[4] or "follow",
             }
         finally:
             conn.close()
@@ -5775,6 +5797,7 @@ def _group_backup_payload(group_name: str) -> dict | None:
     return {
         "name": group["name"], "timezone": group["timezone"], "rules": group["rules"],
         "enabled": group["enabled"], "depends_on": group["depends_on"],
+        "account_holidays": group.get("account_holidays", "follow"),
         "hooks": _read_hook_row("SELECT config FROM group_hooks WHERE group_id = ?", group["id"]),
     }
 
@@ -5947,7 +5970,8 @@ def get_schedule_group(group_name: str) -> dict | None:
         conn = _connect()
         try:
             row = conn.execute(
-                "SELECT id, name, timezone, rules, enabled FROM schedule_groups WHERE name = ?",
+                "SELECT id, name, timezone, rules, enabled, account_holidays FROM schedule_groups "
+                "WHERE name = ?",
                 (group_name,),
             ).fetchone()
             if row is None:
@@ -5960,6 +5984,7 @@ def get_schedule_group(group_name: str) -> dict | None:
             return {
                 "id": row[0], "name": row[1], "timezone": row[2], "rules": json.loads(row[3]),
                 "enabled": bool(row[4]), "members": members,
+                "account_holidays": row[5] or "follow",
                 "depends_on": _group_dependency_names(conn, row[0]),
                 "dependents": _group_dependent_names(conn, row[0]),
             }
@@ -5975,7 +6000,8 @@ def list_schedule_groups() -> list[dict]:
         conn = _connect()
         try:
             groups = conn.execute(
-                "SELECT id, name, timezone, rules, enabled FROM schedule_groups ORDER BY name"
+                "SELECT id, name, timezone, rules, enabled, account_holidays FROM schedule_groups "
+                "ORDER BY name"
             ).fetchall()
             names_by_id = {g[0]: g[1] for g in groups}
             deps: dict[int, list[str]] = {}
@@ -5993,8 +6019,9 @@ def list_schedule_groups() -> list[dict]:
                     "id": gid, "name": name, "timezone": tz, "rules": json.loads(rules),
                     "enabled": bool(enabled), "member_count": counts.get(gid, 0),
                     "depends_on": sorted(deps.get(gid, [])),
+                    "account_holidays": account_holidays or "follow",
                 }
-                for gid, name, tz, rules, enabled in groups
+                for gid, name, tz, rules, enabled, account_holidays in groups
             ]
         finally:
             conn.close()
@@ -6017,6 +6044,7 @@ def _sync_group_membership_tags_locked(client, name: str, record: dict, group: d
         t for t in (os_volume.tags or [])
         if not t.startswith(_GROUP_NAME_TAG_PREFIX)
         and not t.startswith(_GROUP_DEP_TAG_PREFIX)
+        and t != _GROUP_HOLIDAY_IGNORE_TAG
         and not _is_schedule_tag(t, prefix=_GROUP_SCHEDULE_TAG_PREFIX)
     ]
     new_tags = kept
@@ -6024,6 +6052,8 @@ def _sync_group_membership_tags_locked(client, name: str, record: dict, group: d
         new_tags = new_tags + [f"{_GROUP_NAME_TAG_PREFIX}{group['name']}"] + \
             _encode_schedule_as_tags(group, prefix=_GROUP_SCHEDULE_TAG_PREFIX)
         new_tags += [f"{_GROUP_DEP_TAG_PREFIX}{dep}" for dep in group.get("depends_on") or []]
+        if group.get("account_holidays") == "ignore":
+            new_tags.append(_GROUP_HOLIDAY_IGNORE_TAG)
     if new_tags != (os_volume.tags or []):
         os_volume.tags = new_tags
         os_volume.save()
@@ -9185,15 +9215,14 @@ def holiday_for(name: str, record: dict, local_date: date,
 
     holidays = _holiday_set() if holidays is None else holidays
     d = local_date.isoformat()
-    if (d, "all", "") in holidays:
+    group_id = record.get("group_id")
+    group = _group_row_by_id(group_id) if group_id is not None else None
+    if (d, "all", "") in holidays and effective_account_holidays(name, group)[0] == "follow":
         return "every node"
     if (d, "instance", name) in holidays:
         return "this node"
-    group_id = record.get("group_id")
-    if group_id is not None:
-        group = _group_row_by_id(group_id)
-        if group is not None and (d, "group", group["name"]) in holidays:
-            return f"group '{group['name']}'"
+    if group is not None and (d, "group", group["name"]) in holidays:
+        return f"group '{group['name']}'"
     return None
 
 
@@ -9202,6 +9231,139 @@ def holiday_today(name: str, record: dict) -> str | None:
     schedule, _via = resolve_effective_schedule(name, record)
     zone = ZoneInfo(schedule["timezone"]) if schedule else UTC
     return holiday_for(name, record, datetime.now(UTC).astimezone(zone).date())
+
+
+ACCOUNT_HOLIDAY_MODES = ("follow", "ignore")
+_HOLIDAY_SETTING_TAG_PREFIX = "hol:"
+
+
+def get_instance_account_holidays(name: str) -> str | None:
+
+    def _do():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT account_holidays FROM instance_settings WHERE instance_name = ?", (name,)
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    value = _retry_db(_do)
+    return value if value in ACCOUNT_HOLIDAY_MODES else None
+
+
+def effective_account_holidays(name: str, group: dict | None) -> tuple[str, str]:
+
+    own = get_instance_account_holidays(name)
+    if own is not None:
+        return own, "instance"
+    if group is not None and group.get("account_holidays") in ACCOUNT_HOLIDAY_MODES:
+        if group["account_holidays"] == "ignore":
+            return "ignore", "group"
+        return "follow", "group"
+    return "follow", "default"
+
+
+def _write_instance_account_holidays_row(name: str, mode: str | None) -> None:
+
+    def _do():
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO instance_settings (instance_name, account_holidays) VALUES (?, ?)"
+                " ON CONFLICT(instance_name) DO UPDATE SET account_holidays ="
+                " excluded.account_holidays",
+                (name, mode),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    _retry_db(_do)
+
+
+def _sync_holiday_setting_tag_locked(client, name: str, record: dict, mode: str | None) -> None:
+
+    if client is None or not record.get("os_volume_id"):
+        return
+    os_volume = engine.retry_transient(
+        lambda vol_id=record["os_volume_id"]: client.load(Volume, vol_id)
+    )
+    current = list(os_volume.tags or [])
+    new_tags = [t for t in current if not t.startswith(_HOLIDAY_SETTING_TAG_PREFIX)]
+    if mode in ACCOUNT_HOLIDAY_MODES:
+        new_tags.append(f"{_HOLIDAY_SETTING_TAG_PREFIX}{mode}")
+    if new_tags != current:
+        os_volume.tags = new_tags
+        engine.retry_transient(os_volume.save)
+        _verify_os_volume_tag_write(client, record["os_volume_id"], new_tags)
+
+
+def set_instance_account_holidays(
+    client, name: str, mode: str | None, *, on_warning: Callable[[str], None] | None = None,
+) -> dict:
+
+    if mode is not None and mode not in ACCOUNT_HOLIDAY_MODES:
+        raise engine.ConfigError("account holidays must be 'follow', 'ignore' or inherited.")
+    with _instance_lock(name):
+        record = load_registry().get(name)
+        if record is None:
+            raise NotOnboardedError(f"'{name}' is not onboarded. Run `onboard` first.")
+        _write_instance_account_holidays_row(name, mode)
+        try:
+            _sync_holiday_setting_tag_locked(client, name, record, mode)
+        except Exception as e:
+            if on_warning is not None:
+                on_warning(
+                    f"WARNING: the holiday setting for '{name}' is in effect, but its "
+                    f"disaster-recovery tag couldn't be updated: {e} -- the next start or stop "
+                    "retries it."
+                )
+        group = _group_row_by_id(record["group_id"]) if record.get("group_id") else None
+    effective, source = effective_account_holidays(name, group)
+    return {"own": mode, "effective": effective, "source": source}
+
+
+def set_group_account_holidays(
+    client, group_name: str, mode: str, *, on_warning: Callable[[str], None] | None = None,
+) -> str:
+
+    if mode not in ACCOUNT_HOLIDAY_MODES:
+        raise engine.ConfigError("account holidays must be 'follow' or 'ignore'.")
+
+    def _do():
+        conn = _connect()
+        try:
+            _group_id_for_name(conn, group_name)
+            conn.execute("UPDATE schedule_groups SET account_holidays = ? WHERE name = ?",
+                         (mode, group_name))
+            conn.commit()
+        finally:
+            conn.close()
+
+    _retry_db(_do)
+    group = get_schedule_group(group_name)
+    if group is None:
+        raise GroupNotFoundError(f"no schedule group named '{group_name}' exists.")
+    for member in group["members"]:
+        _sync_group_membership_tags(client, member, group, on_warning=on_warning)
+    _sync_group_object_backup(group_name, on_warning=on_warning)
+    return mode
+
+
+def _restore_group_account_holidays(group_name: str, mode: str | None) -> None:
+    if mode == "ignore":
+        def _do():
+            conn = _connect()
+            try:
+                conn.execute("UPDATE schedule_groups SET account_holidays = 'ignore' "
+                             "WHERE name = ?", (group_name,))
+                conn.commit()
+            finally:
+                conn.close()
+
+        _retry_db(_do)
 
 
 def restore_holidays_from_object_storage(
@@ -9239,6 +9401,48 @@ def restore_holidays_from_object_storage(
         if on_progress is not None:
             on_progress(f"Restored {len(rows)} holiday(s) from Object Storage.")
     return len(rows)
+
+
+def cmd_holiday_settings(client, args) -> int:
+
+    if args.follow_account_wide:
+        mode: str | None = "follow"
+    elif args.ignore_account_wide:
+        mode = "ignore"
+    elif args.inherit:
+        mode = None
+    else:
+        mode = "show"
+    try:
+        if args.group_name:
+            if args.inherit:
+                print("Configuration error: --inherit applies to a node (--name), not a group.",
+                      file=sys.stderr)
+                return 1
+            if mode == "show":
+                group = get_schedule_group(args.group_name)
+                if group is None:
+                    raise GroupNotFoundError(f"no schedule group named '{args.group_name}' exists.")
+                print(f"Group '{args.group_name}': {group['account_holidays']} account-wide holidays.")
+                return 0
+            assert mode is not None
+            set_group_account_holidays(client, args.group_name, mode, on_warning=_print_to_stderr)
+            print(f"Group '{args.group_name}' now {'follows' if mode == 'follow' else 'ignores'} "
+                  "account-wide holidays (members with their own setting keep it).")
+            return 0
+        if mode == "show":
+            r = get_instance_status(args.name)["account_holidays"]
+        else:
+            r = set_instance_account_holidays(client, args.name, mode, on_warning=_print_to_stderr)
+        own = r["own"] or f"inherit (from {r['source']})"
+        print(f"'{args.name}': {r['effective']} account-wide holidays (own setting: {own}).")
+        return 0
+    except InstanceLockedError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 3
+    except engine.ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
 
 
 def cmd_holiday_add(args) -> int:
@@ -9348,6 +9552,10 @@ def get_instance_status(name: str) -> dict:
     holiday = _holiday_today_cached(name, record, _holiday_set())
     if holiday:
         record["holiday_today"] = holiday
+    group = _group_row_by_id(record["group_id"]) if record.get("group_id") else None
+    effective, source = effective_account_holidays(name, group)
+    record["account_holidays"] = {"own": get_instance_account_holidays(name),
+                                  "effective": effective, "source": source}
     return record
 
 
@@ -10063,6 +10271,7 @@ def _restore_groups_from_object_storage(
                 _set_group_schedule_row(group_name, timezone, rules, bool(record.get("enabled", True)))
             elif not record.get("enabled", True):
                 _set_group_schedule_row(group_name, timezone, [], False)
+            _restore_group_account_holidays(group_name, record.get("account_holidays"))
             if on_progress is not None:
                 on_progress(f"  recreated group '{group_name}' from Object Storage.")
             hooks = record.get("hooks")
@@ -10276,6 +10485,8 @@ def rebuild_instances(
                                         group_name, snapshot["timezone"], snapshot["rules"],
                                         snapshot["enabled"],
                                     )
+                                if _GROUP_HOLIDAY_IGNORE_TAG in (os_volume.tags or []):
+                                    _restore_group_account_holidays(group_name, "ignore")
                                 if on_progress is not None:
                                     on_progress(
                                         f"  recreated group '{group_name}' from '{name}''s tags."
@@ -10321,6 +10532,14 @@ def rebuild_instances(
                             _write_schedule_mode_row(name, "manual")
                             if on_progress is not None:
                                 on_progress(f"  restored '{name}' as manual-only from tags.")
+                        own_hol = next((t[len(_HOLIDAY_SETTING_TAG_PREFIX):] for t in vol_tags
+                                        if t.startswith(_HOLIDAY_SETTING_TAG_PREFIX)), None)
+                        if (own_hol in ACCOUNT_HOLIDAY_MODES
+                                and get_instance_account_holidays(name) is None):
+                            _write_instance_account_holidays_row(name, own_hol)
+                            if on_progress is not None:
+                                on_progress(f"  restored '{name}''s holiday setting "
+                                            f"({own_hol} account-wide holidays) from tags.")
                     except Exception as e:
                         if on_warning is not None:
                             on_warning(
@@ -11145,6 +11364,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     holiday_list_parser.add_argument("--all", action="store_true",
                                      help="Include past dates (default: from yesterday on).")
     holiday_list_parser.add_argument("--json", action="store_true")
+    holiday_settings_parser = subparsers.add_parser(
+        "holiday-settings",
+        help="Show or set whether account-wide holidays apply to a group or a node. A node's own "
+        "setting overrides its group's; group and node holidays always apply.",
+    )
+    hs_target = holiday_settings_parser.add_mutually_exclusive_group(required=True)
+    hs_target.add_argument("--group-name", type=validate_instance_name)
+    hs_target.add_argument("--name", type=validate_instance_name)
+    hs_mode = holiday_settings_parser.add_mutually_exclusive_group()
+    hs_mode.add_argument("--follow-account-wide", action="store_true",
+                         help="Account-wide holidays skip scheduled starts (the default).")
+    hs_mode.add_argument("--ignore-account-wide", action="store_true",
+                         help="Account-wide holidays don't skip scheduled starts.")
+    hs_mode.add_argument("--inherit", action="store_true",
+                         help="Node only: drop its own setting and use its group's.")
 
     backup_config_parser = subparsers.add_parser(
         "backup-config",
@@ -11997,6 +12231,8 @@ def _route(args) -> int:
         return cmd_group_schedule_set(client, args)
     if args.command == "group-depends":
         return cmd_group_depends(client, args)
+    if args.command == "holiday-settings":
+        return cmd_holiday_settings(client, args)
     if args.command == "set-mode":
         return cmd_set_mode(client, args)
     if args.command == "group-add":

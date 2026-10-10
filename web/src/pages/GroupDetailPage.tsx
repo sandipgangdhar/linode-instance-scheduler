@@ -330,7 +330,7 @@ export function GroupDetailPage() {
           </Card>
           <GroupActionsCard key={`actions:${group.name}`} group={group} onChanged={reload} />
           <GroupExtendCard key={`extend:${group.name}`} group={group} onChanged={reload} />
-          <GroupHolidayCard key={`holiday:${group.name}`} group={group} />
+          <GroupHolidayCard key={`holiday:${group.name}`} group={group} onChanged={reload} />
           <DependencyCard key={`dependency:${group.name}`} group={group} onChanged={reload} />
           <HooksCard key={group.name} target={{ kind: 'group', name: group.name }} />
         </div>

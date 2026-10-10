@@ -12,6 +12,7 @@ import {
 } from '../api/types'
 import { ActivityFeed } from '../components/ActivityFeed'
 import { HooksCard } from '../components/HooksCard'
+import { InstanceHolidaySettingCard } from '../components/InstanceHolidaySettingCard'
 import { SavingsCard } from '../components/SavingsCard'
 import { ScheduleEditor } from '../components/ScheduleEditor'
 import { StatusBadge } from '../components/StatusBadge'
@@ -577,6 +578,13 @@ export function InstanceDetailPage() {
                   </Button>
                 </div>
               )}
+              <InstanceHolidaySettingCard
+                key={`holiday-setting:${name}`}
+                name={name}
+                setting={record.account_holidays}
+                groupName={currentGroup?.name ?? null}
+                onChanged={reload}
+              />
             </>
           )}
 
