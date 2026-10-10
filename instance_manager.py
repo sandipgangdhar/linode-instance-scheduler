@@ -1063,6 +1063,20 @@ class MigrateStartResult:
     dest_volume_label: str | None = None
 
 
+VLAN_ONLY_CLOUD_CFG = "/etc/cloud/cloud.cfg.d/99-linode-instance-scheduler.cfg"
+
+
+def _is_vlan_only(network_config: list[dict] | None, model: str | None) -> bool:
+
+    config = network_config or []
+    if not config:
+        return False
+    if model == engine.INTERFACE_MODEL_LEGACY:
+        return all(iface.get("purpose") == "vlan" for iface in config)
+    return all(iface.get("vlan") and not iface.get("vpc") and not iface.get("public")
+               for iface in config)
+
+
 def _append_authorized_key_command(public_key: str) -> str:
 
     return (
@@ -2256,6 +2270,21 @@ def onboard_instance(
                 raise _OnboardRefusal(
                     "could not read any authorized_keys from the instance -- refusing to "
                     "onboard without knowing how future recreates will grant SSH access."
+                )
+
+
+            if _is_vlan_only(captured["network_config"], captured["network_interface_model"]):
+                if on_progress is not None:
+                    on_progress(
+                        "VLAN-only instance: telling cloud-init on the node to keep its SSH host "
+                        f"keys across recreates ({VLAN_ONLY_CLOUD_CFG})..."
+                    )
+                engine.ssh_run(
+                    ssh_target, ssh_key,
+                    f"mkdir -p /etc/cloud/cloud.cfg.d && printf '%s\\n' "
+                    f"'# Written by linode-instance-scheduler: keep SSH host keys across recreates.' "
+                    f"'ssh_deletekeys: false' > {VLAN_ONLY_CLOUD_CFG}",
+                    trust_new=True, password=ssh_password,
                 )
 
             data_volumes = engine.capture_data_volumes(instance, os_volume_id, configs=configs)

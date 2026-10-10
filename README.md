@@ -603,7 +603,12 @@ interface) is fully supported — onboard, stop, start, schedules, groups, hooks
   in Cloud Manager (Networking -> Reserved IPs), then start the node again; a scheduled start is
   retried on every poller tick until its catch-up window ends.
 - A **VLAN-only** node gets no default route or DNS from the tool — a VLAN has no gateway — so
-  anything it needs beyond its own VLAN must come from its own configuration.
+  anything it needs beyond its own VLAN must come from its own configuration. Linode's metadata
+  service isn't reachable from an instance whose only interface is a VLAN, so a recreated
+  VLAN-only node runs from the network settings already on its disk (its VLAN address never
+  changes), and onboarding writes one cloud-init setting on the node,
+  `/etc/cloud/cloud.cfg.d/99-linode-instance-scheduler.cfg` (`ssh_deletekeys: false`), so its SSH
+  host keys survive each recreate. The scheduler must be on the same VLAN to reach it.
 
 **If the node has a VPC interface, you may need `--vpc-id`.** For the newer `linode` interface
 model, the VPC's ID is already part of what's captured — nothing extra needed. For the older
