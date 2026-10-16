@@ -291,7 +291,6 @@ database and settings the services use. (In Kubernetes:
 | `backup-verify` | Restore-tests the backups now (the scheduler does it daily). See §8.15. |
 | `doctor` | Checks that the database, your Linode account (tags, volumes, instances, VPC addresses), the Object Storage copies and the trusted host keys all agree. Read-only. Exit 0 consistent, 1 problems found, 2 a check couldn't run. `--json` for scripts. `--fix` shows the repairs for what it found and applies them after you confirm. See §8.15 and §8.17. |
 | `explain` | Explains an error: paste its text (or `--file`, or `--name` for a node's last failure) and get its cause, read-only checks against this deployment, and what to do. See §8.17. |
-| `ask` | Answers a question about the product, or explains a pasted error, worked out on this host (nothing is sent anywhere) and filled in with this deployment's facts. `ask-feedback` says whether it helped; `ask-learn` teaches it the failures seen here. See §8.17. |
 | `scheduler-lease` | Which host is the active scheduler; `--take-over` makes this one active. See §8.15. |
 | `host-watchdog` | Linode's Shutdown Watchdog on the scheduler's own host; `--enable` turns it on. See §8.15. |
 | `alerts-check` / `alerts-test` | Show what needs attention right now (exit 1 if anything) / send a test alert. Alerts go to a webhook and/or email. See §8.15. |
@@ -2497,9 +2496,9 @@ machine to run them on — in Kubernetes, use a DaemonSet or a readiness gate in
 Object Storage, `auto` scales the pool to one node instead of deleting it (its settings would
 otherwise exist only in the local database), and `delete` mode is refused; to stop scheduling one, run `deregister --name <name>`. The pool itself is left as it is; its Object Storage record is kept but marked deregistered, so `rebuild` doesn't bring it back. If the pool was stopped (deleted) at that moment, `deregister` refuses unless that record exists, since it would hold the only copy of the pool's settings; if it was stopped by scaling it to one node, `deregister` refuses too (nothing would scale it back) — start it first. A pool that already runs a single node with no autoscaler and can't be deleted (the cluster's only pool) saves nothing when stopped; it is just recorded stopped. The pool keeps its `lis-pool:<name>` tag; remove the tag in Cloud Manager before registering the same pool under a different name.
 
-### 8.17 Getting help on the host: `doctor --fix`, `explain` and `ask`
+### 8.17 Getting help on the host: `doctor --fix` and `explain`
 
-Three built-in helpers, all working on this host with nothing sent anywhere. None of them
+Two built-in helpers, both working on this host with nothing sent anywhere. Neither
 changes anything without you confirming, except the small set of automatic repairs below.
 
 **Repairs (`doctor --fix`).** `doctor` lists what doesn't agree; `--fix` turns that into a plan,
@@ -2532,31 +2531,6 @@ linode-instance-scheduler explain --name web-1      # that node's last failure
 ```
 
 Every error banner in the dashboard has an "Explain this" link.
-
-**Questions (`ask`).** Ask how to do something, what a feature is for, which rule wins, or paste
-an error:
-
-```
-linode-instance-scheduler ask "how do I upgrade?"
-linode-instance-scheduler ask "which schedule wins: instance, group or holiday?" --name web-1
-linode-instance-scheduler ask "have we deployed as recommended? any risks?"
-linode-instance-scheduler ask "what does migrate-orphans do?"
-```
-
-Answers come from this product's own reviewed answers and error catalog, chosen by a small model
-that runs on this host's CPU -- it never writes new text and never calls an outside AI service --
-and they're filled in with this deployment's facts: its version and install type, a named node's
-effective schedule, holiday and extension right now, or a review of this deployment against the
-recommendations (Object Storage, the encrypted settings copy, alerts, heartbeat, HTTPS, recovery
-drills, the last restore test, the scheduler's health). Typos and other wordings are understood.
-When it isn't sure it says so and lists the closest topics instead of guessing.
-
-It learns on this host: `ask-feedback --question "..." --answer-id <id> --helpful` (or
-`--not-helpful --correct-id <id>`) records whether an answer helped and which one was right, and
-the next question uses it; the failures seen on this host that the error catalog recognises are
-learned once a day by the scheduler (`ask-learn` does it now). Nothing leaves the host. In the
-dashboard: the Ask page in the menu (with "Learn now"), an Ask card on the Instances page, with
-"Did this help?".
 
 ## 9. Costs
 
@@ -2641,9 +2615,9 @@ linode-instance-scheduler stop --name tidb-replica-2
 
 ## 11. Troubleshooting
 
-**Start here:** `linode-instance-scheduler ask "<your question or the error>"` (or the dashboard's
-Ask page) answers most of the questions below with this deployment's own facts, and `doctor`
-checks everything this tool relies on. See §8.17.
+**Start here:** `linode-instance-scheduler explain "<the error>"` (or "Explain this" on a dashboard
+error) gives an error's cause and what to do, and `doctor` checks everything this tool relies on.
+See §8.17.
 
 **`onboard` refuses with "is not a reserved IP."** The node's public IP hasn't been reserved
 yet. If you went through §6, this shouldn't happen (it's handled automatically in

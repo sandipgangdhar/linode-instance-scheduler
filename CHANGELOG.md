@@ -4,6 +4,15 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.16.1
+
+### Changed
+- The free-form `ask` command, its API routes (`/system/ask...`) and the dashboard's Ask page and
+  Ask card are withdrawn: its answers weren't reliable enough for every way a question can be
+  worded. `explain` (an error's cause, read-only checks and what to do, also "Explain this" on
+  every dashboard error) and `doctor --fix` are unchanged. API tokens holding the `system:ask`
+  scope keep working for their other scopes.
+
 ## v1.16.0
 
 ### Added

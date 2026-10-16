@@ -486,7 +486,7 @@ it's gone. `LIS_ALLOW_STANDBY_CHANGES=1` overrides. While the bucket can't be re
 scheduler that was active carries on and a host that wasn't active stays standby;
 `scheduler-lease --take-over` overrides.
 
-### Repairs, error explanations and questions (`doctor --fix`, `explain`, `ask`)
+### Repairs and error explanations (`doctor --fix`, `explain`)
 
 `doctor --fix` turns what `doctor` found into a plan, shows it, asks once, applies it and checks
 again (`--only D7` for one kind of finding, `--name <node>` for one node, `--yes` for scripts).
@@ -498,14 +498,8 @@ first three are applied automatically by the active scheduler after its daily ch
 finding only a person can judge is listed, never repaired.
 
 `explain "<error>"` (or `--file <log>`, or `--name <node>` for its last failure) gives an error's
-cause, read-only checks against this deployment and what to do. `ask "<question or error>"`
-answers questions about the product -- how to do a task, what a feature is for, which rule wins,
-whether this deployment follows the recommendations -- with this deployment's facts filled in.
-Both run on this host with nothing sent anywhere: `ask` uses a small model on the host's CPU that
-only chooses among this product's own reviewed answers and error catalog, and says "not sure"
-(listing the closest topics) rather than guess. It learns on the host from `ask-feedback` and,
-once a day, from the failures seen here (`ask-learn`, or "Learn now" on the Ask page, runs that now). The dashboard has an Ask page,
-an Ask card on Instances and "Explain this" on every error banner.
+cause, read-only checks against this deployment and what to do; it runs on this host with nothing
+sent anywhere. Every error banner in the dashboard has an "Explain this" link.
 
 ### Recovery drills
 
@@ -860,8 +854,8 @@ a week, rehearse at your real scale, then onboard production in waves.
 
 ## Troubleshooting
 
-First, `linode-instance-scheduler ask "<the error or question>"` (or the dashboard's Ask page):
-it answers most of these with this deployment's own facts.
+First, `linode-instance-scheduler explain "<the error>"` (or "Explain this" on the dashboard's
+error banner) for its cause and fix, and `doctor` for the whole deployment.
 
 | Symptom | Most likely cause | What to check / do |
 |---|---|---|
