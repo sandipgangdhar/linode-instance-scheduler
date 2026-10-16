@@ -1,0 +1,10 @@
+.env
+state/
+__pycache__/
+*.pyc
+.venv/
+web/node_modules/
+web/dist/
+.DS_Store
+k8s/secret.yaml
+k8s/ssh-key-secret.yaml

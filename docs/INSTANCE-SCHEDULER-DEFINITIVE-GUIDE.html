@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Linode Instance Scheduler: The Definitive Guide</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700;9..144,900&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root{
+  --paper:#f7f4ec;
+  --paper-raised:#ffffff;
+  --ink:#1b1f2b;
+  --ink-soft:#5a5f74;
+  --ink-faint:#8a8fa0;
+  --line:#ded8c6;
+  --line-strong:#c9c2ab;
+  --accent:#1f7a5c;
+  --accent-strong:#155f47;
+  --accent-soft:#e3f3ec;
+  --surface:#efece0;
+  --good:#1f8a52;
+  --good-soft:#e3f3e9;
+  --warn:#a8690f;
+  --warn-soft:#f8ecd8;
+  --crit:#bd3b3b;
+  --crit-soft:#fbe6e5;
+  --code-bg:#161d1c;
+  --code-ink:#dcf0e6;
+  --code-key:#7fd9b0;
+  --code-str:#c9d97a;
+  --code-mut:#7a958c;
+  --shadow: 0 1px 2px rgba(30,25,10,.06), 0 8px 24px rgba(30,25,10,.06);
+  --serif-display:'Fraunces', 'Iowan Old Style', 'Palatino Linotype', serif;
+  --serif-body:'Source Serif 4', 'Iowan Old Style', Georgia, serif;
+  --mono:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#101513;
+    --paper-raised:#161c1a;
+    --ink:#e6e9df;
+    --ink-soft:#a0aca4;
+    --ink-faint:#6a766f;
+    --line:#293430;
+    --line-strong:#38443f;
+    --accent:#5fd3a5;
+    --accent-strong:#8be6c1;
+    --accent-soft:#173328;
+    --surface:#191f1c;
+    --good:#5cc98d;
+    --good-soft:#173427;
+    --warn:#e0ab52;
+    --warn-soft:#3a2c14;
+    --crit:#f08585;
+    --crit-soft:#3a1c1e;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#101513;
+  --paper-raised:#161c1a;
+  --ink:#e6e9df;
+  --ink-soft:#a0aca4;
+  --ink-faint:#6a766f;
+  --line:#293430;
+  --line-strong:#38443f;
+  --accent:#5fd3a5;
+  --accent-strong:#8be6c1;
+  --accent-soft:#173328;
+  --surface:#191f1c;
+  --good:#5cc98d;
+  --good-soft:#173427;
+  --warn:#e0ab52;
+  --warn-soft:#3a2c14;
+  --crit:#f08585;
+  --crit-soft:#3a1c1e;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px rgba(0,0,0,.35);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--serif-body);
+  font-size:16.5px;
+  line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4{font-family:var(--serif-display);color:var(--ink);text-wrap:balance;font-weight:700;letter-spacing:-.01em}
+a{color:var(--accent)}
+code, pre, .mono{font-family:var(--mono)}
+
+.shell{display:flex;min-height:100vh}
+.sidebar{
+  width:308px;flex:0 0 308px;
+  border-right:1px solid var(--line);
+  background:var(--paper-raised);
+  position:sticky;top:0;height:100vh;overflow-y:auto;
+  padding:28px 22px 60px;
+}
+.sidebar::-webkit-scrollbar{width:8px}
+.sidebar::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:4px}
+
+.brand{display:flex;align-items:flex-start;gap:10px;margin-bottom:22px;padding-bottom:18px;border-bottom:1px solid var(--line)}
+.brand-mark-badge{width:34px;height:34px;flex:0 0 34px;border-radius:9px;background:var(--accent-soft);display:flex;align-items:center;justify-content:center;margin-top:1px;font-family:var(--mono);font-weight:700;color:var(--accent-strong);font-size:15px}
+.brand-text{display:flex;flex-direction:column;gap:2px}
+.brand-mark{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.brand-title{font-family:var(--serif-display);font-size:19px;font-weight:700;line-height:1.15;margin-top:4px}
+
+.cover-badge{
+  width:96px;height:96px;flex:0 0 96px;border-radius:20px;
+  background:radial-gradient(circle at 50% 38%,var(--accent-soft),var(--surface));
+  border:1px solid var(--line);display:flex;align-items:center;justify-content:center;
+  box-shadow:var(--shadow);
+}
+.cover-badge svg{width:56%;height:56%}
+.cover-top{display:flex;align-items:center;gap:26px;flex-wrap:wrap}
+
+.toc-part{margin-top:22px}
+.toc-part:first-of-type{margin-top:0}
+.toc-part-label{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-faint);margin:0 0 6px 2px;display:flex;gap:8px;align-items:baseline;
+}
+.toc-part-label b{color:var(--accent);font-weight:600}
+.toc-list{list-style:none;margin:0;padding:0}
+.toc-list li a{
+  display:block;padding:5px 8px;border-radius:6px;
+  font-size:14px;color:var(--ink-soft);text-decoration:none;
+  border-left:2px solid transparent;
+}
+.toc-list li a:hover{background:var(--surface);color:var(--ink)}
+.toc-list li a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft);font-weight:600}
+
+.menu-btn{display:none}
+
+main{flex:1;min-width:0;padding:0}
+.content{max-width:820px;margin:0 auto;padding:64px 48px 140px}
+
+.cover{
+  min-height:70vh;display:flex;flex-direction:column;justify-content:center;gap:22px;
+  border-bottom:1px solid var(--line);padding-bottom:56px;margin-bottom:56px;
+}
+.cover-eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.cover h1{font-size:clamp(34px,5vw,58px);line-height:1.05;margin:0;max-width:16ch}
+.cover .subtitle{font-family:var(--serif-body);font-size:19px;color:var(--ink-soft);max-width:60ch;font-style:italic}
+.cover-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px}
+.pill{
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.03em;color:var(--ink-soft);
+  border:1px solid var(--line-strong);border-radius:999px;padding:5px 12px;background:var(--paper-raised)
+}
+
+.part-open{margin:88px 0 34px;padding-top:8px}
+.part-open:first-of-type{margin-top:0}
+.part-num{font-family:var(--mono);font-size:13px;letter-spacing:.1em;color:var(--accent);font-weight:600;text-transform:uppercase}
+.part-title{font-size:clamp(24px,3.2vw,32px);margin:6px 0 10px}
+.part-dek{color:var(--ink-soft);font-size:16px;max-width:64ch}
+.part-rule{height:1px;background:linear-gradient(90deg,var(--accent),transparent);margin-top:22px}
+
+section.chapter{margin:52px 0;scroll-margin-top:24px}
+.chapter h2{font-size:23px;display:flex;align-items:baseline;gap:10px;margin-bottom:14px}
+.chapter h2 .chno{font-family:var(--mono);font-size:14px;color:var(--ink-faint);font-weight:500}
+.chapter h3{font-size:17.5px;margin:26px 0 10px}
+.chapter p{margin:12px 0}
+.chapter ul, .chapter ol{padding-left:22px;margin:12px 0}
+.chapter li{margin:6px 0}
+.lede{font-size:17.5px;color:var(--ink-soft)}
+
+.callout{
+  border:1px solid var(--line);border-left:3px solid var(--accent);
+  background:var(--surface);border-radius:8px;padding:14px 18px;margin:18px 0;
+  font-size:15px;
+}
+.callout.warn{border-left-color:var(--warn);background:var(--warn-soft)}
+.callout.crit{border-left-color:var(--crit);background:var(--crit-soft)}
+.callout.good{border-left-color:var(--good);background:var(--good-soft)}
+.callout .co-label{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-faint);display:block;margin-bottom:4px}
+.callout.warn .co-label{color:var(--warn)}
+.callout.crit .co-label{color:var(--crit)}
+.callout.good .co-label{color:var(--good)}
+
+.table-wrap{overflow-x:auto;margin:18px 0;border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%;background:var(--paper-raised);font-size:14.5px}
+thead th{
+  text-align:left;font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink-faint);background:var(--surface);padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap;
+}
+tbody td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+tbody tr:last-child td{border-bottom:none}
+tbody td:first-child{font-weight:600}
+td code, th code{background:var(--surface);padding:1px 5px;border-radius:4px;font-size:12.5px}
+
+.badge{display:inline-block;font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;padding:2px 8px;border-radius:5px;font-weight:600}
+.badge.crit{background:var(--crit-soft);color:var(--crit)}
+.badge.warn{background:var(--warn-soft);color:var(--warn)}
+.badge.info{background:var(--accent-soft);color:var(--accent)}
+
+pre.code{
+  background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:16px 18px;
+  overflow-x:auto;font-size:13.5px;line-height:1.6;box-shadow:var(--shadow);margin:16px 0;
+}
+pre.code .k{color:var(--code-key)}
+pre.code .s{color:var(--code-str)}
+pre.code .m{color:var(--code-mut)}
+.formula{
+  font-family:var(--mono);background:var(--code-bg);color:var(--code-ink);
+  border-radius:10px;padding:18px 22px;text-align:center;font-size:16px;margin:18px 0;box-shadow:var(--shadow);
+}
+
+.diagram-frame{
+  border:1px solid var(--line);border-radius:12px;background:var(--paper-raised);
+  padding:18px;margin:20px 0;box-shadow:var(--shadow);overflow-x:auto;
+}
+.diagram-cap{font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);text-align:center;margin-top:8px}
+.ascii{font-family:var(--mono);font-size:12.5px;line-height:1.5;white-space:pre;color:var(--ink)}
+
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px;margin:20px 0}
+.card{border:1px solid var(--line);border-radius:10px;padding:16px;background:var(--paper-raised);box-shadow:var(--shadow)}
+.card h4{font-size:15px;margin:0 0 6px;font-family:var(--serif-body);font-weight:700}
+.card .tag{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--accent)}
+.card p{font-size:13.5px;color:var(--ink-soft);margin:8px 0 0}
+
+.book-footer{border-top:1px solid var(--line);margin-top:80px;padding-top:26px;display:flex;flex-direction:column;gap:10px}
+.footer-desc{color:var(--ink-faint);font-size:13px;font-family:var(--mono)}
+
+::selection{background:var(--accent-soft);color:var(--ink)}
+
+@media (max-width: 920px){
+  .sidebar{position:fixed;left:0;top:0;z-index:40;transform:translateX(-100%);transition:transform .2s ease;box-shadow:var(--shadow)}
+  .sidebar.open{transform:translateX(0)}
+  .menu-btn{
+    display:flex;position:fixed;top:14px;left:14px;z-index:50;align-items:center;gap:8px;
+    background:var(--paper-raised);border:1px solid var(--line-strong);border-radius:8px;
+    padding:8px 12px;font-family:var(--mono);font-size:12px;color:var(--ink);box-shadow:var(--shadow);
+  }
+  .content{padding:88px 22px 100px}
+  .cover{min-height:55vh}
+}
+
+.glossary dl{margin:18px 0;padding:0}
+.glossary dt{font-family:var(--serif-display);font-weight:700;font-size:16.5px;color:var(--ink);margin:18px 0 4px;padding-top:14px;border-top:1px solid var(--line)}
+.glossary dt:first-of-type{border-top:none;padding-top:0}
+.glossary dt code{font-family:var(--mono);font-size:13px;background:var(--surface);padding:1px 5px;border-radius:4px}
+.glossary dd{margin:0;color:var(--ink);font-size:15.5px;line-height:1.6}
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <button class="menu-btn" id="menuBtn">&#9776; Contents</button>
+  <nav class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-mark-badge" aria-hidden="true">IS</div>
+      <div class="brand-text">
+        <span class="brand-mark">Reference &middot; Edition 1</span>
+        <span class="brand-title">Instance Scheduler: The Definitive Guide</span>
+      </div>
+    </div>
+    <div id="tocRoot"></div>
+  </nav>
+
+  <main>
+    <div class="content" id="content">
+
+      <!-- ============ COVER ============ -->
+      <div class="cover">
+        <div class="cover-top">
+          <div class="cover-badge" aria-hidden="true">
+            <svg viewBox="0 0 100 100">
+              <circle cx="50" cy="50" r="42" fill="none" stroke="#1f7a5c" stroke-width="6"/>
+              <path d="M50 22 L50 50 L68 62" fill="none" stroke="#1f7a5c" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div>
+            <span class="cover-eyebrow">Akamai Cloud &middot; Self-Hosted Cost Automation</span>
+            <h1>Linode Instance Scheduler: The Definitive Guide</h1>
+          </div>
+        </div>
+        <p class="subtitle">Everything required to understand, deploy, and operate a self-hosted tool that automatically stops paying for compute you're not using &mdash; on a schedule, per instance or per group &mdash; while keeping storage, network identity, and configuration exactly as you left them.</p>
+        <div class="cover-meta">
+          <span class="pill">How It Works</span>
+          <span class="pill">Onboarding</span>
+          <span class="pill">Scheduling</span>
+          <span class="pill">Disaster Recovery</span>
+          <span class="pill">CLI Reference</span>
+          <span class="pill">REST API</span>
+          <span class="pill">Security</span>
+        </div>
+      </div>
+
+      <!-- ============ PART 0 ============ -->
+      <div class="part-open" id="part-0">
+        <div class="part-num">Part 0</div>
+        <h2 class="part-title">Why This Exists</h2>
+        <p class="part-dek">The billing fact that makes this tool necessary, who it's built for, and the single sentence that describes what it actually does.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c0-1">
+        <h2><span class="chno">0.1</span> The Problem: A Stopped Instance Still Bills</h2>
+        <p class="lede">On most clouds, "stop the server" and "stop paying for it" are the same action. On Linode, they are not. A powered-off Compute Instance continues to reserve its RAM, CPU, and network capacity, and continues to bill at exactly the same hourly rate as a running one. The only action that actually stops compute billing is fully <strong>deleting</strong> the instance &mdash; not shutting it down, not powering it off, deleting it.</p>
+        <p>That single fact is the entire reason this tool exists. A team that wants to run a development environment only during business hours, a batch-processing fleet only overnight, or a demo environment only when someone is actually using it has no native "pause billing" button to press. The only way to genuinely stop paying is to delete the instance &mdash; and deleting an instance normally means losing it: its identity, its configuration, and, if the OS lives on local disk the way a freshly-deployed instance normally does, its data.</p>
+        <p>Instance Scheduler automates a full delete/recreate cycle and makes it <em>behave</em> like an ordinary stop/start, by making sure everything that makes an instance recognizably "the same machine" survives the cycle on resources that are never touched by the delete: its OS disk, any additional data volumes, its public IP address, and its VPC/VLAN network identity. From the outside, an instance managed by this tool looks like it has a stop button and a start button. Underneath, "stop" deletes it and "start" recreates it from exactly what was there before &mdash; and only while it's actually deleted does the compute billing genuinely stop.</p>
+      </section>
+
+      <section class="chapter" id="c0-2">
+        <h2><span class="chno">0.2</span> Who This Is For</h2>
+        <p>Any workload that doesn't need to run around the clock is a candidate: development and staging environments used on business hours only, CI/build agents that sit idle most of the day, demo or training environments spun up for specific sessions, batch or overnight-only processing fleets, and standby/failover nodes that only need to exist when actually promoted into service. The common shape is the same in every case &mdash; a real, persistent machine identity (data, network address, configuration) that only needs to be *running* some of the time.</p>
+        <p>It is not a fit for anything that needs to stay reachable continuously, or that can't tolerate the several-minutes-long window a full recreate cycle takes. A production database serving live traffic around the clock gets no benefit from this tool; a dev database that's only queried during working hours does.</p>
+      </section>
+
+      <section class="chapter" id="c0-3">
+        <h2><span class="chno">0.3</span> The Core Mechanism, in One Picture</h2>
+        <p>Every instance this tool manages has two states in its own registry: <code>running</code> (a real Linode instance currently exists) and <code>stopped</code> (it doesn't &mdash; and nothing is billing for compute). Moving between them is always the same sequence:</p>
+        <div class="diagram-frame">
+<div class="ascii">STOP                                       START
+&#9472;&#9472;&#9472;&#9472;                                       &#9472;&#9472;&#9472;&#9472;&#9472;
+1. Re-capture current identity            1. Create a new Linode instance
+   (network config, tags, label,             in the same region/plan
+   data-volume layout, SSH keys)
+2. Detach data volume(s)                  2. Reproduce network config exactly
+   (confirmed detached before                (legacy or new interface model,
+   continuing)                               VPC/VLAN addresses, reserved IP)
+3. Delete the Linode instance             3. Attach OS volume + data volumes
+   &mdash; compute billing stops here            in their original device order
+                                           4. Inject the correct network
+   Reserved IP:  stays reserved              configuration at boot time
+   OS volume:    untouched, independent   5. Boot, then verify real network
+   Data volumes: untouched, independent      reachability &mdash; not just that
+   VPC / VLAN:   independent resources,      the API reports "running"
+                 simply not attached to
+                 anything right now</div>
+        </div>
+        <div class="diagram-cap">Fig. 0.1 &mdash; what a managed stop/start cycle actually does underneath</div>
+        <p>Nothing about this is exotic Linode functionality &mdash; every step is an ordinary, documented API call. What the tool provides is doing all of it correctly, in the right order, every single time, with the exact configuration re-applied identically on every cycle, and a real health check before ever reporting success. Part I explains why each of those steps exists and what would break without it.</p>
+      </section>
+
+      <!-- ============ PART I ============ -->
+      <div class="part-open" id="part-1">
+        <div class="part-num">Part I</div>
+        <h2 class="part-title">How It Works</h2>
+        <p class="part-dek">What survives a delete/recreate cycle and why, the two Linode networking models this tool has to account for, and the network re-injection mechanism that keeps a recreated instance reachable at the same address every time.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c1-1">
+        <h2><span class="chno">1.1</span> What Survives, and Why</h2>
+        <p class="lede">A delete/recreate cycle only works as a stand-in for stop/start because four kinds of resources are independent of the Compute Instance's own lifecycle on Linode &mdash; deleting the instance never touches them.</p>
+        <div class="card-grid">
+          <div class="card"><span class="tag">Storage</span><h4>Block Storage volumes</h4><p>A volume is a separate resource from any instance, billed separately (a small per-GB/month rate, far below compute pricing) and completely unaffected by deleting the instance it happens to be attached to. This is why the OS itself has to live on a Block Storage volume, not local disk &mdash; see 1.2.</p></div>
+          <div class="card"><span class="tag">Networking</span><h4>Reserved public IP</h4><p>An ordinary instance's public IP returns to Linode's shared pool the moment the instance is deleted. A <em>reserved</em> IP is a standalone resource you own independently &mdash; it stays assigned to your account, in its original region, and can be attached to a newly created instance. It carries a small charge while unattached, and is permanently locked to the region it was first reserved in.</p></div>
+          <div class="card"><span class="tag">Networking</span><h4>VPC and VLAN identity</h4><p>A VPC subnet and a VLAN label are both persistent, independent resources &mdash; not tied to any one instance's lifecycle. Re-attaching a recreated instance to the same VPC subnet or VLAN, with the same internal address, requires no special preservation step; the resources themselves were never going anywhere.</p></div>
+          <div class="card"><span class="tag">Metadata</span><h4>Label, tags, plan, firewall</h4><p>None of these live on the instance in a way that survives deletion on their own &mdash; the tool re-captures the current label, tags, plan type, attached firewall, placement group, and watchdog setting before every stop, and replays them on the very next create, so a recreated instance looks and behaves identically in Cloud Manager and cost reports.</p></div>
+        </div>
+        <div class="callout warn">
+          <span class="co-label">Only one firewall survives a recreate</span>
+          A Linode instance can only ever have a single active Cloud Firewall attached at a time on the older networking model this tool works with &mdash; not a limitation this tool introduces, an account-wide constraint from the platform itself. If an instance has more than one firewall attached when it's onboarded, only the first one is captured and replayed on every future cycle; any others are silently dropped. If your instance needs multiple firewalls' worth of rules, consolidate them into one firewall before onboarding.
+        </div>
+        <p>What does <em>not</em> survive, and has to be actively reproduced every single cycle, is anything Linode treats as belonging to the instance's own creation moment: its network configuration (which interface gets which address), its SSH host identity, and the instance ID itself (a brand-new one is assigned on every create). Parts 1.2 through 1.4 cover how each of those is handled.</p>
+      </section>
+
+      <section class="chapter" id="c1-2">
+        <h2><span class="chno">1.2</span> Why the OS Has to Live on a Block Volume</h2>
+        <p>A freshly deployed Linode instance normally gets its own local disk &mdash; fast, but tied to that specific instance, and gone the moment the instance is deleted. For a delete/recreate cycle to preserve the operating system and its data, the OS has to be moved onto a Block Storage volume instead, which is then attached fresh to each recreated instance at the same device slot every time.</p>
+        <p>Boot-from-volume carries a modest performance characteristic relative to local disk, which is why the standard approach &mdash; and the one this tool follows &mdash; is to build the OS disk locally once, as a golden template, then duplicate it onto a volume rather than installing directly onto Block Storage. Two onboarding paths follow directly from this: a brand-new instance can be provisioned straight from an already-prepared template volume (no migration needed, see Part II.1), while an existing instance already running on local disk needs a one-time migration to move its OS onto a volume before this tool can manage it (Part II.2).</p>
+        <p>Device order matters for every boot: the OS volume must always be attached at the first device slot, with any data volumes following in their original order, or the instance won't boot from the disk you expect.</p>
+      </section>
+
+      <section class="chapter" id="c1-3">
+        <h2><span class="chno">1.3</span> The Two Networking Models</h2>
+        <p>Linode instances use one of two mutually exclusive networking configurations &mdash; the older, config-attached interface model, and a newer model where interfaces are managed independently of any boot configuration, with explicit per-address NAT and default-route flags. An instance uses one or the other, never both, and the shape of a valid network configuration differs meaningfully between them (a public IP is delivered via a dedicated interface in one model, or via a NAT mapping with no separate public interface at all under the other).</p>
+        <p>This tool records which model a given instance actually uses at onboarding time, and reproduces the exact same model &mdash; and the exact same public-IP delivery topology &mdash; on every single recreate, never defaulting to one or silently translating between them. Getting this wrong for even one cycle would mean an instance that boots successfully but is unreachable, or reachable at the wrong address.</p>
+        <div class="callout warn">
+          <span class="co-label">VPC 1:1 NAT</span>
+          A public IP can reach an instance through a dedicated public interface carrying the address directly, or through a VPC's 1:1 NAT mapping with no separate public interface. Both are supported under both networking models. With 1:1 NAT the guest sees only its VPC address and is configured like a VPC-only instance; Linode maps the public address onto it, and the scheduler reaches the instance over its VPC address. Deleting an instance releases an ordinary NAT address but keeps a reserved one, so the tool reserves the NAT address the same way it reserves a public interface's address &mdash; when a migration finishes, at onboarding, before every stop, and after a rollback &mdash; and reuses it on every start. If reserving fails (it is retried before every stop), the next start asks Linode for a new address and reports it. Under the older (legacy config) model the NAT address is the instance's own public IPv4: a reserved one is given back to the new instance and mapped again, and only one NAT address per instance is supported. A reserved public IP that has since been assigned to another instance, or released from the account, can't be given back to a stopped instance; its start fails immediately with a message naming the address, before anything is created.
+        </div>
+      </section>
+
+      <section class="chapter" id="c1-4">
+        <h2><span class="chno">1.4</span> Staying Reachable at the Same Address, Every Time</h2>
+        <p class="lede">A recreated instance needs to come back up already configured with the correct static IP, gateway, and subnet &mdash; not eventually, not after a manual fix, immediately on first boot.</p>
+        <p>Linode's own automatic network configuration writes a guest's network interface file once, the first time an instance boots on a given disk, based on whatever address that disk had at that moment. It does not re-run or self-correct when the same disk is later attached to a <em>different</em> instance with a different real address &mdash; which is exactly what happens on every recreate cycle, since the instance ID (and often the assigned interface) is new every time even though the disk and its intended address are unchanged.</p>
+        <p>The fix is to skip relying on that mechanism entirely for anything address-sensitive. At every create, this tool already knows the exact IP, gateway, and subnet each interface should have &mdash; it just captured them, or it's re-applying values fixed at onboarding &mdash; so it passes that configuration directly to the new instance via <code>cloud-init</code>, which applies it on first boot. Distributions keep network settings in different places, so the configuration ships with a small script that detects which network stack the guest actually runs &mdash; systemd-networkd (Ubuntu), NetworkManager (Rocky, AlmaLinux, CentOS Stream, Fedora), wicked (openSUSE), <code>/etc/network/interfaces</code> (Debian, Kali, Alpine) or netifrc (Gentoo) &mdash; writes the same address, gateway and DNS servers in that stack's own format, and restarts it. The script never fails the boot; if it can't recognize the stack it leaves the files alone and logs why to <code>/var/log/linode-instance-scheduler-network.log</code>. This runs on every single recreate, for every interface (public, VPC, and VLAN alike, when more than one is present), which is also why a multi-interface instance never ends up with more than one default route: every interface's configuration is stated explicitly, with nothing left to a default-assignment mechanism to guess at.</p>
+        <p>An instance with no public interface at all &mdash; only VPC and/or VLAN interfaces &mdash; is supported the same way. Its VPC interface gets its default route via the VPC subnet's gateway (the subnet's first address) and the region's DNS servers (the first three, since Linux reads at most three), matching what Linode's own network configuration gives a VPC-only instance; it simply has no reserved IP. Migrating such an instance off local disk works the same way: pre-flight and verification connect over its VPC/VLAN address, its new boot configuration keeps its own VPC/VLAN interfaces, and no IP is reserved; every migration keeps all of an instance's interfaces, so a public + VPC or public + VLAN instance keeps both. While an instance is stopped it doesn't exist, so Linode treats its VPC address as unused, and a new instance in the subnet can be given it (Linode hands out the lowest free address). Before every start &mdash; scheduled, manual or API &mdash; the tool compares the instance's recorded VPC addresses with what is in use; if another instance holds one, it moves the instance to a free address in the same subnet (taken from the top of the subnet) and starts it there, reporting the old and new address, with its trusted SSH host key moving along with it. Migrating or onboarding the new instance that was given the address makes the same move first (a stopped managed instance only), so the new instance is never checked against the stopped instance's host key. <code>set-vpc-address</code> (or the instance page's VPC address card) chooses the new address by hand instead, refusing addresses outside the subnet, the gateway, and any address another managed instance or a running instance has; onboarding likewise refuses an instance whose VPC address is already recorded for another managed instance. A private address with no host key on record (after a move, or a lost <code>known_hosts</code>) accepts the instance's key on first contact, as onboarding does; a key that differs from one on record is still refused, and public reserved IPs always use the strict check. Giving other instances in that subnet their own explicit addresses keeps addresses stable. <strong>Golden rule:</strong> give the instances this tool schedules their own VPC subnet and their own VLAN label, and don't create other instances there by hand. Nothing holds a stopped instance's private address: in a VPC another instance can be given it (the tool then moves the instance at its next start, so it keeps working but changes address), and on a VLAN &mdash; where Linode doesn't check addresses at all &mdash; an instance given the same address conflicts silently once both run, which nothing can detect. Public IPs never collide, because a managed instance's public IP is reserved. Onboarding warns when an instance's subnet or VLAN already holds instances the tool doesn't manage, and <code>status --check-network</code> repeats the check; the scheduler's own host doesn't count. Because every start ends with a real SSH reachability check, the scheduler must be able to reach that private address &mdash; in practice, by running inside the same VPC (or on the same VLAN). VPC 1:1 NAT works the same way under either networking model (see the note above on keeping its public address). An instance whose only interface is a VLAN can't reach Linode's metadata service, so it never receives the per-start network settings; it runs from the settings already on its disk (a VLAN address never changes), and onboarding writes <code>ssh_deletekeys: false</code> to <code>/etc/cloud/cloud.cfg.d/99-linode-instance-scheduler.cfg</code> on the node so cloud-init keeps its SSH host keys across recreates.</p>
+        <p>VPC and VLAN addresses specifically have to be explicit for the same underlying reason &mdash; Linode doesn't run address assignment on a VLAN interface at all, and a VPC's own automatic address assignment isn't guaranteed to hand back the same address on a later attachment, since a recreated instance gets a new hardware identity on every cycle.</p>
+      </section>
+
+      <section class="chapter" id="c1-5">
+        <h2><span class="chno">1.5</span> SSH Host-Key Stability</h2>
+        <p>An SSH client that connects to the same address twice and gets two different host keys back will refuse the second connection by design &mdash; the entire point of host-key checking is to detect exactly that. A naive recreate cycle would trigger this every single time, since cloud-init normally treats every new instance ID as a fresh machine and generates a brand-new host key on every boot.</p>
+        <p>This tool distinguishes two cases explicitly. The very first boot of a newly onboarded instance &mdash; a fresh clone of a golden template, or the first boot right after migrating an existing instance onto a volume &mdash; is allowed to generate a genuinely new key, since that's a real first-contact moment and every clone from the same template needs its own unique key, not a key shared across customers. Every steady-state recreate after that explicitly preserves the existing host key instead, so a managed instance presents the exact same SSH identity across every stop/start cycle, indefinitely.</p>
+        <div class="callout warn">
+          <span class="co-label">If you deliberately need to rotate a host key</span>
+          Do it through the tool's own key-rotation command, never by editing its trust store by hand &mdash; see Part VI's CLI reference. A steady-state cycle presenting an unexpected key is treated as a genuine security event and refused outright rather than silently trusted; see Part VIII.
+        </div>
+      </section>
+
+      <!-- ============ PART II ============ -->
+      <div class="part-open" id="part-2">
+        <div class="part-num">Part II</div>
+        <h2 class="part-title">Onboarding</h2>
+        <p class="part-dek">The two ways an instance comes under this tool's management &mdash; a fresh instance provisioned from a template, or an existing instance migrated in place &mdash; and what each one actually involves.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c2-1">
+        <h2><span class="chno">2.1</span> Path A &mdash; A Brand-New Instance</h2>
+        <p class="lede">The simple path: there is no existing instance yet, so there's nothing to migrate.</p>
+        <p>A golden template &mdash; a Block Storage volume already holding a fully prepared OS image &mdash; is cloned directly into a new volume dedicated to this one logical instance. The clone is billed from the moment it succeeds, the same as any other volume, and happens exactly once, at onboarding &mdash; every later stop/start cycle attaches and detaches that same volume, it is never re-cloned. The new instance is then created against that volume, with a reserved public IP assigned to it (a fresh reservation, or one already held) and its VPC/VLAN addresses chosen once, at this point, never rechosen on a later cycle.</p>
+      </section>
+
+      <section class="chapter" id="c2-2">
+        <h2><span class="chno">2.2</span> Path B &mdash; An Existing Instance</h2>
+        <p class="lede">The path for an instance that's already running on ordinary local disk and needs its OS moved onto a Block Storage volume before this tool can manage it.</p>
+        <p>This is a real, one-time migration with genuine downtime, not a background operation &mdash; it needs a scheduled maintenance window. The sequence: a correctly sized destination volume is created, the instance is booted into Linode's Rescue Mode, and the disk's contents are copied onto the new volume &mdash; for an ext2/3/4 or xfs disk only the blocks the filesystem actually uses (with the same filesystem UUID and label, and a read-only check of the result before the copy reports success), otherwise the whole disk with <code>dd</code> (the dashboard's step-by-step manual copy always pastes a whole-disk <code>dd</code>). A mostly empty disk is therefore copied in a fraction of the time its size suggests. Rescue Mode has no API-level way to execute commands, so the copy runs inside Linode's console (Lish): either you paste the printed command there, or &mdash; when a pre-migration backup is kept &mdash; the tool does it for you by opening the console over Lish's SSH gateway with this deployment's key and typing the same command, then finishing the migration. A multi-terabyte disk can take many hours to copy; there is no limit on the copy's length (it fails only if the copy stops making progress for 45 minutes), and since it runs on the instance's own console it survives a dropped Lish connection or a restart of the scheduler host &mdash; the tool reconnects, or reads the outcome the copy recorded, and running the copy again while one is in progress watches it rather than starting a second one. The assisted copy needs the deployment's public key in your profile's Lish keys (Profile &rarr; LISH Console Settings); the tool only reads your profile to check that, and it refuses without a kept backup, since the backup is what makes an unattended copy safe to undo &mdash; except for a two-phase copy (below), which never writes the original disk. Everything before and after that single manual step &mdash; sizing and creating the destination volume, entering and exiting Rescue Mode, rebuilding the boot configuration against the new volume, verifying the copy actually took, and converting the instance's existing public IP to a reserved one in place (never swapped for a different address, since DNS and any external allow-lists already point at it) &mdash; is handled automatically.</p>
+        <p>A <em>two-phase</em> copy (<code>migrate-start --two-phase</code>) shortens the downtime further for an ext4 root filesystem: the new volume is attached to the running instance, given a filesystem with the root filesystem's own UUID and label, and filled file by file while the instance keeps serving; Rescue Mode then only brings across what changed since, and checks the result; if that fails (a large changed file needs its full size free on the volume while it is copied), the used-block copy of the whole filesystem runs instead. The original disk is only ever read, so until <code>migrate-resume</code> has run, <code>migrate-abandon</code> puts the instance back on it unchanged. To bring a fleet across, <code>migrate-wave</code> runs the whole sequence &mdash; backup, copy, resume, onboard &mdash; for several instances at a time, each on its own, so one failing never holds up the others.</p>
+        <p>To see where a whole account stands before starting, <code>onboard-readiness</code> (also the dashboard's <em>Account readiness</em> card and <code>GET /linode/readiness</code>) checks every instance the tool doesn't manage yet and sorts it into ready to onboard (it already boots from a Block Storage volume; the entry also says when its public IP still has to be reserved, which onboarding requires), needs a migration first &mdash; with the size of the volume the migration creates, that volume's monthly cost from Linode's price list, and a rough copy time &mdash; blocked, with the reason (for example more than one boot configuration, or a region without Block Storage), or skipped (LKE nodes and the tool's own pre-migration backups). It only reads the account; what can only be checked over SSH, such as the cloud-init version, is checked by <code>migrate-start</code> itself.</p>
+        <div class="callout">
+          <span class="co-label">Why the copy command finds the disks itself</span>
+          Inside Rescue Mode, the <code>/dev/sdX</code> letters the original disk and the new volume receive vary between systems, and copying in the wrong direction destroys the original disk. So the command this tool prints never names device letters. It finds the new volume through its <code>/dev/disk/by-id/</code> link, which names that exact Linode volume, and the original disk as the only other device of its known size. If it can't identify exactly one of each, it copies nothing and lists the devices instead. It ends by printing <code>COPY_DONE</code> or <code>COPY_FAILED</code>.
+        </div>
+        <p>Two pre-flight conditions are checked before this process is allowed to start at all. First, <code>cloud-init</code> with Akamai's metadata datasource has to already be present on the instance: version 23.3.1 or newer, or an older build that already reports the Akamai datasource (some Linode images ship one with it backported). The network re-injection mechanism in Part 1.4 depends on it, with no fallback, so an instance that doesn't meet this bar needs <code>cloud-init</code> installed or upgraded (or the OS upgraded) during the same maintenance window, before migration proceeds. An image that can't run <code>cloud-init</code> at all isn't supported. Second, if the instance has hand-configured static networking outside Linode's own automatic configuration, that customization is flagged as a non-blocking warning &mdash; migration proceeds either way, but any such customization will be silently overwritten by the standard network re-injection on the very next recreate cycle, so it's worth knowing about in advance.</p>
+        <p>Existing data volumes attached to the instance need no migration at all &mdash; they were already independent of the instance's own lifecycle before this tool was ever involved. They're simply captured (which device slot they're in) and carried forward on every future cycle, exactly like a Path A instance's data volumes.</p>
+        <h3>Keeping a backup of the original, and rolling back</h3>
+        <p>The copy is the one step of a migration that can't be undone on its own: once the instance boots from its new volume, the old local disk is deleted. <code>migrate-start --backup</code> (or &ldquo;Keep a backup of the original first&rdquo; in the dashboard's migration wizard) gives a guaranteed way back. Before anything is copied, the instance is powered off and Linode's native clone copies it &mdash; disks and boot configuration &mdash; and each of its attached Block Storage volumes. The clone is kept <strong>powered off</strong>, with its VPC and VLAN interfaces removed so it can never take or clash with an address while it waits; every setting needed to put the original back (plan, region, label, tags, every interface and address, the public address, which volume sits in which slot) is recorded in the database, in Object Storage when configured, and as a tag on the clone and its volumes.</p>
+        <p><code>rollback</code> makes the clone the original system again: it takes back the original public address (kept reserved), its VPC and VLAN addresses, its label, and its data volumes under their original labels &mdash; so the original <code>/etc/fstab</code>, which finds volumes by label, mounts them exactly as before &mdash; and is booted and checked over SSH. If the original instance still exists (a migration not finished yet), it is replaced: its public address is reserved first, its volumes are detached and kept, and the instance is deleted. An onboarded instance must be stopped first; the scheduler then stops managing the name, and the migrated volumes are kept. Rollback refuses when an original VPC address has since been taken by another instance.</p>
+        <div class="callout">
+          <span class="co-label">The backup is a billable resource</span>
+          A powered-off Linode still bills at its plan's rate, and each cloned volume bills as Block Storage, until the backup is deleted (<code>backup-delete</code>, or the dashboard's Backups page). Before creating one, the monthly cost is shown from Linode's current price list for the instance's region, and confirmed.
+        </div>
+      </section>
+
+      <section class="chapter" id="c2-3">
+        <h2><span class="chno">2.3</span> Supported Operating Systems</h2>
+        <p class="lede">Every Linode distribution image that runs <code>cloud-init</code> with Akamai's datasource is supported, across both onboarding paths and for public-IP and VPC-only instances alike.</p>
+        <table>
+          <thead><tr><th>Distribution</th><th>Images</th><th>Network stack the tool configures</th></tr></thead>
+          <tbody>
+            <tr><td>Ubuntu</td><td>22.04, 24.04, 26.04</td><td>systemd-networkd</td></tr>
+            <tr><td>Debian</td><td>12, 13</td><td><code>/etc/network/interfaces</code></td></tr>
+            <tr><td>Kali</td><td>Rolling</td><td><code>/etc/network/interfaces</code></td></tr>
+            <tr><td>Rocky Linux</td><td>8, 9, 10</td><td>NetworkManager</td></tr>
+            <tr><td>AlmaLinux</td><td>8, 9, 10</td><td>NetworkManager</td></tr>
+            <tr><td>CentOS Stream</td><td>9, 10</td><td>NetworkManager</td></tr>
+            <tr><td>Fedora</td><td>43, 44</td><td>NetworkManager</td></tr>
+            <tr><td>openSUSE Leap</td><td>16.0</td><td>wicked</td></tr>
+            <tr><td>Alpine</td><td>3.21, 3.24</td><td><code>/etc/network/interfaces</code> (OpenRC)</td></tr>
+            <tr><td>Arch Linux</td><td>current</td><td>systemd-networkd</td></tr>
+            <tr><td>Gentoo</td><td>current</td><td>netifrc</td></tr>
+          </tbody>
+        </table>
+        <p><strong>Not supported:</strong> Slackware. Its image ships no <code>cloud-init</code>, which the network re-application in Part 1.4 depends on; <code>migrate-start</code> refuses it with a clear message rather than attempting the migration.</p>
+        <p>A custom image is supported when it meets the same bar: <code>cloud-init</code> with the Akamai datasource, and one of the network stacks above. If the tool can't recognize the stack on first boot after a recreate, it leaves the guest's network files unchanged and records why in <code>/var/log/linode-instance-scheduler-network.log</code>. The node can then come up with the address it had before, which is only correct when that address hasn't changed. Commands this tool runs over SSH always run under <code>/bin/sh</code>, so root's login shell (bash, zsh or any other) doesn't matter; hook commands you configure run in the node's own login shell.</p>
+      </section>
+
+      <!-- ============ PART III ============ -->
+      <div class="part-open" id="part-3">
+        <div class="part-num">Part III</div>
+        <h2 class="part-title">Scheduling</h2>
+        <p class="part-dek">Individual and group schedules, how the two interact when an instance has both, and the poller that actually enforces them.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c3-1">
+        <h2><span class="chno">3.1</span> Individual and Group Schedules</h2>
+        <p class="lede">A schedule is a set of rules &mdash; days of the week plus a start time and a stop time &mdash; attached either directly to one instance, or to a schedule group that several instances belong to.</p>
+        <p>A rule whose stop time is earlier than its start time is an overnight rule: it starts on each listed day and stops at the stop time the following morning (days <code>mon&ndash;fri</code>, 22:00 to 06:00, runs every weeknight). The listed days are always the days a window <em>starts</em>.</p>
+        <p>An instance belongs to at most one group at a time. When both an individual schedule and a group are in play for the same instance, the rule is simple and absolute: an enabled individual schedule always wins outright, and the group's schedule is ignored entirely for that instance, not merged or blended with it in any way. Only when an instance has no enabled individual schedule of its own does its group's schedule take effect. An instance with neither is left under purely manual control &mdash; nothing is started or stopped automatically.</p>
+        <table><thead><tr><th>Situation</th><th>What governs the instance</th></tr></thead><tbody>
+          <tr><td>Has an enabled individual schedule</td><td>That schedule, full stop &mdash; any group membership is ignored</td></tr>
+          <tr><td>Has an individual schedule, but it's disabled, belongs to a group</td><td>The group's schedule &mdash; a disabled individual schedule is treated exactly like having none at all, so it never silently blocks a group from taking effect</td></tr>
+          <tr><td>No individual schedule, belongs to a group</td><td>The group's schedule</td></tr>
+          <tr><td>No individual schedule, no group</td><td>Manual control only, no automation</td></tr>
+        </tbody></table>
+        <p>Removing an instance from a group never silently leaves it with no schedule at all &mdash; the choice is offered explicitly: keep it under purely manual control from that point on, or copy the group's current rules into a fresh individual schedule as a starting point.</p>
+        <p>When a group's schedule boundary fires, every current member is started or stopped independently &mdash; one instance failing (an API blip, a stuck lock, anything else specific to that one node) never blocks, delays, or rolls back the rest of the group. Each member's own outcome is tracked and recorded separately; a group is never treated as one all-or-nothing unit.</p>
+      </section>
+
+      <section class="chapter" id="c3-2">
+        <h2><span class="chno">3.2</span> Timezones</h2>
+        <p>Every schedule &mdash; individual or group &mdash; is defined against a real IANA timezone name (for example <code>America/New_York</code> or <code>Asia/Kolkata</code>), never a fixed UTC offset. A fixed offset would silently drift by an hour across a daylight-saving transition; a named timezone resolves the correct wall-clock behavior automatically on both sides of that transition, with no special handling required from you. A group has exactly one timezone that every member following it inherits &mdash; an instance that needs a genuinely different timezone from the rest of its group is a signal that it should have its own individual schedule instead.</p>
+      </section>
+
+      <section class="chapter" id="c3-3">
+        <h2><span class="chno">3.3</span> The Poller</h2>
+        <p>A single long-running process checks every managed instance's effective schedule every 15 seconds by default, and again the moment any start or stop finishes, judging the whole fleet against one reading of the clock per check. A check only reads the scheduler's own database; due starts and stops are handed to a pool of workers that lives as long as the scheduler, so a check never waits for a start, a stop or a post-start check to finish, and an instance whose start or stop is still running is never acted on a second time. A start or stop becomes due at its scheduled time and stays due for a catch-up window (one hour by default) for as long as nothing has happened to that instance since that time: the poller acts on it unless a start or stop of the instance &mdash; scheduled, manual, or through the API &mdash; has already been recorded since. That single rule is what makes the poller robust at fleet scale. A slow cycle, a brief outage of the poller itself, or a failed start (a region temporarily out of capacity for a plan) is simply picked up again &mdash; a failed start or stop is retried after a pause of 1, 2, 5 and then 10 minutes rather than on every check &mdash; while a deliberate manual action taken after the scheduled time is never overridden. An instance already in the scheduled state is left alone, and when two scheduled times fall inside the window the more recent one wins.</p>
+        <p>Due starts and stops run in parallel &mdash; up to ten at once by default (<code>poll --max-parallel</code>) &mdash; so a large fleet due at the same minute is brought up together rather than one instance after another; each still takes its own per-instance lock and records its own audit entry. All workers share one request budget against the Linode API (10 requests per second by default, <code>LINODE_API_MAX_REQUESTS_PER_SECOND</code>); a rate-limited (HTTP 429) response pauses every worker for as long as the API asks, other temporary errors are retried with randomized, increasing delays, and a request that creates something is re-sent only after a 429 &mdash; never after a gateway error or lost connection, where it may already have succeeded &mdash; so retries can't create duplicates. The interval and window are configurable per deployment (<code>poll --interval-seconds</code> / <code>--window-seconds</code>), with the window required to be at least as large as the interval. When the scheduler is stopped it takes no new work and waits for any start or stop already running to finish before exiting.</p>
+        <p>The poller is meant to run continuously under your own process supervisor (see Part IX.3 for a systemd example) &mdash; it doesn't need to be running for a manual start/stop to work, only for schedules and group memberships to actually be enforced automatically.</p>
+      </section>
+
+      <section class="chapter" id="c3-4">
+        <h2><span class="chno">3.4</span> Start Order Between Groups</h2>
+        <p class="lede">A group can depend on one or more other groups, so that applications start only after every service they need is up, and stop before those services go down.</p>
+        <p>Without an order, every instance due at the same time starts independently: an application server can finish booting before its database and fail to connect. Making the application group depend on the database group changes that. When the application group's members are due to start, the poller holds them &mdash; reported as <em>waiting on dependency</em> &mdash; until every member of the database group is running, is not mid-transition, and, where that group has a post-start check (Part IV.3), has passed that check since its latest start. On the way down the order reverses: the database group's members wait until every member of the application group is stopped.</p>
+        <p>The wait is re-evaluated on every check, so a held instance starts (or stops) within seconds of the order being satisfied, whatever satisfied it &mdash; the depended-on group's own schedule (which may differ from the dependent group's), a manual start, or a slow post-start check finally passing. When the scheduler itself started the depended-on instance, the next check runs as soon as that start, including its post-start check, finishes. A chain is therefore worked through link by link with no idle time between links. The wait is bounded by the same catch-up window as any other scheduled action (one hour by default). If the database group never becomes ready within that window, the dependent group is not started that day. A post-start check that has not reported back is given its own configured timeout plus two minutes before it stops holding dependents.</p>
+        <table><thead><tr><th>Rule</th><th>Behavior</th></tr></thead><tbody>
+          <tr><td>How many</td><td>A group can depend on several groups and waits for all of them; several groups can depend on the same one, which then waits for all of them to stop. Chains and diamonds of any depth are allowed</td></tr>
+          <tr><td>Refused</td><td>A group depending on itself, any change that would form a cycle through any path, and deleting a group that others still depend on</td></tr>
+          <tr><td>Who is held</td><td>Every member of the dependent group, including a member that follows its own individual schedule &mdash; the order follows group membership, not which schedule fired</td></tr>
+          <tr><td>What counts as stopped</td><td>Stopped or awaiting manual recovery; an instance in <code>unreachable</code> still exists and still bills, so it holds the stop</td></tr>
+          <tr><td>Manual start or stop</td><td>Never blocked &mdash; a warning is shown when the dependency isn't satisfied</td></tr>
+          <tr><td>Disaster recovery</td><td>Every member's OS volume carries the group's full dependency list; with Object Storage configured, every group's definition &mdash; including one with no members &mdash; is also stored there. <code>rebuild</code> recreates the groups and then restores the full start order (Part V.2)</td></tr>
+        </tbody></table>
+        <p>Set it with <code>group-depends</code> on the command line (<code>--on</code> replaces the list, <code>--add</code>/<code>--remove</code> change one entry, <code>--clear</code> removes them all), the <strong>Start order</strong> card on a group's dashboard page, or <code>PATCH /groups/{name}</code> with <code>{"depends_on": ["&lt;group&gt;", ...]}</code>. A one-click start of a group with its dependencies brings up every group it depends on, through every branch, each one only after all of its own dependencies are ready; a stop does the same in reverse.</p>
+      </section>
+
+      <!-- ============ PART IV ============ -->
+      <div class="part-open" id="part-4">
+        <div class="part-num">Part IV</div>
+        <h2 class="part-title">Manual Control &amp; Cost Visibility</h2>
+        <p class="part-dek">What happens when you start or stop an instance yourself, outside its own schedule, and the two numbers this tool shows you for how much a schedule is actually saving.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c4-1">
+        <h2><span class="chno">4.1</span> Manual Override and Auto-Revert</h2>
+        <p class="lede">Manual control and scheduled automation are meant to coexist, not fight each other.</p>
+        <p>Stopping an instance manually, at any time, needs no special handling &mdash; its schedule simply resumes normally at its own next configured boundary. Starting an instance manually <em>outside</em> its configured on-window is the case that needs a deliberate answer, because left alone forever it would silently erode the entire point of having a schedule. The behavior here: a manual start outside the schedule arms an automatic countdown, two hours by default, after which the instance is stopped again automatically unless you explicitly extend it. The countdown is shown plainly wherever the instance's status is displayed, and extending it is a single explicit action &mdash; it is never silently renewed on its own.</p>
+        <p><strong>Keeping an instance running past today's scheduled stop.</strong> For an instance running on its schedule (its own or its group's), <code>extend</code> &mdash; or &ldquo;Keep running past today's stop&rdquo; in the dashboard &mdash; skips the next scheduled stop and keeps it running for the chosen number of hours past it (from now, if the stop time has already passed). The scheduler holds the scheduled stop until then and stops the instance when the extension runs out; later days' schedules are unaffected. A manual-only instance, or one with no active schedule, has nothing to extend. A whole group can be extended at once (<code>extend --group-name</code>, or the group page): every running member that follows the group's schedule is extended, while members with their own schedule, stopped or manual-only members are skipped. As with schedules, a node's own extension overrides its group's, whichever was set first, and repeating an extension at the same level never makes it stop earlier. Extending a node or a group also holds the running members of every group it depends on until the same time, so the start order is kept: when the extension runs out the dependent group stops first, then the groups it depends on.</p>
+        <div class="callout good">
+          <span class="co-label">Instances with no schedule at all are never affected</span>
+          The auto-revert countdown only ever arms when a start happens outside an <em>existing, configured</em> schedule's on-window. An instance under purely manual control, with no schedule of any kind, can be started and left running indefinitely with no timer ever attached &mdash; that would work against the very point of deliberately choosing manual-only control.
+        </div>
+      </section>
+
+      <section class="chapter" id="c4-2">
+        <h2><span class="chno">4.2</span> Savings Shown as a Percentage, Not a Dollar Figure</h2>
+        <p>Two numbers are shown for any instance or group with a configured schedule, and neither is a dollar estimate &mdash; contract and negotiated pricing aren't visible to this tool, so any dollar figure it produced would risk being flatly wrong for an account on a non-standard rate. Both are instead a percentage of a full week's hours avoided:</p>
+        <div class="formula">savings % = (1 &minus; scheduled_hours / 168) &times; 100</div>
+        <p><strong>Scheduled savings</strong> is computed purely from the configured schedule's own hours &mdash; visible the moment a schedule is set up, before it has ever run even once. <strong>Actual savings</strong> is computed retrospectively from real recorded uptime over a trailing window &mdash; seven days by default, adjustable per request &mdash; and only becomes meaningful once a schedule has been in effect for at least that long. Shown together, the gap between the two is itself informative: a schedule configured for a high savings percentage that isn't being realized in practice is usually a sign that manual overrides are happening more often than the schedule intends.</p>
+      </section>
+
+      <section class="chapter" id="c4-3">
+        <h2><span class="chno">4.3</span> Pre-Stop Hooks and Post-Start Checks</h2>
+        <p class="lede">Some workloads want a step of their own around every stop and start &mdash; a database shut down in a specific, checked way before its instance is deleted, or confirmed to be accepting connections again after it comes back.</p>
+        <p>A <strong>pre-stop hook</strong> is a command run once on the instance immediately before it is shut down and deleted; a <strong>post-start check</strong> is a command run on the instance once it is reachable again. Both run as <code>root</code> over the same SSH access the tool already uses, and both apply to every stop and start regardless of what triggered it &mdash; a schedule, a person, the API, or the automatic stop at the end of a manual-override window. They're configured per instance or per group; an instance's own hook overrides its group's for that hook type only, so an instance can set its own post-start check while still using its group's pre-stop hook.</p>
+        <p>Every stop already performs a graceful operating-system shutdown before deleting the instance, so services managed by the operating system's own service manager are stopped cleanly with or without a hook. What a pre-stop hook adds is an explicit step whose result is checked &mdash; and the option to refuse to delete an instance whose shutdown step didn't succeed.</p>
+        <div class="table-wrap"><table><thead><tr><th>Situation</th><th>What happens</th></tr></thead><tbody>
+          <tr><td>Pre-stop hook fails (non-zero exit, timeout, or the instance can't be reached to run it), policy <em>abort</em> &mdash; the default</td><td>Nothing is shut down or deleted; the instance keeps running. The stop is recorded as failed, with the hook's own output. It isn't retried on its own &mdash; an operator fixes the cause and stops again, or explicitly stops without the hook.</td></tr>
+          <tr><td>Pre-stop hook fails, policy <em>continue</em></td><td>A warning is recorded and the stop proceeds normally.</td></tr>
+          <tr><td>Post-start check doesn't pass yet</td><td>Retried every 15 seconds until it passes or its total timeout expires &mdash; it's a readiness check, so "not ready yet" right after boot is expected.</td></tr>
+          <tr><td>Post-start check never passes within its timeout</td><td>The instance is left running &mdash; it is never stopped or deleted for this. The start is reported as failed so someone can investigate, and the check can be re-run on demand once the cause is fixed.</td></tr>
+        </tbody></table></div>
+        <div class="callout">
+          <span class="co-label">A hook is never undone</span>
+          If a pre-stop hook performs several steps and fails partway, the tool doesn't attempt to reverse what it already did &mdash; a script that needs to leave its services running after a failure should restore them itself before exiting non-zero.
+        </div>
+        <p>A hook is either a <strong>command</strong> run as-is on the instance &mdash; an inline command, or the path of a script you already ship on it &mdash; or an <strong>uploaded script</strong>, stored by the tool, copied to a temporary file on the instance each time it runs, executed under the interpreter its own first line names, and deleted afterward.</p>
+        <p>Hooks are recoverable after a total loss of the local database, the same way schedules and group membership are. With Object Storage configured, every hook is stored in the bucket under a fingerprint of its own content, and the instance's OS volume carries a short tag pointing at it; recovery reads the tag, fetches the hook, confirms the content still matches the fingerprint, and restores it on the right instance and group. A hook is written to Object Storage before it takes effect &mdash; if that write fails, the change is refused &mdash; so a configured hook is always a recoverable one. Without Object Storage, a short command is recorded in tags directly; a longer command or an uploaded script is kept locally only, with a warning when it's set.</p>
+        <p>Every hook run and every hook change &mdash; who made it, when, and what it was changed to (an uploaded script identified by its size and fingerprint) &mdash; is recorded in the instance's hook history.</p>
+      </section>
+
+      <section class="chapter" id="c4-4">
+        <h2><span class="chno">4.4</span> Manual-Only Nodes and Scripted Control</h2>
+        <p class="lede">Some instances shouldn't follow any schedule; they're started and stopped by people or by your own automation. The tool treats that as a first-class mode, with the pieces a script needs.</p>
+        <p><strong>Manual-only mode.</strong> An instance set to manual-only (<code>set-mode --manual</code>) is never started or stopped by the poller and never gets an auto-stop timer. To keep the two kinds of control from conflicting, a manual-only instance can't have its own schedule and can't belong to a group that has one; it can belong to a group with no schedule, for shared hooks or a start order. The mode is recorded on the instance's OS volume and restored by <code>rebuild</code>.</p>
+        <p><strong>Whole-group actions.</strong> <code>start</code>/<code>stop --group-name</code> (and <code>POST /groups/{name}/start|stop</code>) act on every member in parallel, each succeeding or failing independently. With dependencies included, a start brings up the groups the target depends on first and waits until they're ready &mdash; post-start checks included &mdash; and a stop brings the dependent groups down first. A stage that doesn't fully succeed stops the chain; later groups are reported as skipped rather than acted on out of order.</p>
+        <p><strong>Respecting start order.</strong> A one-off start or stop proceeds with a warning when the instance's start order isn't satisfied. With <code>--respect-dependencies</code> (or <code>"respect_dependencies": true</code> over the API) it's refused instead, before anything is touched &mdash; exit code 5 on the command line, HTTP 409 over the API.</p>
+        <p><strong>Predictable results.</strong> <code>start</code> and <code>stop</code> exit 0 when the instance is in the requested state (including already being there), 1 on failure, 3 when another operation holds the instance, 4 for a changed SSH host key, and 5 for a start-order refusal. <code>--json</code> prints one JSON object on standard output, with progress on standard error. Over the API, <code>?wait=true</code> returns the finished result in the same response instead of an operation id to poll.</p>
+      </section>
+
+      <section class="chapter" id="c4-5">
+        <h2><span class="chno">4.5</span> Holidays</h2>
+        <p class="lede">A holiday keeps infrastructure down on a date it would normally run, without touching any schedule.</p>
+        <p>A holiday is a date &mdash; or a range of dates &mdash; that applies to every node, to the members of one group, or to one node. On that date, judged in the timezone of the schedule that would start the node, the scheduler skips the node's scheduled starts. Scheduled stops still happen, so anything left running the evening before is shut down as usual, and the next ordinary day starts on schedule with nothing to undo. Manual and API starts are never blocked. Removing a holiday during the day lets a start that was skipped earlier that day catch up, within the usual one-hour window.</p>
+        <p>A holiday added for every node is <em>account-wide</em>. A group that must keep running can ignore account-wide holidays; its members then start as usual on them, while holidays added for that group or one of its nodes still apply. Each node can also follow or ignore account-wide holidays itself, and &mdash; as with schedules &mdash; a node's own choice always overrides its group's; without one it inherits the group's (or follows the calendar if it has no group). These settings live in the database, in tags on each node's OS volume and in the group's Object Storage record, so they come back with <code>restore</code> and <code>rebuild</code>.</p>
+        <p>Holidays are managed on the dashboard's Holidays page (each group's page has a Holidays card with its upcoming holidays, adding a date or range for the group, <em>Run on account-wide holidays</em> and <em>Skip tomorrow</em>; each node's page has an account-wide holiday choice), with <code>holiday-add</code> / <code>holiday-remove</code> / <code>holiday-list</code> / <code>holiday-settings</code>, or through the API (<code>GET/POST/DELETE /holidays</code>, <code>PUT /groups/{name}/holiday-setting</code>, <code>PUT /instances/{name}/holiday-setting</code>). A node shows when today is a holiday for it. Holidays are part of the database snapshot and are mirrored to Object Storage, so <code>restore</code> and <code>rebuild</code> bring them back.</p>
+      </section>
+
+
+      <section class="chapter" id="c4-6">
+        <h2><span class="chno">4.6</span> LKE Node Pools</h2>
+        <p class="lede">A Kubernetes node pool can be scheduled like an instance: its nodes go away at night and come back in the morning.</p>
+        <p>A node pool of a Linode Kubernetes Engine cluster is registered under a name (<code>pool-register</code>, <code>POST /pools</code>, or the Onboard page) and from then on takes part in everything an instance does: schedules, groups, holidays, start order, manual starts and extensions. Linode doesn't allow a pool of size zero, and a cluster must always keep at least one pool, so <em>stop</em> deletes the pool when the cluster has another one &mdash; its nodes are removed and stop billing &mdash; and otherwise &mdash; or when its settings can't first be saved to Object Storage &mdash; scales it to a single node with its autoscaler turned off. <em>Start</em> brings it back with the size, node type, labels, taints, tags and autoscaler settings it had when it was stopped; a deleted pool comes back as a new pool with a new ID, and the start counts as done once every node is ready. Kubernetes treats nodes as disposable, so nothing on a node's own disk is kept; data belongs in persistent volumes.</p>
+        <p>A pool has no OS volume to carry recovery tags. Its settings &mdash; the pool's spec, its schedule and its group &mdash; are kept in the database and in its Object Storage record, and a running pool carries the tag <code>lis-pool:&lt;name&gt;</code>, which also lets a start whose result was never recorded adopt the pool it already created instead of creating a second one. A stop that scales a pool to one node marks it with <code>lis-pool-stopped:&lt;name&gt;</code> in the same request, and the next start removes the mark, so a stopped one-node pool can always be told apart from a running one, even after an older database snapshot is restored. After a total loss of the database, <code>rebuild</code> brings registered pools back from Object Storage, so system backups should be configured before pools are scheduled. Without Object Storage a stopped pool is scaled to one node rather than deleted, because its settings would otherwise exist only in the local database. Commands that only make sense for an instance &mdash; offboarding, hooks, VPC address changes, host keys, migration &mdash; refuse a pool, and a group's hooks run only on its instance members; <code>deregister</code> stops scheduling it and leaves the pool as it is; its Object Storage record is kept, marked so that <code>rebuild</code> doesn't bring it back.</p>
+      </section>
+
+      <!-- ============ PART V ============ -->
+      <div class="part-open" id="part-5">
+        <div class="part-num">Part V</div>
+        <h2 class="part-title">Disaster Recovery</h2>
+        <p class="part-dek">What happens if the local registry that tracks every managed instance is lost or corrupted &mdash; and the honest limits of how much of it can actually come back.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c5-1">
+        <h2><span class="chno">5.1</span> The Registry, and Why It Can Be Rebuilt From Nothing</h2>
+        <p class="lede">Every managed instance's identity &mdash; which OS volume, which data volumes, which reserved IP, which schedule, which group &mdash; lives in one local database. Losing that file would normally mean losing the only record of which real Linode resources belong to which logical instance, with no way to reconstruct it.</p>
+        <p>This tool avoids that with two independent, layered backups, neither of which the local database ever depends on to function day to day. The first is Linode's own resource tags: the same identifying information is written directly onto the OS volume, each data volume, and the reserved IP themselves, every time an instance is onboarded, started, or stopped &mdash; so tags removed or edited out of band are put back within one start/stop cycle. The second, optional layer is Object Storage: a single, complete backup of everything about the instance that tags can't hold, written to a bucket you control. The local database is always the fast, authoritative source of truth for day-to-day operation &mdash; recovery only ever reads from tags or Object Storage when that database itself is gone or unreadable, never otherwise.</p>
+        <div class="callout">
+          <span class="co-label">Who answers "what's the truth" at any given moment</span>
+          The local database, without exception, whenever it's readable. Tags and Object Storage are never consulted during ordinary operation &mdash; not by the poller, not by a manual start or stop, not by the dashboard. They exist purely so the recovery command has somewhere to read from on the one occasion the local database itself is the thing that's broken.
+        </div>
+      </section>
+
+      <section class="chapter" id="c5-2">
+        <h2><span class="chno">5.2</span> What's Stored Where, and Why</h2>
+        <p class="lede">Not everything about an instance is backed up the same way. Each piece of data goes wherever is cheap enough to be worth it, without ever pretending a size- and shape-constrained system like a resource tag can hold something it structurally can't.</p>
+        <p><strong>Linode tags</strong> hold instance identity (which OS volume, which data volumes, which reserved IP), individual schedules, schedule-group membership and definitions, a simple single-network-interface configuration, and a reference to any SSH key that's also registered directly on the Linode account. Tags are free, visible directly in Cloud Manager, and survive independently of this tool's own database entirely &mdash; but each one is capped at fifty characters, a single resource can only hold a bounded number of them, and there is no way to write to more than one Linode resource at once as a single atomic operation. That combination makes tags the right home for small, fixed-shape facts, and the wrong one for anything of unpredictable size.</p>
+        <p><strong>Object Storage</strong>, if configured, holds a single complete backup of everything else: a multi-interface or VPC/VLAN network configuration, an SSH key that isn't registered on the Linode account under any name, the instance's plan/firewall/placement-group/maintenance-policy/watchdog settings, its label, and its own Linode tags (the customer's own labeling tags, distinct from this tool's disaster-recovery tags). One plain record per instance, no size constraint, no bespoke encoding required &mdash; the tradeoff is that it's an optional layer a deployment has to explicitly set up, not something that exists automatically the way tags do.</p>
+        <p>Two things are recoverable through <em>neither</em> mechanism: a manual-override auto-revert timer, and the audit/history log. Both live only in the database &mdash; and with Object Storage configured, the database itself is uploaded within about a minute of every change (5.7), so in practice they come back too, as of a minute or so before the loss. 5.6 explains what's at stake without Object Storage.</p>
+        <div class="table-wrap"><table><thead><tr><th>What</th><th>Linode tags</th><th>Object Storage</th></tr></thead><tbody>
+          <tr><td>Identity: OS volume, data volumes, reserved IP</td><td>Always</td><td>&mdash;</td></tr>
+          <tr><td>Individual schedule, group membership &amp; start order</td><td>Always</td><td>&mdash;</td></tr>
+          <tr><td>Each group's definition: schedule, hooks, start order (including a group with no members)</td><td>On every member's OS volume</td><td>Yes, if configured &mdash; one record per group</td></tr>
+          <tr><td>A simple, single public interface configuration</td><td>Yes</td><td>Also, as a fallback</td></tr>
+          <tr><td>A more complex configuration (multiple interfaces, VPC, VLAN)</td><td>&mdash;</td><td>Yes, if configured</td></tr>
+          <tr><td>An SSH key also registered on the Linode account</td><td>A reference to it</td><td>The key itself, as a fallback</td></tr>
+          <tr><td>An SSH key registered nowhere on the account</td><td>&mdash;</td><td>Yes, if configured</td></tr>
+          <tr><td>Plan, firewall, placement group, maintenance policy, watchdog</td><td>&mdash;</td><td>Yes, if configured</td></tr>
+          <tr><td>Label, and the customer's own Linode tags</td><td>&mdash;</td><td>Yes, if configured</td></tr>
+          <tr><td>Pre-stop hooks and post-start checks (instance and group)</td><td>A content fingerprint pointing at the stored copy; without Object Storage, a short command written inline</td><td>Yes, if configured &mdash; every command, script path, and uploaded script</td></tr>
+          <tr><td>An armed manual-override timer</td><td>&mdash;</td><td>In the database snapshot, if configured</td></tr>
+          <tr><td>Audit/history log and activity log</td><td>&mdash;</td><td>In the database snapshot, if configured</td></tr>
+          <tr><td>The deployment SSH key</td><td>&mdash; (its public half is in the Linode profile's SSH keys; the passphrase in a private StackScript)</td><td>Encrypted, if configured &mdash; and in every database snapshot</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c5-3">
+        <h2><span class="chno">5.3</span> Recovering a Stopped Instance</h2>
+        <p class="lede">An instance that was genuinely running at the moment local state was lost recovers completely, always &mdash; everything about it, including its live network configuration and SSH access list, is simply read fresh off the running instance itself. A stopped instance has nothing live to read from, so it depends on what was captured and backed up the last time it was stopped or onboarded.</p>
+        <p>Recovery for a stopped instance follows a fixed order, and never guesses. First, the account is scanned for tagged resources by name &mdash; this is where identity comes from, always, and nothing later in the process ever overrides it. Second, the OS volume's own tags are read for a schedule, group membership, and, if the instance's network configuration was simple enough to tag-encode, that configuration itself, plus a reference to any SSH key that's also a registered key on the Linode account &mdash; that reference is resolved back to the key's actual current content by looking it up on the account directly, not by trusting a stored copy. Third, if Object Storage is configured, the instance's full backup record is fetched and used to fill in whatever tags didn't already provide &mdash; an individual schedule whose tags are missing or unreadable, a more complex network configuration, an SSH key with no account match, plan and firewall settings, label. Object Storage is consulted last and only ever fills a gap; it's never allowed to override what the tag scan already established for identity.</p>
+        <p>Once a network configuration and at least one SSH key are known &mdash; by any combination of the sources above &mdash; the instance is reported as fully recovered, with its status restored to <code>stopped</code>, ready to start normally exactly like one that was running. If, after all of that, either is still missing, the instance comes back with its identity correctly restored but its status set to <code>needs_manual_recovery</code> &mdash; a plain marker that one step is still outstanding: boot it once from its recorded volume and address, then hand it back to the tool the normal way (running <code>onboard</code> again completes the recovery).</p>
+        <div class="callout">
+          <span class="co-label">A third status: <code>unreachable</code></span>
+          Separate from disaster recovery, an instance can also show <code>unreachable</code> in day-to-day operation &mdash; either right after a create, before the first network reachability check has succeeded, or when an already-running instance is found powered off out-of-band (through Cloud Manager, not through this tool). Either way, the fix is the same: run <code>start</code> again. The tool detects a confirmed-gone or genuinely powered-off instance automatically and completes the recovery, rather than creating a second, duplicate one.
+        </div>
+      </section>
+
+      <section class="chapter" id="c5-4">
+        <h2><span class="chno">5.4</span> Durable, Verified, Self-Healing Writes</h2>
+        <p class="lede">Every stop or onboard writes the instance's newly captured state in two separate steps, to two independent systems &mdash; and those two steps are deliberately not, and cannot be, one atomic operation.</p>
+        <p>The local database write happens first, and it is real, immediate, and fully in effect the moment it succeeds &mdash; this is the one write every day-to-day operation of the tool actually depends on. The tag and Object Storage backups happen as a separate, second step, right after: each one is written, then read back and compared against what was just sent, and retried automatically on a transient failure. That verify-then-retry discipline exists because a write that appears to succeed isn't always trustworthy on its own &mdash; reading it back is the only way to be sure.</p>
+        <p>What isn't attempted is making the local write and the backup writes succeed or fail together. Two independent systems &mdash; a local file and a remote store &mdash; have no shared way to guarantee that; promising otherwise would be promising something this design can't actually deliver. What's guaranteed instead is durability without that guarantee mattering in practice: a backup failure never blocks or reverses the real operation (the local database write has already happened by the time a backup is even attempted), and it never needs to be manually tracked or retried, because the very next time that instance is stopped or onboarded again, its entire current state is backed up again from scratch. A single missed backup corrects itself on the next ordinary use of the instance &mdash; that's what "self-healing" means here: not that a failure is detected and repaired by some separate watcher process, but that the next routine write is always a full, current snapshot, never a partial update, so there's nothing stale left over to repair.</p>
+        <p>The same applies to the recovery tags themselves. A change to a schedule, a group, a start order or a node's manual-only setting is written to the database first and then to the OS volume's tags; if that tag write fails, the change still takes effect and a warning is shown. Every start and every stop then rewrites those tags from the database, along with the instance's identity and hook tags, so a missed tag write &mdash; or a tag edited or removed in Cloud Manager &mdash; is corrected the next time the instance starts or stops, without anyone repeating the change. An individual schedule is also kept in the instance's Object Storage record, refreshed whenever the schedule changes, as a second copy beside its tags.</p>
+      </section>
+
+      <section class="chapter" id="c5-5">
+        <h2><span class="chno">5.5</span> Recovering From a Corrupted or Lost Database File</h2>
+        <p class="lede">A missing database file and a corrupted one are handled differently on purpose, because they mean different things.</p>
+        <p>A missing file is the easy case: the tool creates a fresh, empty database automatically the next time it runs, no special action needed at all beyond then running the recovery command described below. A genuinely <em>corrupted</em> file &mdash; present, but not a valid database &mdash; is detected specifically and distinguished from an ordinary momentary lock conflict between two processes; the tool refuses to proceed with a clear, direct message rather than behaving unpredictably against a file it can't actually trust.</p>
+        <div class="callout warn">
+          <span class="co-label">Recovering from a corrupted database file</span>
+          Move the corrupted file aside (its exact location is named in the error message itself). Run the recovery command once. A fresh, empty database is created automatically, and the command reconstructs every managed instance's identity, individual schedule, and group membership from tags &mdash; plus, for any instance with a usable tag-based or Object Storage backup as described in 5.2&ndash;5.3, its full network configuration and SSH access too.
+        </div>
+        <p>Nothing about this recovery path is destructive to the real infrastructure it's recovering the record of &mdash; the instances, volumes, and reserved IPs it reconstructs a registry entry for were never touched by the loss of the local file in the first place. The recovery command only ever reads and reconstructs; it never deletes or recreates anything on the Linode side as part of this process.</p>
+      </section>
+
+      <section class="chapter" id="c5-6">
+        <h2><span class="chno">5.6</span> Edge Cases, and What's Actually at Risk in Each</h2>
+        <p class="lede">Most of what could theoretically go wrong here turns out not to matter in practice, because the design already accounts for it. The genuine edge cases are narrow, and worth stating plainly rather than leaving implicit.</p>
+        <div class="table-wrap"><table><thead><tr><th>Situation</th><th>What actually happens</th></tr></thead><tbody>
+          <tr><td>The local database write succeeds; the tag or Object Storage backup fails</td><td>The real operation (stop, start, onboard) is already fully successful &mdash; both backups are best-effort and never block or reverse it. The next successful stop or onboard for that same instance re-attempts the backup with its then-current state. The only actual exposure is a total local database loss landing in the narrow window before that next backup succeeds, in which case recovery falls back to whatever the last successful backup provided.</td></tr>
+          <tr><td>Both the tag and the Object Storage backup happen to disagree</td><td>Tags win, for the fields tags cover. Both are written at the same moment from the same captured state, so in practice they only ever disagree if one of the two most recent write attempts failed while the other succeeded &mdash; not a routine occurrence.</td></tr>
+          <tr><td>A schedule group currently has zero members</td><td>With Object Storage configured, the group is recreated from its stored record &mdash; schedule, hooks, and start order. Without it, a group's definition lives only on its members' tags, so an empty group has nothing in the account to reconstruct it from and has to be recreated by hand. Any instance it previously had is unaffected.</td></tr>
+          <tr><td>A manual-override auto-revert timer is armed</td><td>Comes back with the database snapshot, which is uploaded within about a minute of every change. Without Object Storage it's discarded (and reported) &mdash; the instance simply reverts to ordinary schedule or manual behavior on its next check, never an unsafe or unexpected action either way.</td></tr>
+          <tr><td>The audit/history log</td><td>Comes back with the database snapshot, as of about a minute before the loss. Without Object Storage it's a local-only record: recovery restores an instance to a fully working state, not the history of what happened to it before the loss.</td></tr>
+          <tr><td>The database is behind the account (a snapshot taken before a node was started)</td><td>The node's OS volume is attached to a running instance the record doesn't point at. A volume can only be attached to one instance, so that instance <em>is</em> the node: self-healing (5.8) records it &mdash; and a <code>start</code> or <code>stop</code> checks the same thing first &mdash; so a second instance is never created and a stop stops the real one.</td></tr>
+          <tr><td>A start's result was never recorded (the host died mid-start)</td><td>The new instance holds the node's volumes and is adopted as above; if the host died before the volumes were attached, the blank instance it left (no disks, none of the account's volumes) is deleted. Nothing that can hold data is ever deleted.</td></tr>
+          <tr><td>A node's tags were removed and the database was lost too</td><td><code>rebuild</code> also reads each node's Object Storage record and recovers the node from the OS volume it names, as long as that volume isn't tagged for another name.</td></tr>
+          <tr><td>The scheduler was down longer than its one-hour catch-up window</td><td>Missed starts and stops aren't replayed on their own; the nodes are listed (dashboard and <code>schedule-catch-up</code>) and brought in line after someone approves.</td></tr>
+          <tr><td>Object Storage was never configured at all</td><td>Everything in 5.2&ndash;5.3 that depends on it simply doesn't apply &mdash; a stopped instance's recovery is limited to whatever tags alone provide (identity, schedule, group, and, when applicable, a simple network configuration and an account-registered SSH key). This is the same outcome as before this layer existed at all, never worse.</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c5-7">
+        <h2><span class="chno">5.7</span> Moving to a New Host</h2>
+        <p class="lede">If the host running this tool is lost, a replacement can take over with everything it was doing &mdash; from a backup when there is one, from Linode tags and Object Storage when there isn't.</p>
+        <p>Three things live only on the deployment host. The database holds every instance, schedule, group, hook, start order, API token and the audit history. The trusted host-key file records each managed instance's SSH host key, which every start checks strictly. The deployment SSH private key is the one key every managed instance trusts. The <code>backup</code> command, on a timer, takes a consistent database snapshot and a copy of the trusted host keys, to Object Storage and/or a local directory; with Object Storage, the scheduler also uploads a fresh snapshot within about a minute of every change, so a lost host loses at most about a minute. Old snapshots are pruned: everything from the last two days, then one a day for thirty days &mdash; never the newest.</p>
+        <p>The SSH key is kept recoverable automatically. It's encrypted on the host (AES-256-GCM, with a key derived by scrypt from a passphrase generated at install) and stored in the database &mdash; so every snapshot carries it &mdash; and in Object Storage; its public half is registered under the Linode profile's SSH keys; and the passphrase is kept in a private StackScript in the Linode account. A replacement host fetches the passphrase with the API token it needs anyway. Optionally, the operator's own age public key adds a copy only the operator can open: the whole settings file (API token, bucket keys, OAuth and alert settings) and the SSH key, encrypted to that key in Object Storage and re-uploaded whenever either changes; the host can write it but never read it back, and a replacement host then needs only the bucket settings and the operator's age identity. The escrow adds no new way in: a full-access Linode token can already gain root on every instance through rescue mode, a root password reset or Lish, and the passphrase opens nothing without the encrypted key, which needs the Object Storage keys or a snapshot.</p>
+        <p><code>install.sh recover</code> sets up a fresh host and puts all of it back before starting anything: it decrypts the SSH key, restores the newest database snapshot and the trusted host keys, runs the tag-and-Object-Storage reconstruction described in 5.3 to add anything onboarded or changed after that snapshot without disturbing what the snapshot restored, and then the self-healing check (5.8), which reconciles the snapshot with the account. Only then are the poller and API started, after which any node left off its schedule by the outage is listed for approval. With <code>--no-start</code> it stops short of starting so the result can be reviewed first.</p>
+        <div class="table-wrap"><table><thead><tr><th>Recovered from</th><th>What comes back</th></tr></thead><tbody>
+          <tr><td>A database snapshot</td><td>Everything, as of the snapshot &mdash; including API tokens and history &mdash; plus anything newer from tags and Object Storage</td></tr>
+          <tr><td>Tags and Object Storage only (no snapshot)</td><td>Every instance, its schedule, group membership, every group's schedule, hooks and start order (groups with no members included, from their Object Storage records), a stopped instance's network and SSH settings, and every API token with its scopes, limits, expiry and revocation. The audit history doesn't come back; a running manual-override timer is reported, not re-armed</td></tr>
+          <tr><td>Tags only (no Object Storage)</td><td>Identity, schedules, group membership and start order for every group with a member; see 5.6 for what a stopped instance needs beyond that</td></tr>
+        </tbody></table></div>
+        <p>API tokens are also recorded one per object in Object Storage, holding the token's hash (never the token itself), scopes, limits, expiry and revocation, rewritten whenever a token is created or revoked. Restoring a database snapshot, or rebuilding without one, applies those records on top: a token created after the snapshot comes back, and a revocation recorded on either side always wins, so restoring an older snapshot never brings a revoked token back to life.</p>
+        <p>Two pollers must never act on the same instances at once, so the old host has to be shut down or its poller stopped before the new one starts; <code>recover</code> asks for that confirmation. An instance onboarded after the last copy of the trusted host keys will refuse its next start until its host key is deliberately re-trusted with <code>reset-host-key</code>. That's the same strict check that protects every start, and it is never relaxed automatically.</p>
+      </section>
+
+      <section class="chapter" id="c5-8">
+        <h2><span class="chno">5.8</span> Self-Healing, Missed Schedules and Alerts</h2>
+        <p class="lede">The account is the final word on what exists. Every few minutes the scheduler compares each node's record with it and corrects the record where the account proves it wrong &mdash; without ever deleting anything that can hold data.</p>
+        <div class="table-wrap"><table><thead><tr><th>The account shows</th><th>What's done</th></tr></thead><tbody>
+          <tr><td>The node's OS volume attached to an instance the record doesn't point at</td><td>That instance is recorded as the node &mdash; running, or <code>unreachable</code> so the next start boots and checks it</td></tr>
+          <tr><td>The recorded instance is gone and nothing holds the OS volume</td><td>Recorded as stopped</td></tr>
+          <tr><td>An instance with the node's label, no disks and none of the account's volumes, at least 15 minutes old</td><td>Deleted: a leftover from a start that never finished (it would also block the next create, since instance labels are unique)</td></tr>
+          <tr><td>A node marked "in progress" while nothing holds its lock</td><td>Cleared: an interrupted start or stop</td></tr>
+        </tbody></table></div>
+        <p>A node whose start or stop is running right now is skipped; volumes and reserved IPs are never touched. <code>start</code> and <code>stop</code> make the same comparison for the node they act on, and <code>heal</code> runs it on demand.</p>
+        <p><strong>Missed schedules.</strong> The scheduler acts on a scheduled start or stop for an hour after it was due. After a longer outage, nodes are left as they were until their next scheduled time, and listed &mdash; on the dashboard's Instances page and by <code>schedule-catch-up</code> &mdash; with the time that was missed. Nothing changes until someone approves. A node started or stopped by hand after the scheduled time is marked as such and left out by default. Stops run before starts, deepest start-order level first.</p>
+        <p><strong>Alerts.</strong> A webhook (a JSON POST that Slack and Teams incoming webhooks accept) and/or email over SMTP hear about: the scheduler not checking in for ten minutes (the API service watches for this, since a stopped scheduler can't report itself), backups failing, the deployment SSH key not stored in every place, nodes staying off their schedule, and a node that keeps failing to start or stop (three failures in a row with no success since &mdash; for example a node left unreachable, which catch-up deliberately never acts on). Each is sent when it starts, every six hours while it lasts, and once when it clears. <code>alerts-check</code> reports the same conditions for any other monitoring. Also alerted: a failed daily restore test, the Linode API token rejected or expiring within fourteen days, the database disk nearly full, Shutdown Watchdog off on the host, a pending deletion overdue or failing (5.9), bucket versioning that can't be turned on (5.10), a failed or missing recovery drill when drills are scheduled (5.10), an SSH key rotation that isn't finishing (5.10), a problem found by the daily consistency check, and the host's clock &mdash; more than sixty seconds off Linode's API time, or reported by the operating system as not time-synchronized. Schedules, the lease and backup ages all depend on the clock being right.</p>
+        <p><strong>When the whole host is gone.</strong> A dead host can't report itself, and Linode's resource-usage alerts fire only when usage goes above a threshold. So the installer turns on Linode's Shutdown Watchdog for the host &mdash; a crash or unexpected power-off is followed by Linode booting it again &mdash; and the scheduler can ping an uptime monitor every minute (<code>LIS_HEARTBEAT_URL</code>), which notices when the pings stop.</p>
+        <p><strong>One active scheduler.</strong> The active scheduler holds a lease in Object Storage, renewed every thirty seconds and expiring after three minutes. A second scheduler &mdash; an old host coming back after a new one took over &mdash; finds the fresh lease and stands by: it starts, stops, heals and uploads nothing, and raises an alert. <code>recover</code> takes the lease over at once, a cleanly stopped scheduler gives it up, and <code>scheduler-lease --take-over</code> moves it deliberately. A standby host also refuses changes made on it: its API answers <code>409</code> to anything but reads (and the take-over itself), and the CLI refuses commands that change nodes, schedules or settings &mdash; two hosts changing the same nodes could undo each other. <code>LIS_ALLOW_STANDBY_CHANGES=1</code> overrides this. When the bucket can't be reached, the scheduler that was active keeps scheduling, so a bucket outage never stops the fleet, while a host that wasn't active stays standby, since it can't tell whether the other one is still running; <code>scheduler-lease --take-over</code> overrides that too.</p>
+        <p><strong>Consistency check.</strong> Recovering a node depends on three records agreeing: the database, the tags on its Linode resources, and the Object Storage copies. <code>doctor</code> checks that they do &mdash; each node's volumes and reserved IP carry exactly its name and role tags and nothing is tagged for two names; no two nodes share a VPC address; a running node's recorded instance exists and holds its OS volume, and nothing holds a stopped node's; no node is marked as starting or stopping with nothing running; the recovery tags on each OS volume match its current schedule, group, start order, hooks, manual-only and holiday settings; the Object Storage copies of nodes, groups, pending deletions, API tokens, holidays and pre-migration backups match the database; and every running node's SSH address has a trusted host key. It only reads, never connects to the nodes, and prints each problem with its fix. The active scheduler runs it daily and alerts on problems (cleared by the next clean run); it can also be run from the command line (exit 0 consistent, 1 problems, 2 a check couldn't run) or the dashboard's System page. Some findings are notices that never fail the check: resources tagged for a node the database doesn't know (normal when another deployment shares the account), a stored copy of a node removed with <code>deregister</code>, and a stopped node's VPC address in use elsewhere (it moves at its next start).</p>
+        <p><strong>Restore testing.</strong> Every day the newest snapshot is downloaded and checked &mdash; checksum, SQLite's integrity check, age, and that it holds every node &mdash; and the stored key copies are decrypted against the real key, all without touching the live database. A database that fails the integrity check is never uploaded, so a damaged copy can't replace a good one. An upgrade takes a snapshot with the old code first.</p>
+      </section>
+
+      <section class="chapter" id="c5-9">
+        <h2><span class="chno">5.9</span> Deletions Wait Out a Grace Period</h2>
+        <p class="lede">Offboarding a node, or deleting a pre-migration backup, takes it out of management at once &mdash; but nothing on Linode is deleted until a grace period has passed, and until then it can be brought back exactly as it was.</p>
+        <p>When <code>offboard</code> or <code>backup-delete</code> runs, every resource involved keeps all of its tags &mdash; ownership, schedule, group, hooks &mdash; and gains two more: <code>lis-pending-delete:&lt;date&gt;</code> (or <code>lis-pending-untag:&lt;date&gt;</code> on a volume that will be kept rather than deleted) and <code>lis-pending-of:&lt;name&gt;</code>. The grace period is seven days by default (<code>LIS_DELETION_GRACE_DAYS</code>; <code>0</code> deletes at once), and <code>--now</code> on either command skips it. When an entry is due, the active scheduler carries it out, re-checking each resource first: anything that's no longer marked, that has since been attached or assigned to an instance, or that another name now claims is left alone.</p>
+        <div class="table-wrap"><table><thead><tr><th>During the grace period</th><th>What happens</th></tr></thead><tbody>
+          <tr><td>Recover (<code>pending-deletions --recover ID</code>, or the dashboard's Pending deletion page)</td><td>An offboarded node comes back stopped, with its schedule, group membership, hooks, manual-only mode and holiday setting; a backup is simply kept again.</td></tr>
+          <tr><td>Delete now (<code>pending-deletions --delete-now ID</code>, after typing the name)</td><td>Carried out immediately; it can't be recovered afterwards.</td></tr>
+          <tr><td>Onboarding a new node under the same name</td><td>Refused until the entry is recovered or deleted.</td></tr>
+          <tr><td>The scheduler's database is lost</td><td><code>rebuild</code> restores the node as a pending deletion &mdash; from Object Storage, or from its tags alone &mdash; never as a live node, and never drops it.</td></tr>
+          <tr><td>A deletion overdue or failing</td><td>Alerted (5.8).</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c5-10">
+        <h2><span class="chno">5.10</span> Proving and Protecting Recovery</h2>
+        <p class="lede">Backups only matter if a new host could actually use them. Several mechanisms keep that true without anyone having to remember to check.</p>
+        <p><strong>A copy of the release in the bucket.</strong> Installing on a new host normally downloads this tool's release from GitHub. So that a recovery doesn't depend on GitHub being reachable, the scheduler keeps the installed release in the deployment's own bucket &mdash; the compiled program, its built dashboard and its installer &mdash; at <code>deployment/release/&lt;version&gt;.tar.gz</code> and <code>deployment/release/latest.tar.gz</code>, uploaded whenever the installed release changes and again if removed (<code>release-backup</code> on demand). Fetched with any S3 tool and the bucket keys and extracted, its <code>install.sh recover</code> installs with no download at all.</p>
+        <p><strong>Checked releases.</strong> Every release archive has a published SHA-256 checksum, and both <code>install.sh</code> and the container image build check it, so a host only ever runs exactly the files that were released.</p>
+        <p><strong>Bucket versioning.</strong> When backups are configured, versioning is turned on for the bucket, with a lifecycle rule expiring old versions thirty days after they were overwritten or deleted (other lifecycle rules on the bucket are kept); the health check turns it back on if it's found off. An overwritten or deleted backup stays recoverable for those thirty days: <code>bucket-protection --key KEY</code> lists an object's versions and <code>--restore-version VERSION_ID</code> makes one current again. The bucket's access key needs permission to change bucket settings; if it doesn't, an alert says so.</p>
+        <p><strong>Restoring one item.</strong> To undo a mistaken change to one node's schedule or hooks, or to one group, <code>restore-item</code> puts back just that item from a snapshot &mdash; the newest in the bucket, a chosen one, or a local file &mdash; without touching anything else. A missing group is recreated with its schedule, holiday setting, hooks and start order; <code>--with-members</code> also re-adds members that exist and aren't in another group. The dashboard shows the snapshot's version next to the current one before restoring.</p>
+        <p><strong>Recovery drills.</strong> The daily restore test (5.8) proves the backups open; a drill proves a new host could take over. <code>recovery-drill</code> creates a throwaway <code>g6-nanode-1</code> tagged <code>lis-recovery-drill</code>, copies the release copy and a minimal settings file onto it, and runs <code>install.sh recover --drill</code>: the latest snapshot and the deployment key are restored, then <code>recovery-drill-check</code> verifies that every node's volumes and reserved IP exist and every running node answers over SSH with the restored key. A drill host is read-only &mdash; it takes no lease, doesn't rebuild or heal, uploads nothing and starts no services &mdash; and the VM is always deleted afterwards. Each drill costs a nanode for about ten to fifteen minutes. With <code>LIS_RECOVERY_DRILL_DAYS=7</code> the scheduler runs one weekly, and a failed or missing drill is alerted.</p>
+        <p><strong>Rotating credentials.</strong> <code>rotate-credentials</code> replaces a credential that may have leaked, with no downtime:</p>
+        <div class="table-wrap"><table><thead><tr><th>Credential</th><th>How it's replaced</th></tr></thead><tbody>
+          <tr><td><code>api-token</code></td><td>A new Linode API token with the same scopes (and lifetime, if the old one expires) is written to <code>.env</code> and picked up by the running services without a restart; the old token is revoked only after the scheduler has switched to the new one.</td></tr>
+          <tr><td><code>bucket-key</code></td><td>A new Object Storage key with the same bucket access is created and tested, written to <code>.env</code>, and then the old key is deleted.</td></tr>
+          <tr><td><code>oauth-secret</code></td><td>The dashboard login's OAuth client secret is reset and the new one written to <code>.env</code>.</td></tr>
+          <tr><td><code>ssh-key</code></td><td>A new deployment key. The old one stays usable &mdash; encrypted in the database and the bucket, and offered by every SSH connection alongside the new one &mdash; until every node trusts the new key. Running nodes move at once: the new key is added, a login using only the new key is proven, then the old key is removed. Stopped nodes move after their next start, which the scheduler handles (<code>--continue</code> does it on demand). A node needing manual recovery is never started by the tool, so it can't move by itself: the old key stays trusted until it is recovered (<code>onboard --force</code> works during the rotation, since both keys are offered) or offboarded. A node that leaves the registry during the rotation (for example <code>deregister</code>) keeps it open while its volumes are still tagged on the account, because <code>rebuild</code> could bring it back still trusting only the old key; a node added during the rotation joins it. Such nodes are reported separately and raise an alert, as does a node that keeps failing to move or a rotation open for a week. Restoring onto a new host part way through brings the previous key back too. If the assisted migration copy is used, the new public key has to be added to the profile's Lish keys afterwards.</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <!-- ============ PART VI ============ -->
+      <div class="part-open" id="part-6">
+        <div class="part-num">Part VI</div>
+        <h2 class="part-title">The Command-Line Interface</h2>
+        <p class="part-dek">Every subcommand, grouped by what it does.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c6-1">
+        <h2><span class="chno">6.1</span> Onboarding &amp; Lifecycle</h2>
+        <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>onboard</code></td><td>Brings an instance under management &mdash; Path A (clone from a template) or Path B (an already-migrated existing instance). Refuses cleanly if the instance is still on local disk or its public IP isn't reserved. Refuses again, separately, if the name is already onboarded &mdash; <code>--force</code> re-onboards anyway, showing exactly what identity details (volumes, IP, network config) would change first, and requiring confirmation before proceeding. Intended for correcting a record after a <code>needs_manual_recovery</code> partial recovery, not routine re-onboarding.</td></tr>
+          <tr><td><code>start</code></td><td>Creates (recreates) a managed instance from its saved configuration and waits for a genuine network reachability check before reporting success. <code>--group-name</code> starts every member of a group at once; <code>--with-dependencies</code> brings up its start-order chain first (Part IV.4).</td></tr>
+          <tr><td><code>stop</code></td><td>Re-captures current configuration, then deletes the instance. Compute billing stops the moment this completes. <code>--skip-precapture</code> recovers an instance that's genuinely SSH-unreachable but still billing, by falling back to the last-known configuration instead of a fresh capture &mdash; see the callout below.</td></tr>
+          <tr><td><code>offboard</code></td><td>Permanently decommissions a stopped instance &mdash; releases its reserved IP, and optionally deletes its volumes too, after a grace period during which it can be recovered (5.9); <code>--now</code> deletes at once. Requires typing the instance's name to confirm.</td></tr>
+          <tr><td><code>pending-deletions</code></td><td>Lists offboarded instances and deleted backups waiting out their grace period (<code>--all</code> includes finished ones, <code>--json</code> for scripts); <code>--recover ID</code> brings one back, <code>--delete-now ID</code> carries it out at once after the name is typed (<code>--yes</code> skips that).</td></tr>
+          <tr><td><code>set-vpc-address</code></td><td>Gives a stopped instance's VPC interface a different address, used from its next start &mdash; for when another instance took its address while it was stopped.</td></tr>
+          <tr><td><code>set-ssh-port</code></td><td>Records the port an instance's SSH server listens on, if not 22. Every connection the tool makes to it uses that port; a running instance is checked on the new port first. <code>onboard</code> and <code>migrate-start</code> take <code>--ssh-port</code> for the same purpose.</td></tr>
+          <tr><td><code>deregister</code></td><td>Removes an instance from local tracking only, with no changes to the real Linode resources at all &mdash; the safety net for correcting a mistaken or corrupted local record.</td></tr>
+          <tr><td><code>list</code></td><td>Lists every managed instance and its current status.</td></tr>
+          <tr><td><code>status</code></td><td>Shows one instance's complete stored record.</td></tr>
+          <tr><td><code>history</code></td><td>Shows the recorded audit trail of start/stop actions for one instance &mdash; what happened, when, and what triggered it.</td></tr>
+          <tr><td><code>savings</code></td><td>An instance's or group's configured savings and, for an instance, what it actually saved over a trailing window.</td></tr>
+          <tr><td><code>activity</code></td><td>What the scheduler, API and CLI did, filtered by instance, group, level or text.</td></tr>
+          <tr><td><code>hook-history</code></td><td>An instance's recent hook runs, with result, exit code and output.</td></tr>
+          <tr><td><code>reserve-ip</code></td><td>Reserves an instance's current public IPv4, which onboarding needs.</td></tr>
+          <tr><td><code>ssh-check</code></td><td>Checks an instance's SSH port from the scheduler host; with <code>--login</code>, tries a real root login and says whether the port, the host key or the credential is the problem. Changes nothing.</td></tr>
+          <tr><td><code>backup-estimate</code></td><td>What keeping a pre-migration backup of an instance would cost a month.</td></tr>
+        </tbody></table></div>
+        <div class="callout warn">
+          <span class="co-label"><code>stop --skip-precapture</code>: a deliberate security tradeoff</span>
+          An ordinary <code>stop</code> refuses outright if it can't reach the instance over SSH to re-capture its current configuration first &mdash; on purpose, since deleting a billing instance you can no longer see into is risky. <code>--skip-precapture</code> is the escape hatch for the case where you need to stop it anyway: it falls back to the last successfully captured configuration instead. The real cost is that it also falls back to the last-known <code>authorized_keys</code> list &mdash; if SSH access was revoked or changed since that last capture, the recreated instance will present that <em>stale</em> access list, not the current one. Use it only when you understand that tradeoff, and re-verify SSH access on the instance once it's reachable again.
+        </div>
+      </section>
+
+      <section class="chapter" id="c6-2">
+        <h2><span class="chno">6.2</span> Migration (Path B)</h2>
+        <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>migrate-start</code></td><td>Runs pre-flight checks, creates the destination volume, and boots the instance into Rescue Mode &mdash; then hands back the manual copy step described in Part II.2. <code>--force</code> restarts an in-progress attempt from scratch (a fresh destination volume, the old one tagged for later cleanup) &mdash; use it if an earlier attempt was abandoned or needs to be redone.</td></tr>
+          <tr><td><code>migrate-start --two-phase</code></td><td>Copies most of the data while the instance keeps running, so the Rescue Mode step only copies what changed since. ext4 root filesystem and rsync on the instance; not with <code>--backup</code>.</td></tr>
+          <tr><td><code>migrate-wave</code></td><td>Migrates and onboards several instances a few at a time (<code>--instance NAME=ID</code>, <code>--wave-size</code>), each on its own.</td></tr>
+          <tr><td><code>migrate-copy</code></td><td>Optional: runs the copy step in the Rescue Mode console for you (over Lish, with this deployment's key registered as a Lish key), then <code>migrate-resume</code>. Only when a pre-migration backup is kept, or for a two-phase migration (which never writes the original disk). <code>--check</code> reports what's missing; <code>--no-resume</code> stops after the copy.</td></tr>
+          <tr><td><code>migrate-resume</code></td><td>Run after the manual copy is done &mdash; rebuilds the boot configuration against the new volume, verifies the copy, and converts the instance's public IP to reserved.</td></tr>
+          <tr><td><code>rollback</code> / <code>backup-list</code> / <code>backup-delete</code></td><td>Put the original system back from the backup <code>migrate-start --backup</code> kept; list backups; delete one (its clone and cloned volumes, after the grace period in 5.9, or at once with <code>--now</code>) when no longer needed &mdash; for a backup already rolled back to, only the record is removed.</td></tr>
+          <tr><td><code>migrate-abandon</code></td><td>Cancels an unfinished migration: the original instance leaves Rescue Mode and boots from its own disk (unchanged until <code>migrate-resume</code>), and the destination volume is deleted. Refused once <code>migrate-resume</code> has started.</td></tr>
+          <tr><td><code>migrate-orphans</code></td><td>Lists (or, with <code>--cleanup</code>, permanently deletes) volumes left behind by an incomplete or abandoned migration attempt. <code>--mark-orphaned --name &lt;name&gt; --volume-id &lt;id&gt;</code> manually marks one specific volume orphaned when local migration state has already been lost and the usual automatic detection has nothing left to go on.</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c6-3">
+        <h2><span class="chno">6.3</span> Scheduling</h2>
+        <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>schedule-set</code></td><td>Creates or replaces an instance's individual schedule &mdash; timezone plus one or more day/start/stop rules.</td></tr>
+          <tr><td><code>schedule-show</code></td><td>Shows an instance's current individual schedule.</td></tr>
+          <tr><td><code>schedule-clear</code></td><td>Removes an instance's individual schedule &mdash; it then falls back to its group's schedule, if it belongs to one.</td></tr>
+          <tr><td><code>extend</code></td><td>Pushes an active manual-override countdown forward by another window, or keeps an instance (<code>--name</code>) or every member of a group (<code>--group-name</code>) running past today's scheduled stop; groups it depends on are held to the same time.</td></tr>
+          <tr><td><code>poll</code></td><td>Runs the scheduler loop &mdash; continuously by default, or a single evaluation pass with <code>--once</code>.</td></tr>
+          <tr><td><code>hooks-set</code></td><td>Sets an instance's or group's pre-stop hook and/or post-start check &mdash; a command, a script path on the instance, or an uploaded script file &mdash; with timeouts and the pre-stop failure policy (Part IV.3). Only the options given change.</td></tr>
+          <tr><td><code>hooks-show</code></td><td>Shows an instance's own hooks and the ones that actually apply to it, including which group an inherited one comes from &mdash; or a group's hooks.</td></tr>
+          <tr><td><code>hooks-clear</code></td><td>Removes an instance's own hooks (its group's then apply), or a group's hooks.</td></tr>
+          <tr><td><code>hooks-run</code></td><td>Runs an instance's hook immediately, without starting or stopping it &mdash; to test it, or to re-run a failed post-start check.</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c6-4">
+        <h2><span class="chno">6.4</span> Groups</h2>
+        <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>group-create</code></td><td>Creates a new, empty schedule group.</td></tr>
+          <tr><td><code>group-schedule-set</code></td><td>Sets or replaces a group's schedule &mdash; also the way to change a group's timezone later, not just at creation.</td></tr>
+          <tr><td><code>group-add</code></td><td>Adds an instance to a group.</td></tr>
+          <tr><td><code>group-remove</code></td><td>Removes an instance from a group &mdash; prompts whether to keep it purely manual or copy the group's rules into a new individual schedule.</td></tr>
+          <tr><td><code>group-show</code></td><td>Shows one group's schedule and current members.</td></tr>
+          <tr><td><code>group-list</code></td><td>Lists every schedule group.</td></tr>
+          <tr><td><code>group-delete</code></td><td>Deletes a group &mdash; refuses while it still has members.</td></tr>
+          <tr><td><code>set-mode</code></td><td>Makes an instance manual-only (<code>--manual</code>) or schedulable again (<code>--auto</code>) (Part IV.4).</td></tr>
+          <tr><td><code>group-depends</code></td><td>Makes a group start only after one or more other groups are up and ready, and stop only after it is down (Part III.4); <code>--on</code> sets the list, <code>--add</code>/<code>--remove</code> change one entry, <code>--clear</code> removes them all.</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section class="chapter" id="c6-5">
+        <h2><span class="chno">6.5</span> Recovery &amp; Maintenance</h2>
+        <div class="table-wrap"><table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>rebuild</code></td><td>Reconstructs the local registry from Linode's own tags &mdash; the disaster-recovery mechanism described in Part V.</td></tr>
+          <tr><td><code>backup</code></td><td>On-demand, whole-system backup &mdash; re-syncs every instance's and group's Object Storage record, takes a full database snapshot and saves the trusted host keys (locally, to Object Storage, or both). Meant to be run on a schedule, not just invoked manually; see the Operations Guide.</td></tr>
+          <tr><td><code>holiday-settings</code></td><td>Whether account-wide holidays apply to a group (<code>--group-name</code>) or a node (<code>--name</code>): <code>--follow-account-wide</code>, <code>--ignore-account-wide</code>, or for a node <code>--inherit</code>. A node's own setting overrides its group's (Part IV.5).</td></tr>
+          <tr><td><code>pool-register</code> / <code>pool-set-stop-mode</code></td><td>Schedule an LKE node pool like an instance: stop removes its nodes (or scales the cluster's only pool to one node), start brings them back (Part IV.6).</td></tr>
+          <tr><td><code>onboard-readiness</code></td><td>Every instance on the account: ready to onboard, needs a migration first (volume size, monthly cost, rough copy time), or blocked and why. Read-only (Part II.2).</td></tr>
+          <tr><td><code>holiday-add</code> / <code>holiday-remove</code> / <code>holiday-list</code></td><td>Holidays: dates (or ranges) on which scheduled starts are skipped for every node, one group or one node; scheduled stops still happen (Part IV.5).</td></tr>
+          <tr><td><code>backup-config</code></td><td>Shows where this tool backs itself up and the last backup's result; sets (after a write/read/delete test), tests or removes the Object Storage settings. A running scheduler and API pick up changes without a restart. Also on the dashboard's System backup page, with &ldquo;Back up now&rdquo;.</td></tr>
+          <tr><td><code>restore</code></td><td>On a new host: puts the newest (or a chosen, or a local) database snapshot in place, plus the trusted host keys; <code>--list</code> shows the snapshots. Run <code>rebuild</code> afterward (Part V.7).</td></tr>
+          <tr><td><code>ssh-key-protect</code> / <code>ssh-key-restore</code></td><td>Check (and complete) the deployment SSH key's stored copies &mdash; done automatically every hour and on every backup; get the key back on a replacement host, with the passphrase from the Linode account. <code>ssh-key-backup</code> stores an extra copy under a passphrase you choose.</td></tr>
+          <tr><td><code>env-backup</code> / <code>env-restore</code></td><td>The operator-only copy of the settings and SSH key, age-encrypted to the operator's public key; set the key, upload now, or restore on a replacement host (<code>--print</code> just shows the settings).</td></tr>
+          <tr><td><code>backup-verify</code> / <code>scheduler-lease</code> / <code>host-watchdog</code></td><td>Restore-test the backups now; show or take over the active-scheduler lease; show or turn on Shutdown Watchdog on the scheduler's host.</td></tr>
+          <tr><td><code>restore-item</code></td><td>Puts back one node's schedule or hooks, or one group, from a snapshot (<code>--snapshot KEY</code>, <code>--from-file PATH</code>, <code>--show</code> to only look, <code>--with-members</code> for a group) (5.10).</td></tr>
+          <tr><td><code>release-backup</code></td><td>Uploads the installed release, with its dashboard and dependency wheels, to the bucket now (<code>--force</code> even if unchanged, <code>--output FILE</code> for a local archive); done automatically when the code changes (5.10).</td></tr>
+          <tr><td><code>bucket-protection</code></td><td>Shows or turns on (<code>--enable</code>) bucket versioning; with <code>--key</code>, lists an object's versions, and with <code>--restore-version</code> makes one current again (5.10).</td></tr>
+          <tr><td><code>rotate-credentials</code></td><td>Replaces <code>api-token</code>, <code>bucket-key</code>, <code>oauth-secret</code> or <code>ssh-key</code>; <code>ssh-key --continue</code> moves nodes not yet moved (5.10).</td></tr>
+          <tr><td><code>recovery-drill</code> / <code>recovery-drill-check</code></td><td>Runs a recovery drill on a throwaway VM (<code>--region</code>, <code>--keep-vm</code>); the check that a restored drill host runs (5.10).</td></tr>
+          <tr><td><code>heal</code></td><td>Compares every node with the account and corrects its record (5.8); the scheduler does this every few minutes.</td></tr>
+          <tr><td><code>schedule-catch-up</code></td><td>Lists nodes not in the state their schedule wants; <code>--apply</code> brings them in line after confirming (5.8).</td></tr>
+          <tr><td><code>doctor</code></td><td>Consistency check: database, Linode tags/volumes/instances/VPC addresses, Object Storage copies and trusted host keys agree. Read-only; exit 0 consistent, 1 problems, 2 a check couldn't run; <code>--json</code>.</td></tr>
+          <tr><td><code>alerts-check</code> / <code>alerts-test</code></td><td>What needs attention now (exit 1 if anything); send a test alert to the webhook and/or email.</td></tr>
+          <tr><td><code>clear-lock</code></td><td>Clears a stuck per-instance operation lock &mdash; an administrative escape hatch, used rarely; the scheduler clears a stale one by itself, and the dashboard offers it too.</td></tr>
+          <tr><td><code>reset-host-key</code></td><td>Deliberately rotates the trusted SSH host key recorded for an instance (see Part I.5) &mdash; the only sanctioned way to do this.</td></tr>
+          <tr><td><code>api-token-create</code> / <code>-list</code> / <code>-revoke</code></td><td>Manage API tokens for scripts (Part VII.2).</td></tr>
+          <tr><td><code>serve-api</code></td><td>Starts the REST API server and, once built, the web dashboard (Part VII).</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <!-- ============ PART VII ============ -->
+      <div class="part-open" id="part-7">
+        <div class="part-num">Part VII</div>
+        <h2 class="part-title">The REST API &amp; Web Dashboard</h2>
+        <p class="part-dek">The full route surface, the authentication model, and what the dashboard covers.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c7-1">
+        <h2><span class="chno">7.1</span> Route Surface</h2>
+        <div class="table-wrap"><table><thead><tr><th>Route</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>GET /instances</code></td><td>List every managed instance</td></tr>
+          <tr><td><code>POST /instances</code></td><td>Onboard a new instance</td></tr>
+          <tr><td><code>GET /instances/{name}/status</code></td><td>One instance's status</td></tr>
+          <tr><td><code>GET /instances/{name}/history</code></td><td>Its audit trail</td></tr>
+          <tr><td><code>POST /instances/{name}/start</code> / <code>/stop</code></td><td>Manual start/stop</td></tr>
+          <tr><td><code>POST /instances/{name}/extend</code></td><td>Extend an active manual-override window</td></tr>
+          <tr><td><code>GET</code> / <code>POST</code> / <code>DELETE /instances/{name}/schedule</code></td><td>Read, set, or clear an individual schedule</td></tr>
+          <tr><td><code>PATCH /instances/{name}</code></td><td>Change (or clear) group membership</td></tr>
+          <tr><td><code>POST /instances/{name}/vpc-address</code></td><td>Move a stopped instance to a different VPC address (<code>{"address": ...}</code>)</td></tr>
+          <tr><td><code>POST /instances/{name}/offboard</code> / <code>/deregister</code></td><td>Decommission, or deregister locally only</td></tr>
+          <tr><td><code>POST /instances/{name}/migrate-start</code> / <code>/migrate-resume</code></td><td>Drive a Path B migration from the dashboard</td></tr>
+          <tr><td><code>POST /migrations/waves</code></td><td>Migrate and onboard several instances a few at a time (background operation; each instance's outcome in the result)</td></tr>
+          <tr><td><code>GET /linode/readiness</code></td><td>Onboarding readiness of every instance on the account</td></tr>
+          <tr><td><code>POST /pools</code> / <code>PUT /instances/{name}/pool-stop-mode</code></td><td>Schedule an LKE node pool; change how it is stopped</td></tr>
+          <tr><td><code>GET</code> / <code>POST /instances/{name}/migrate-copy</code></td><td>Whether the assisted copy can run (and what's missing) / run it, then finish the migration</td></tr>
+          <tr><td><code>GET /instances/{name}/savings</code></td><td>The two savings percentages for one instance</td></tr>
+          <tr><td><code>POST /groups</code> &middot; <code>GET /groups</code> &middot; <code>GET</code>/<code>DELETE /groups/{name}</code></td><td>Group CRUD</td></tr>
+          <tr><td><code>POST /groups/{name}/schedule</code></td><td>Set a group's schedule</td></tr>
+          <tr><td><code>GET /groups/{name}/savings</code></td><td>The two savings percentages for a group</td></tr>
+          <tr><td><code>GET</code> / <code>PUT</code> / <code>DELETE /instances/{name}/hooks</code></td><td>Read (own and effective), set, or clear an instance's hooks</td></tr>
+          <tr><td><code>POST /instances/{name}/hooks/run</code> &middot; <code>GET /instances/{name}/hook-events</code></td><td>Run a hook on demand; read hook run and change history</td></tr>
+          <tr><td><code>GET</code> / <code>PUT</code> / <code>DELETE /groups/{name}/hooks</code></td><td>Read, set, or clear a group's hooks</td></tr>
+          <tr><td><code>POST /instances/{name}/clear-lock</code></td><td>Clear a stuck in-progress mark (refused while a start/stop really runs)</td></tr>
+          <tr><td><code>POST /instances/{name}/migrate-abandon</code></td><td>Cancel an unfinished migration (5.8, II.2)</td></tr>
+          <tr><td><code>GET /schedule/missed</code> &middot; <code>POST /schedule/missed/apply</code></td><td>Nodes off their schedule; bring the chosen ones in line (<code>{"names": [...]}</code>)</td></tr>
+          <tr><td><code>GET /system/doctor</code> &middot; <code>GET /system/doctor/status</code></td><td>Run the consistency check now; the latest run's result</td></tr>
+          <tr><td><code>GET /system/backup</code> &middot; <code>GET /system/health</code></td><td>Backup status, the deployment key's stored copies; what needs attention and the alert channels</td></tr>
+          <tr><td><code>PUT /system/env-backup/recipients</code> &middot; <code>POST /system/env-backup/run</code></td><td>Set the age public key(s) for the operator-only settings copy; upload it now</td></tr>
+          <tr><td><code>POST /system/backup/verify</code> &middot; <code>POST /system/lease/take-over</code> &middot; <code>GET</code>/<code>PUT /system/host-watchdog</code></td><td>Restore test; take over as the active scheduler; Shutdown Watchdog on the scheduler's host</td></tr>
+          <tr><td><code>POST /system/heal</code> &middot; <code>POST /system/ssh-key/protect</code> &middot; <code>POST /system/alerts/test</code></td><td>Run the self-healing check; re-check the key's copies; send a test alert</td></tr>
+          <tr><td><code>GET /pending-deletions</code> &middot; <code>POST /pending-deletions/{id}/recover</code> &middot; <code>POST /pending-deletions/{id}/delete-now</code></td><td>Deletions waiting out their grace period; recover one; carry one out now (5.9)</td></tr>
+          <tr><td><code>GET /system/snapshots</code> &middot; <code>POST /system/restore-item/preview</code> &middot; <code>POST /system/restore-item</code></td><td>Database snapshots in the bucket; what a snapshot holds for one item next to what's there now; restore it (5.10)</td></tr>
+          <tr><td><code>GET</code> / <code>POST /system/release-copy</code> &middot; <code>GET</code> / <code>POST /system/bucket-protection</code></td><td>The release copy's status / upload it now; bucket versioning status / turn it on (5.10)</td></tr>
+          <tr><td><code>GET</code> / <code>POST /system/recovery-drill</code></td><td>The last recovery drill and its interval / run one now (5.10)</td></tr>
+          <tr><td><code>POST /system/credentials/rotate</code> &middot; <code>GET /system/credentials/rotation</code></td><td>Rotate one credential (<code>{"kind", "continue_rotation"}</code>); an SSH key rotation's progress (5.10)</td></tr>
+          <tr><td><code>GET /tokens/scopes</code></td><td>Every scope a token can hold, and what each bundle contains</td></tr>
+        </tbody></table></div>
+        <p>On a standby host (5.8), every route that changes something answers <code>409</code>; reads still work. Every route mirrors a CLI command one-to-one &mdash; there is no capability in the API that isn't equally available from the command line, and vice versa.</p>
+      </section>
+
+      <section class="chapter" id="c7-2">
+        <h2><span class="chno">7.2</span> Authentication: Two Credentials, Two Jobs</h2>
+        <p class="lede">The API supports "Login with Linode" &mdash; your team signs in with the exact same account credentials they already use for Cloud Manager, rather than a separate shared secret.</p>
+        <p>This login token answers exactly one question &mdash; <em>who is calling right now</em> &mdash; and is never used to talk to Linode's own API directly. A completely separate Linode API token, configured once by whoever deploys the tool, is what actually performs every real operation. This separation is deliberate: the scheduler has to keep running and firing scheduled actions even when nobody is logged in, which only works if the credential doing the real work isn't tied to any one person's login session.</p>
+        <p>The session token produced by logging in isn't tied to a browser either &mdash; it's a plain bearer token, sent the same way (an <code>Authorization</code> header) whether the caller is the dashboard or a script. Scripts and pipelines use an API token instead.</p>
+        <p><strong>API tokens.</strong> A named token is created by an administrator (<code>api-token-create</code>, or the dashboard's API tokens page) and shown exactly once; only a hash of it is stored. Each token carries one or more scopes &mdash; <code>read</code> (lists, status, history, savings, activity, schedules, groups, hooks, pending deletions, snapshots, system status, the consistency check), <code>operate</code> (start, stop, extend, group start/stop, run a hook, clear a stuck mark, catch up missed schedules, run a backup, save the release copy), <code>configure</code> (schedules, groups, membership, start order, manual-only mode, VPC address, recover a pending deletion, restore one item, bucket versioning, recovery drills, system settings) and <code>admin</code> (everything else, including hooks, which run as root, onboarding, migration, offboarding, deleting a pending deletion now, rotating credentials, logs and token management) &mdash; and, for a token meant to do exactly one thing, single operations instead &mdash; for example <code>instances:stop</code>, <code>groups:start</code>, <code>schedules:write</code>, <code>mode:write</code>, <code>hooks:run</code>, <code>instances:onboard</code>, <code>tokens:manage</code>, <code>system:read</code>, <code>system:doctor</code>, <code>system:backup</code>, <code>system:configure</code>, <code>deletions:read</code>, <code>deletions:recover</code>, <code>deletions:delete-now</code>, <code>backups:read</code>, <code>backups:restore-item</code>, <code>backups:release-copy</code>, <code>backups:versioning</code>, <code>backups:drill</code> or <code>credentials:rotate</code> (settings holding credentials &mdash; Object Storage keys, the SMTP password &mdash; stay admin-only; the full list is printed by <code>api-token-scopes</code>; a token holding <code>tokens:manage</code> can never create a token wider than itself). Tokens can be limited to particular instances and groups &mdash; manual-only instances included, which such a token can then start and stop &mdash; in which case lists show only what it covers and it can read only the operations it started. On the dashboard's API tokens page, instances and groups are picked from searchable lists of what exists, and the operations offered come from the server (<code>GET /tokens/scopes</code>). The scope a request needs is derived from the route itself, and any route not explicitly classified requires <code>admin</code>, so a narrower token can never reach new functionality by accident. Tokens can expire, can be revoked at any time, and every action taken with one is recorded in the instance's history under the token's name.</p>
+      </section>
+
+      <section class="chapter" id="c7-3">
+        <h2><span class="chno">7.3</span> The Web Dashboard</h2>
+        <p>A browser-based dashboard, served by the same API process, covers the full day-to-day surface: signing in, viewing and onboarding instances, configuring individual and group schedules, starting and stopping instances manually (with the auto-revert countdown shown plainly when active), managing group membership, configuring pre-stop hooks and post-start checks (with each instance's recent hook activity), both savings percentages, a <strong>Pending deletion</strong> page for recovering an offboarded instance or deleted backup, or deleting it now after typing its name (5.9), and, on the System backup page, restoring one item from a snapshot after comparing it with the current one (5.10). It's a thin visual layer over the identical API described above &mdash; nothing it does isn't equally available from the CLI.</p>
+        <p>Path B migration (Part II.2) can be driven entirely from the dashboard, not just the CLI &mdash; a guided flow walks through the same pre-flight checks, starts the migration, then presents the manual copy step directly in the browser: paste the guest's own device listing to confirm the correct disks before copying, run the copy in the Lish console as usual, then paste its output back in to verify and complete the migration. When a pre-migration backup is kept, the same step also offers <strong>Run the copy for me</strong>: the server runs the copy over Lish and finishes the migration on its own (or shows the one-time Lish key setup if the deployment's key isn't registered yet). A successful migration chains straight into onboarding automatically, landing on the instance's own detail page with no separate manual step. The same one-time SSH password/key fallback described in Part VIII.1 is available here too, for a node that doesn't yet trust this deployment's key.</p>
+              <p>Three pages show what the backend is doing without a terminal on the scheduler host. <strong>Activity</strong> lists everything the backend did, newest first and updating live: every start, stop, onboard, offboard, migration step and hook run, whether scheduled, manual or from the dashboard, with every warning and error they reported; each scheduler decision (fired, waiting on a dependency, failed); and every console command with who ran it. A banner reports when the scheduler last checked in and turns red when it stops, so a scheduled action that didn't happen because the scheduler wasn't running is visible immediately; each instance's page carries the same feed for that instance. Entries are kept for 30 days by default (<code>ACTIVITY_LOG_RETENTION_DAYS</code>). <strong>Logs</strong> tails the raw output of the scheduler, the API/dashboard server and backups live, plus the console&rsquo;s record of who ran which command and its exit code (a command&rsquo;s output is shown only in the console itself, since it can include hook scripts), alongside the database file's size; each service writes rotating files under <code>state/logs/</code>, which is why it works the same on a VM and on Kubernetes. <strong>Console</strong> runs this tool's own commands on the scheduler host with streamed output. It deliberately isn't a shell: only this tool's commands run, so nothing typed there can read the Linode API token or the deployment's SSH key, or start another program. Commands that ask for confirmation need <code>--yes</code>; the long-running services, database restore, SSH key backup and creating API tokens aren't offered. The console is available to dashboard logins only, never to API tokens, and every command is recorded with who ran it. Each assisted migration copy&rsquo;s Rescue Mode console session is listed on the Logs page as well, cleaned of terminal control codes and timestamped, and updates live while the copy runs; the migration page links straight to it. A session log can be deleted from the Logs page (or with <code>console-session-delete</code>) and is removed automatically once it has had no new output for the same retention period as the activity log.</p>
+      </section>
+
+      <!-- ============ PART VIII ============ -->
+      <div class="part-open" id="part-8">
+        <div class="part-num">Part VIII</div>
+        <h2 class="part-title">Security</h2>
+        <p class="part-dek">How SSH access, host-key trust, and the two credential types are handled.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c8-1">
+        <h2><span class="chno">8.1</span> One SSH Keypair, Never a Stored Credential</h2>
+        <p class="lede">SSH access is needed on an ongoing basis &mdash; to verify real reachability after every recreate, and to re-read the current authorized-keys list before every stop so a departing team member's revoked access isn't silently reinstated on the next cycle.</p>
+        <p>This never requires storing a customer's root credential anywhere. One SSH keypair belongs to the deployment itself &mdash; its private key lives only on the server running this tool, read fresh at each use, never written into the database. For a brand-new instance provisioned from a template, this deployment's public key is simply baked into the template once, with no credential ever exchanged. For an existing instance being brought under management, you add this deployment's public key yourself, the normal way you'd add any key &mdash; through access you already have.</p>
+        <p>The same SSH access carries pre-stop hooks and post-start checks (Part IV.3), which run as <code>root</code>. Anyone permitted to set a hook &mdash; from the CLI, the API, or the dashboard &mdash; can therefore run a root command on that instance, which is why every hook change is recorded with who made it and the full command, and why dashboard access deserves the same care as shell access to the instances themselves.</p>
+        <p>A one-time fallback exists on the onboarding screen for a customer who'd rather hand over temporary access than add the key themselves &mdash; a password or a private key pasted directly into the form. Neither is ever written to the database: a pasted password is used once, for that single request, and discarded; a pasted private key is written to a locked-down temporary file, used once, and deleted immediately afterward regardless of whether onboarding succeeds or fails.</p>
+        <p>The keypair can be replaced at any time with <code>rotate-credentials ssh-key</code> (5.10): no node is ever left trusting only a key the deployment no longer has, because the old key is withdrawn from each node only after a login using the new key alone has succeeded on it.</p>
+      </section>
+
+      <section class="chapter" id="c8-2">
+        <h2><span class="chno">8.2</span> Host-Key Trust Fails Closed</h2>
+        <p>Every steady-state reachability check verifies the presented SSH host key strictly against the one recorded for that instance (see Part I.5) &mdash; a mismatch is refused outright, exactly the way an ordinary SSH client would refuse it, rather than silently accepted. A genuinely new host key is only ever trusted at a deliberate first-contact moment (initial onboarding, or an explicit, operator-run key rotation) &mdash; never automatically during ordinary operation.</p>
+      </section>
+
+      <!-- ============ PART IX ============ -->
+      <div class="part-open" id="part-9">
+        <div class="part-num">Part IX</div>
+        <h2 class="part-title">Deployment Model</h2>
+        <p class="part-dek">Who runs this, on what, and why the design choices fit that model.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter" id="c9-1">
+        <h2><span class="chno">9.1</span> Self-Hosted, One Deployment Per Account</h2>
+        <p class="lede">This is a tool you run yourself, against your own Linode account &mdash; not a shared service operated on your behalf.</p>
+        <p>Every design choice downstream of this follows from it. The local registry is a single SQLite database file &mdash; no separate database server to stand up, secure, or back up, appropriate for a single-tenant, self-hosted deployment where the alternative (a full relational database server per customer) would be a heavy, unjustified operational ask for what's meant to stay a lightweight tool. If you register a dashboard login, it's your own OAuth application registered in your own Linode account &mdash; there is no shared vendor infrastructure of any kind in the credential path.</p>
+      </section>
+
+      <section class="chapter" id="c9-2">
+        <h2><span class="chno">9.2</span> High Availability, the Appropriate Way for This Workload</h2>
+        <p class="lede">This tool's availability model is built around fast, safe recovery rather than redundant, always-on replicas &mdash; a deliberate choice, not the absence of one.</p>
+        <p>An active-active setup (two or more scheduler processes running at once) and an active-passive setup (a hot standby ready to take over) both solve the same underlying problem: keeping a system reachable and correct through the brief window while one instance of it is down. Neither problem actually exists here in a way that justifies the cost of solving it. The scheduler's whole job is to notice a scheduled boundary has been crossed and fire a start or stop &mdash; it evaluates on a short, fixed interval with a tolerant matching window (typically a few minutes either side), not on every incoming request the way a system serving live traffic does. If the process is briefly down &mdash; a crash, a host reboot, a deploy &mdash; the next scheduled action simply fires a few seconds late, once an ordinary process supervisor brings it back up; nothing downstream notices or breaks, since nothing downstream is waiting on it in real time. Manual control (the CLI and, if you run it, the REST API and dashboard) works independently of the scheduler the entire time regardless &mdash; an operator is never blocked from starting or stopping a node by hand just because the scheduler happens to be restarting.</p>
+        <p>Active-active would trade that brief, harmless delay for a real correctness risk instead: two scheduler processes with no genuine coordination between them (a distributed lock, a leader election, a consensus protocol &mdash; the actual infrastructure "active-active" implies) could both decide the same instance is due for the same action at the same moment and race each other, or worse, one could fire a start while the other is mid-firing a stop for the same node. That's a new failure mode this tool would be introducing to solve a problem &mdash; a few seconds of scheduler downtime &mdash; that a plain restart already solves for free. Active-passive avoids the double-fire risk but still needs its own machinery to be worth anything: health checks to detect the primary is actually down (not just slow), a way for the standby to agree it should now be the one acting, and a shared or replicated view of state so the standby doesn't start from a blank slate. All of that is real, ongoing infrastructure with its own failure modes, kept running and paid for at all times, to protect against an outage that a single supervised process already recovers from in the time it takes to restart.</p>
+        <p>This is also, directly, a cost decision, not just an architectural one. This whole product exists to eliminate paying for compute that isn't earning its keep &mdash; running a second, always-on scheduler instance (active-passive) or two simultaneously-active ones (active-active) purely as insurance against a multi-second restart would mean paying for exactly the kind of idle, always-on capacity this tool is built to help you stop paying for, just moved from your managed fleet onto the tool's own infrastructure instead. The model actually used costs nothing extra to run: one process, under whatever process supervisor already ships with the host operating system, on the one machine you're already running this from.</p>
+        <div class="table-wrap"><table><thead><tr><th></th><th>Active-active / active-passive</th><th>What this tool does instead</th></tr></thead><tbody>
+          <tr><td>Extra compute to run and pay for</td><td>At least one more always-on instance, continuously</td><td>None &mdash; a single process on the machine you already have</td></tr>
+          <tr><td>New coordination infrastructure</td><td>Leader election / distributed locking, or health-check-driven failover</td><td>None needed &mdash; only one scheduler is ever running</td></tr>
+          <tr><td>New failure modes introduced</td><td>Split-brain double-firing, or a failed failover leaving nothing acting</td><td>None beyond "the process is briefly down," already handled</td></tr>
+          <tr><td>Recovery mechanism</td><td>An automated handoff to a second running process</td><td>A process supervisor restart (seconds), backed by tag/Object Storage recovery if the data itself is ever lost (Part V)</td></tr>
+          <tr><td>Right fit for</td><td>Systems serving live, latency-sensitive traffic</td><td>A scheduler whose actions tolerate a several-minute matching window by design</td></tr>
+        </tbody></table></div>
+        <p>Three layers make up the actual model, from most to least commonly needed: a process supervisor restarts the scheduler automatically if it ever crashes (9.3, below); a simple periodic file copy of the local database, plus the tag and Object Storage backups described in Part V, make a routine restore fast; and if even the local file itself is gone, the tag-based reconstruction described there is the guaranteed fallback of last resort. Deliberately absent, at every layer, is a second, simultaneously active scheduler process.</p>
+      </section>
+
+      <section class="chapter" id="c9-3">
+        <h2><span class="chno">9.3</span> Installing and Configuring</h2>
+        <p class="lede">A self-hosted tool means there's a genuine install step &mdash; brief, and the same on every deployment.</p>
+        <p><strong>The quick way: <code>install.sh</code>.</strong> On a fresh host (Ubuntu 24.04 LTS is the recommended choice; any 64-bit x86 systemd distribution with glibc 2.28 or newer &mdash; Ubuntu 22.04+, Debian 12+, RHEL/Rocky/Alma 9+ &mdash; works the same way), clone the repository and run <code>sudo ./install.sh install</code>. It downloads the latest release (a compiled program with the built dashboard; no Python or Node.js needed on the host) and checks its SHA-256 checksum, creates a dedicated unprivileged service user, asks for the settings in the table below and writes them to <code>.env</code> (readable only by that user), creates the deployment's SSH key (Part VIII.1) &mdash; or takes an existing one with <code>--ssh-key</code>. With <code>--domain &lt;name&gt;</code> it also installs Caddy and serves the dashboard at <code>https://&lt;name&gt;</code>, with a certificate Caddy obtains and renews itself (the name's A record must point at the host, and ports 80 and 443 must be open). It then installs the poller and the API server as supervised services, plus an hourly backup timer (Part V), starts them, and prints the deployment's public SSH key, which every managed instance must trust. With <code>--backup-ssh-key</code> it also stores that key in Object Storage, encrypted with a passphrase you choose. Re-running it later installs the newer release next to the current one and restarts the services, keeping the configuration, key and database; the previous release stays, so going back is one command. After installing, the tool runs as <code>sudo linode-instance-scheduler &lt;command&gt;</code>. <code>install.sh recover</code> is the same procedure on a replacement host, with everything restored first (Part V.7). The rest of this section describes the same steps done by hand.</p>
+        <p>The tool is one compiled program with no database server, no message queue, and no other infrastructure of its own to stand up. Unpacking a release archive is the entire installation:</p>
+        <div class="table-wrap"><table><thead><tr><th>Step</th><th>What it does</th></tr></thead><tbody>
+          <tr><td><code>curl -fsSLO &hellip;/linode-instance-scheduler-linux-amd64.tar.gz</code> (and its <code>.sha256</code>)</td><td>Gets the release from the GitHub release page &mdash; on the one centralized, persistent machine your whole team will use, not a personal laptop (see 9.1).</td></tr>
+          <tr><td><code>sha256sum -c &hellip;.sha256</code></td><td>Checks it is exactly the published file.</td></tr>
+          <tr><td><code>tar -C /opt/linode-instance-scheduler -xzf &hellip;</code> and <code>ln -sfn app-&lt;version&gt; current</code></td><td>Unpacks the program, its libraries and the built dashboard into a versioned directory; state, settings and backups live one level up, so an upgrade only adds a new version and moves the link.</td></tr>
+          <tr><td><code>.env</code> in the install directory</td><td>Your configuration file &mdash; readable only by the service user, since it's about to hold a real credential (the repository's <code>.env.example</code> lists every setting).</td></tr>
+        </tbody></table></div>
+        <p>Configuration is one flat file, <code>.env</code>, read once at process startup. Exactly one setting is required to run anything at all &mdash; a Linode Personal Access Token with read/write access to Linodes, Volumes, and IPs (plus VPCs read-only if any instance uses a VPC interface, and Account read-only for the startup check), since this tool creates, deletes, and tags real Linode resources on your behalf. A full-access token also works, but grants far more than the tool ever uses. Everything else is optional, and each piece only matters if you're using the specific feature it enables:</p>
+        <div class="table-wrap"><table><thead><tr><th>Setting</th><th>Required?</th><th>Enables</th></tr></thead><tbody>
+          <tr><td><code>LINODE_API_TOKEN</code></td><td>Always</td><td>Every real operation this tool performs.</td></tr>
+          <tr><td><code>LINODE_SSH_KEY_PATH</code></td><td>No &mdash; has a working default</td><td>Where this deployment's own SSH key lives (Part VIII.1).</td></tr>
+          <tr><td><code>LINODE_OAUTH_CLIENT_ID</code> / <code>_SECRET</code> / <code>LINODE_OAUTH_REDIRECT_URI</code></td><td>Only for dashboard login</td><td>"Login with Linode" for the web dashboard (Part VII.2).</td></tr>
+          <tr><td><code>LINODE_OBJ_STORAGE_BUCKET</code> / <code>_ENDPOINT</code> / <code>_ACCESS_KEY</code> / <code>_SECRET_KEY</code></td><td>Only for the fuller backup layer</td><td>Object Storage backup, described fully in Part V.</td></tr>
+          <tr><td><code>LINODE_API_MAX_REQUESTS_PER_SECOND</code></td><td>No &mdash; defaults to 10</td><td>The shared Linode API request budget for one process (Part III.3); <code>0</code> removes the cap.</td></tr>
+          <tr><td><code>LIS_DELETION_GRACE_DAYS</code></td><td>No &mdash; defaults to 7</td><td>How long offboarded instances and deleted backups stay recoverable (Part V.9); <code>0</code> deletes at once.</td></tr>
+          <tr><td><code>LIS_RECOVERY_DRILL_DAYS</code></td><td>No &mdash; off by default</td><td>Scheduled recovery drills, e.g. <code>7</code> for weekly (Part V.10).</td></tr>
+          <tr><td><code>LIS_ALLOW_STANDBY_CHANGES</code></td><td>No</td><td><code>1</code> lets a standby host make changes anyway (Part V.8).</td></tr>
+        </tbody></table></div>
+        <p>Once <code>.env</code> has a real token in it, <code>linode-instance-scheduler list</code> confirms the install itself is working (it prints cleanly whether or not anything is onboarded yet), and a real command against the API &mdash; <code>status</code>, or onboarding a first instance &mdash; confirms the token is valid. From there, running the scheduler and, if you want it, the API server and dashboard as supervised background processes is the last step before this is a genuinely running deployment &mdash; see the Operations Guide for the exact process-supervisor configuration.</p>
+      </section>
+
+      <section class="chapter" id="c9-4">
+        <h2><span class="chno">9.4</span> Deploying on Kubernetes Instead of a VM</h2>
+        <p class="lede">The same application, packaged as a container, for customers who already run a Linode Kubernetes Engine (LKE) cluster and would rather run this tool there than provision a separate host.</p>
+        <p>Nothing about the tool itself changes between the two deployment models &mdash; the same SQLite registry, the same single-scheduler-process guarantee from 9.2, the same CLI, REST API, and dashboard. What differs is only how it's packaged and supervised: one Kubernetes Deployment, pinned to exactly one replica, runs the scheduler and the API server as two containers inside a single pod, sharing one persistent volume for the registry, lock files, and SSH host-key trust store. Running two containers in one pod, rather than two separate Deployments, is what lets both processes safely share that state &mdash; Kubernetes guarantees they land on the same node, the same trust boundary the VM model already relies on between two sibling processes on one host. A <code>Recreate</code> deployment strategy (the old pod fully stops before a new one starts) preserves the single-writer guarantee from 9.2 through an upgrade or a config change, the same way a plain process restart does on a VM.</p>
+        <p>Everything downstream of installation &mdash; scheduling, groups, manual override, disaster recovery, the security model &mdash; is identical to the rest of this guide regardless of which deployment model is in use, with two exceptions: the release copy and recovery drills (Part V.10) are built around <code>install.sh</code> on a VM, since on Kubernetes the container image itself is the release; and settings and the SSH key come from Kubernetes Secrets, so credentials are rotated by updating those Secrets rather than with <code>rotate-credentials</code>. The Operations Guide's DEPLOYMENT-LKE.md covers the actual commands (building the image, the manifests, exposing the API/dashboard, backups, upgrades).</p>
+        <p>One optional integration point exists for customers whose cluster already runs the separate, sibling <a href="https://github.com/sandipgangdhar/Linode-LKE-Private-Network">Linode-LKE-Private-Network</a> project &mdash; automation many LKE customers already deploy to give cluster nodes a private VLAN/VPC network interface. That project installs an admission-time policy that automatically requires every new pod on the cluster to land on a specially-labeled node, unless its namespace opts out. This tool's own deployment tooling detects whether that policy is present and asks, once, whether to run under it or opt out &mdash; a single namespace label is the entire integration surface. The two projects never share code, a database, or an API with each other; this tool's own job (calling the public Linode API to manage other instances) never requires a private network interface for itself, so opting out is the recommended default for most deployments.</p>
+      </section>
+
+      <section class="chapter" id="c9-5">
+        <h2><span class="chno">9.5</span> Rolling Out to Production: Best Practices</h2>
+        <p class="lede">The safest path from a fresh install to a large production fleet is a staged one: plan the inventory, stand up one well-configured deployment, pilot it on non-production instances for a week, prove it at your real scale, then onboard production in waves.</p>
+        <p>None of what follows changes how the tool behaves &mdash; it is guidance on how to deploy and operate it so that the first time you discover something about your own fleet (an instance on local disk, a plan with little regional capacity at 9am, an application that needs a clean shutdown) it happens in a pilot, not in production.</p>
+
+        <p><strong>1. Before you deploy: know your fleet.</strong></p>
+        <div class="table-wrap"><table><thead><tr><th>Practice</th><th>Why</th></tr></thead><tbody>
+          <tr><td>Inventory every instance you intend to manage: region, plan, networking (public, VPC, VLAN), whether it boots from local disk or a Block Storage volume, and its data volumes.</td><td>Instances on local disk need a one-time migration (Part II.2) with real downtime &mdash; plan maintenance windows for them up front. Instances with only VPC/VLAN interfaces need the scheduler to have network reachability into that VPC (Part I.4).</td></tr>
+          <tr><td>Confirm every instance runs a supported OS (Part II.3) with cloud-init and the Akamai datasource (23.3.1 or later, or an older build with the datasource backported).</td><td>Every recreate re-applies the instance's network configuration through cloud-init; an image without it can't be onboarded.</td></tr>
+          <tr><td>Agree schedules and timezones with each application's owners, and group instances that share a schedule.</td><td>Groups (Part III.1) keep a large fleet manageable; an individual schedule should be the exception, not the rule.</td></tr>
+          <tr><td>Decide which instances need a pre-stop hook or a post-start check (Part IV.3) &mdash; databases, queues, anything with in-memory state or a slow warm-up.</td><td>A clean shutdown before every stop, and a real readiness check after every start, is the difference between "the VM came back" and "the application came back."</td></tr>
+          <tr><td>Check your Linode account limits against your peak fleet: running instances, Block Storage volumes, and reserved IPs, all at the same time.</td><td>Every managed instance keeps its volumes and reserved IP permanently, and at the morning start every scheduled instance exists at once. Ask Linode support to raise limits before onboarding, not during.</td></tr>
+          <tr><td>For large fleets, confirm regional capacity for the plans you use at your peak start time.</td><td>A start is a real instance creation. If a region is briefly short of a plan, the start fails and is retried for up to an hour (Part III.3); for many instances of one plan at one moment, stagger start times.</td></tr>
+        </tbody></table></div>
+
+        <p><strong>2. The deployment itself.</strong></p>
+        <div class="table-wrap"><table><thead><tr><th>Practice</th><th>Why</th></tr></thead><tbody>
+          <tr><td>Run one deployment per Linode account, on a small dedicated VM (or one LKE deployment, 9.4) in the same region as the fleet.</td><td>One scheduler process is the design (9.2); being in-region keeps API and SSH round-trips short.</td></tr>
+          <tr><td>Run the scheduler and the API server under a process supervisor (systemd <code>Restart=always</code>, or Kubernetes).</td><td>Recovery from a crash or reboot is a restart, not a failover.</td></tr>
+          <tr><td>Use a dedicated API token with only the scopes the tool needs (9.3), not shared with other automation.</td><td>Limits the blast radius of a leaked token, and keeps the tool's own request budget to itself.</td></tr>
+          <tr><td>Use one deployment-wide SSH keypair kept only on the scheduler host; add its public key to each instance yourself.</td><td>The tool never needs, and should never be given, per-instance root passwords (Part VIII.1).</td></tr>
+          <tr><td>Allow SSH from the scheduler host to every managed instance (firewalls, VPC routing).</td><td>Every start finishes with a real SSH reachability check, and every stop captures current SSH keys first.</td></tr>
+          <tr><td>Put the dashboard behind HTTPS (a reverse proxy) with "Login with Linode" configured; never expose it on plain HTTP.</td><td>Anyone who can use the dashboard can start, stop, and offboard instances, and set hooks that run as root.</td></tr>
+          <tr><td>Configure Object Storage backup with a key scoped to its own bucket, and schedule <code>backup</code> (hourly or daily).</td><td>This is what lets everything &mdash; including complex network setups, SSH keys, and hook scripts &mdash; be recovered after losing the scheduler host (Part V).</td></tr>
+        </tbody></table></div>
+
+        <p><strong>3. Onboarding and scheduling.</strong></p>
+        <div class="table-wrap"><table><thead><tr><th>Practice</th><th>Why</th></tr></thead><tbody>
+          <tr><td>Onboard in waves, non-production first. Run one manual stop and start for each instance before giving it a schedule.</td><td>Confirms the instance, its data volumes, its network, and its application all survive a cycle before anything happens unattended.</td></tr>
+          <tr><td>Expect a new Linode instance ID on every start; the IP addresses, volumes, data, and label stay the same.</td><td>Monitoring, alerting, or billing reports keyed on the Linode instance ID should key on the label, tags, or IP instead.</td></tr>
+          <tr><td>For 100+ instances, keep the scheduler's parallelism at its default (10) to begin with, and stagger group start times by 5&ndash;10 minutes.</td><td>Spreads both API requests and regional capacity demand; raise <code>--max-parallel</code> only once you've seen how long your fleet's morning start actually takes.</td></tr>
+          <tr><td>Leave manual-override auto-revert on (Part IV.1).</td><td>A forgotten manual start stops itself instead of running all night.</td></tr>
+          <tr><td>Disable a group's schedule during maintenance windows rather than working around the scheduler.</td><td>The scheduler will (correctly) act on a due boundary; disabling the schedule is the explicit way to say "not now."</td></tr>
+          <tr><td>For a window that crosses midnight, use one overnight rule (a stop time earlier than the start time) rather than two rules split at midnight.</td><td>One rule keeps the instance running straight through; two rules would stop it at midnight and start it again moments later.</td></tr>
+          <tr><td>For instances with only VPC/VLAN interfaces, run the scheduler inside the same VPC (or on the same VLAN).</td><td>The scheduler reaches such an instance at its private address for every reachability check and key capture (Part I.4).</td></tr>
+        </tbody></table></div>
+
+        <p><strong>4. Monitoring.</strong></p>
+        <div class="table-wrap"><table><thead><tr><th>Watch</th><th>Why</th></tr></thead><tbody>
+          <tr><td>The scheduler process is running (or, with <code>poll --once</code> under cron, its exit code is 0).</td><td>A non-zero exit means at least one scheduled action failed in that pass.</td></tr>
+          <tr><td>Failed starts and stops in <code>history</code>, and "insufficient capacity" or 429 messages in the scheduler's output.</td><td>Failures are retried automatically for an hour, but a persistent one needs a person.</td></tr>
+          <tr><td>Instances the tool reports as stopped are genuinely gone in Cloud Manager.</td><td>Confirms compute billing has actually stopped.</td></tr>
+          <tr><td>Configured versus actual savings for each group, weekly (Part IV.2).</td><td>A widening gap means people are routinely overriding the schedule.</td></tr>
+        </tbody></table></div>
+
+        <p><strong>5. A recommended rollout.</strong></p>
+        <div class="table-wrap"><table><thead><tr><th>Stage</th><th>What to do</th><th>Move on when</th></tr></thead><tbody>
+          <tr><td>Pilot (one week)</td><td>Onboard non-production instances only, on their real schedules, with hooks where needed. Run one deliberate recovery drill: restore the registry from a backup (or rebuild it) on a copy of the deployment.</td><td>Seven days with no unexplained failed start or stop; the drill recovers everything; application owners confirm their services come back correctly after each daily cycle.</td></tr>
+          <tr><td>Scale rehearsal</td><td>Run a real start and stop of as many instances as production will have, in the production region and plans (non-production instances, or a temporary set), and time it.</td><td>The morning start completes within your business's tolerance, with no capacity or rate-limit failures left after the retry window.</td></tr>
+          <tr><td>Production, in waves</td><td>Onboard production in groups of 20&ndash;30, one wave every few days, each with its first cycles watched.</td><td>Each wave runs cleanly before the next is added.</td></tr>
+          <tr><td>Steady state</td><td>Upgrade only to tagged releases, on a non-production deployment first, with a <code>backup</code> taken immediately before.</td><td>&mdash;</td></tr>
+        </tbody></table></div>
+        <div class="callout">
+          <p>The Operations Guide carries the same practices as a printable checklist, alongside the exact commands for each step.</p>
+        </div>
+      </section>
+
+      <!-- ============ APPENDIX ============ -->
+      <div class="part-open" id="part-A">
+        <div class="part-num">Appendix</div>
+        <h2 class="part-title">Glossary</h2>
+        <p class="part-dek">Terms of art used throughout this guide.</p>
+        <div class="part-rule"></div>
+      </div>
+
+      <section class="chapter glossary" id="cA-1">
+        <h2><span class="chno">A.1</span> Terms of Art</h2>
+        <dl>
+          <dt><code>reserved IP</code></dt><dd>A public IPv4 address held independently of any instance, so it survives that instance being deleted and can be reattached to whatever's recreated in its place. Permanently locked to the region it was first reserved in; carries a small charge while unattached.</dd>
+          <dt>golden template / template volume</dt><dd>A Block Storage volume holding a fully prepared OS image, cloned once per new logical instance at onboarding (Path A).</dd>
+          <dt>legacy interface model / newer interface model</dt><dd>The two mutually exclusive ways a Linode instance's networking can be configured &mdash; see Part I.3.</dd>
+          <dt>manual override</dt><dd>Starting an instance manually outside its own configured schedule window; arms an auto-revert countdown (Part IV.1).</dd>
+          <dt>schedule group</dt><dd>A named, shared schedule several instances can follow at once; an instance's own individual schedule, if enabled, always overrides its group's (Part III.1).</dd>
+          <dt>rebuild</dt><dd>The disaster-recovery command that reconstructs the local registry entirely from tags recorded on live Linode resources (Part V).</dd>
+          <dt>Path A / Path B</dt><dd>The two onboarding routes &mdash; a fresh instance from a template, or an existing instance migrated onto a volume in place (Part II).</dd>
+          <dt><code>unreachable</code></dt><dd>A status meaning a real instance exists but hasn't yet passed its network reachability check &mdash; either because it just started and the check hasn't completed, or because it was found powered off out-of-band. Resolved by simply running <code>start</code> again (Part 5.3).</dd>
+          <dt>pending deletion</dt><dd>An offboarded instance or deleted backup whose resources are kept, marked with <code>lis-pending-*</code> tags, until its grace period ends; it can be recovered until then (Part V.9).</dd>
+          <dt><code>needs_manual_recovery</code></dt><dd>A status meaning disaster recovery restored an instance's identity but couldn't determine its network configuration or SSH access from tags or Object Storage alone. Resolved by booting the instance once manually, then running <code>onboard</code> again (Part 5.3).</dd>
+        </dl>
+      </section>
+
+      <div class="book-footer">
+        <span class="footer-desc">Instance Scheduler &middot; Definitive Guide &middot; Edition 1</span>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script>
+(function(){
+  var parts = [
+    {label:"Part 0", title:"Why This Exists", chapters:[
+      ["c0-1","0.1 The Billing Problem"],["c0-2","0.2 Who This Is For"],["c0-3","0.3 The Core Mechanism"]
+    ]},
+    {label:"Part I", title:"How It Works", chapters:[
+      ["c1-1","1.1 What Survives"],["c1-2","1.2 Why a Block Volume"],
+      ["c1-3","1.3 The Two Networking Models"],["c1-4","1.4 Staying Reachable"],
+      ["c1-5","1.5 SSH Host-Key Stability"]
+    ]},
+    {label:"Part II", title:"Onboarding", chapters:[
+      ["c2-1","2.1 Path A &mdash; Greenfield"],["c2-2","2.2 Path B &mdash; Migration"],["c2-3","2.3 Supported Operating Systems"]
+    ]},
+    {label:"Part III", title:"Scheduling", chapters:[
+      ["c3-1","3.1 Individual &amp; Group"],["c3-2","3.2 Timezones"],["c3-3","3.3 The Poller"],["c3-4","3.4 Start Order"]
+    ]},
+    {label:"Part IV", title:"Manual Control &amp; Savings", chapters:[
+      ["c4-1","4.1 Override &amp; Auto-Revert"],["c4-2","4.2 Savings as a Percentage"],
+      ["c4-3","4.3 Hooks"],["c4-4","4.4 Manual-Only &amp; Scripting"],["c4-5","4.5 Holidays"],["c4-6","4.6 LKE Node Pools"]
+    ]},
+    {label:"Part V", title:"Disaster Recovery", chapters:[
+      ["c5-1","5.1 The Registry"],["c5-2","5.2 What's Stored Where"],
+      ["c5-3","5.3 Recovering a Stopped Instance"],["c5-4","5.4 Self-Healing Writes"],
+      ["c5-5","5.5 A Corrupted Database"],["c5-6","5.6 Edge Cases"],["c5-7","5.7 Moving to a New Host"],["c5-8","5.8 Self-Healing &amp; Alerts"],
+      ["c5-9","5.9 Deletion Grace Period"],["c5-10","5.10 Proving Recovery"]
+    ]},
+    {label:"Part VI", title:"The CLI", chapters:[
+      ["c6-1","6.1 Onboarding &amp; Lifecycle"],["c6-2","6.2 Migration"],
+      ["c6-3","6.3 Scheduling"],["c6-4","6.4 Groups"],["c6-5","6.5 Recovery &amp; Maintenance"]
+    ]},
+    {label:"Part VII", title:"API &amp; Dashboard", chapters:[
+      ["c7-1","7.1 Route Surface"],["c7-2","7.2 Authentication"],["c7-3","7.3 The Dashboard"]
+    ]},
+    {label:"Part VIII", title:"Security", chapters:[
+      ["c8-1","8.1 SSH Keypair"],["c8-2","8.2 Host-Key Trust"]
+    ]},
+    {label:"Part IX", title:"Deployment Model", chapters:[
+      ["c9-1","9.1 Self-Hosted"],["c9-2","9.2 High Availability"],
+      ["c9-3","9.3 Installing and Configuring"],["c9-4","9.4 Deploying on Kubernetes"],
+      ["c9-5","9.5 Rolling Out to Production"]
+    ]},
+    {label:"Appendix", title:"Glossary", chapters:[
+      ["cA-1","A.1 Terms of Art"]
+    ]}
+  ];
+
+  var root = document.getElementById('tocRoot');
+  var frag = document.createDocumentFragment();
+  parts.forEach(function(p){
+    var div = document.createElement('div');
+    div.className = 'toc-part';
+    var lbl = document.createElement('div');
+    lbl.className = 'toc-part-label';
+    lbl.innerHTML = '<b>'+p.label+'</b><span>'+p.title+'</span>';
+    div.appendChild(lbl);
+    var ul = document.createElement('ul');
+    ul.className = 'toc-list';
+    p.chapters.forEach(function(c){
+      var li = document.createElement('li');
+      var a = document.createElement('a');
+      a.href = '#'+c[0];
+      a.innerHTML = c[1];
+      a.dataset.target = c[0];
+      li.appendChild(a);
+      ul.appendChild(li);
+    });
+    div.appendChild(ul);
+    frag.appendChild(div);
+  });
+  root.appendChild(frag);
+
+  var links = Array.prototype.slice.call(document.querySelectorAll('.toc-list a'));
+  var sections = links.map(function(a){ return document.getElementById(a.dataset.target); }).filter(Boolean);
+
+  function setActive(id){
+    links.forEach(function(a){ a.classList.toggle('active', a.dataset.target === id); });
+  }
+
+  try{
+    var io = new IntersectionObserver(function(entries){
+      var best = null, bestTop = Infinity;
+      entries.forEach(function(e){
+        if(e.isIntersecting){
+          var top = e.boundingClientRect.top;
+          if(top >= 0 && top < bestTop){ bestTop = top; best = e.target.id; }
+        }
+      });
+      if(best) setActive(best);
+    }, {rootMargin: "-10% 0px -70% 0px", threshold: [0, 1]});
+    sections.forEach(function(s){ io.observe(s); });
+  }catch(e){}
+
+  var menuBtn = document.getElementById('menuBtn');
+  var sidebar = document.getElementById('sidebar');
+  if(menuBtn){
+    menuBtn.addEventListener('click', function(){
+      sidebar.classList.toggle('open');
+    });
+    links.forEach(function(a){
+      a.addEventListener('click', function(){ sidebar.classList.remove('open'); });
+    });
+  }
+})();
+</script>
+</body>
+</html>

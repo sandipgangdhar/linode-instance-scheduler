@@ -1,0 +1,4 @@
+# The image is built from a release archive only (see the Dockerfile); nothing else in this
+# directory belongs in the build context -- in particular never a real .env or state/.
+*
+!linode-instance-scheduler-linux-*.tar.gz

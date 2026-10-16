@@ -1,0 +1,32 @@
+# pvc.yaml
+#
+# Persistent storage for state/ -- the SQLite registry (instances.db), per-instance
+# lock files, and this tool's own known_hosts file. This is genuinely local, durable state
+# (this tool is self-hosted, one deployment per Linode account, with no external database
+# server of its own), so it has to survive a pod restart/reschedule; an emptyDir or the
+# container's own writable layer would silently lose it.
+#
+# storageClassName references LKE's own built-in Linode Block Storage class with a Retain
+# reclaim policy -- confirm the exact name on your cluster with
+# `kubectl get storageclass` first (it's normally pre-provisioned by LKE itself, not
+# something this project creates); adjust below if yours differs. Retain (rather than
+# Delete) is deliberate: this volume is the one thing on this whole deployment that isn't
+# trivially reproducible from Linode's own API, so an accidental PVC deletion should leave
+# the underlying Block Storage volume recoverable, not gone.
+#
+# ReadWriteOnce is correct and required, not a limitation to work around -- see
+# k8s/deployment.yaml's own comment on why this tool intentionally runs as exactly one
+# replica. 2Gi is generous for a SQLite file, lock files, and audit history even for a large
+# fleet; resize later if you genuinely need to (see the LKE deployment guide).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: linode-instance-scheduler-state
+  namespace: linode-instance-scheduler
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: linode-block-storage-retain
+  resources:
+    requests:
+      storage: 2Gi

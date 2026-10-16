@@ -1,0 +1,26 @@
+# service.loadbalancer.yaml
+#
+# Opt-in alternative to service.clusterip.yaml -- exposes the REST API + dashboard publicly.
+# type: LoadBalancer on Linode LKE provisions a real, billed Linode NodeBalancer
+# automatically via the cluster's own cloud-controller-manager; nothing else to configure
+# for the NodeBalancer itself. Only use this if you deliberately want the dashboard/API
+# reachable from outside the cluster and are not relying on your own Ingress/VLAN/NAT path
+# instead -- see the LKE deployment guide's own §6 for the tradeoffs, and set
+# LINODE_OAUTH_REDIRECT_URI in k8s/secret.yaml to match whatever hostname/IP this
+# NodeBalancer ends up with before enabling "Login with Linode".
+#
+# Applied by k8s/deploy-lke.sh only when run with --expose loadbalancer; otherwise
+# service.clusterip.yaml is what actually gets deployed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: linode-instance-scheduler-api
+  namespace: linode-instance-scheduler
+spec:
+  type: LoadBalancer
+  selector:
+    app: linode-instance-scheduler
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

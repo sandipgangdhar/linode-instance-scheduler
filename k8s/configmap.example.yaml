@@ -1,0 +1,37 @@
+# configmap.example.yaml
+#
+# Non-secret, tunable settings for the scheduler and API containers. Copy this file to
+# configmap.yaml (gitignored is NOT required here -- nothing in this file is sensitive --
+# but it's still kept separate from this example so `deploy-lke.sh` can tell "a real,
+# reviewed file exists" apart from "the placeholder was applied as-is", matching every real
+# secret template in this repo). Applied with `kubectl apply -f`, then
+# `kubectl rollout restart deployment/linode-instance-scheduler -n <namespace>` to pick up a
+# change -- env vars from a ConfigMap don't reach an already-running pod on their own.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: linode-instance-scheduler-config
+  namespace: linode-instance-scheduler
+data:
+  # How often the scheduler checks what is due, in seconds. A check only reads the local
+  # database (no Linode API calls); starts/stops run on separate workers, and a check also runs
+  # as soon as one finishes. 15 is the `poll` command's own default.
+  POLL_INTERVAL_SECONDS: "15"
+  # How long after a schedule rule's start_time/stop_time the action stays due. Within this
+  # window a missed or failed start/stop (a slow tick, a brief outage, no capacity in the
+  # region) is retried on every tick, unless something already started/stopped the instance
+  # since. Must be >= POLL_INTERVAL_SECONDS above (the CLI refuses to start otherwise).
+  # 3600 (one hour) is the `poll` command's own default.
+  POLL_WINDOW_SECONDS: "3600"
+  # How many due starts/stops run at the same time. Higher finishes a large fleet sooner but
+  # makes more Linode API calls at once. 10 is the default; the maximum is 50.
+  POLL_MAX_PARALLEL: "10"
+  # Optional -- cap on Linode API requests per second for this process (all workers share it).
+  # A rate-limited (429) response also pauses every worker for the time the API asks. Default
+  # 10; 0 removes the cap (the shared pause on 429 still applies).
+  # LINODE_API_MAX_REQUESTS_PER_SECOND: "10"
+  # Optional -- comma-separated browser origins allowed to call the REST API (CORS). Leave
+  # commented out / remove the key entirely to disable CORS (the default -- appropriate
+  # unless a separately-hosted browser dashboard needs to call this API cross-origin; the
+  # dashboard this deployment serves itself, under /ui/*, never needs this).
+  # API_ALLOWED_ORIGINS: "https://dashboard.example.com"

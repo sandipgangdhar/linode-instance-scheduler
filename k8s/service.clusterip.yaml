@@ -1,0 +1,26 @@
+# service.clusterip.yaml
+#
+# Default exposure for the REST API + dashboard: in-cluster only. Matches this project's own
+# documented posture (docs/deployment-guide.md's VM guide: "No inbound access is required
+# unless you're exposing the REST API/dashboard to other people") -- nothing about running
+# on Kubernetes should change that default. Reach it via `kubectl port-forward`, your own
+# Ingress, or -- if this cluster already runs Linode-LKE-Private-Network's VLAN/NAT path and
+# you chose to deploy under its gating (see k8s/deploy-lke.sh) -- your existing private
+# network, whichever way you already reach other in-cluster services.
+#
+# This is the file k8s/deploy-lke.sh applies by default. Use service.loadbalancer.yaml
+# instead only if you deliberately want this exposed publicly via a real Linode NodeBalancer
+# (`--expose loadbalancer` on deploy-lke.sh, or `kubectl apply -f` it directly).
+apiVersion: v1
+kind: Service
+metadata:
+  name: linode-instance-scheduler-api
+  namespace: linode-instance-scheduler
+spec:
+  type: ClusterIP
+  selector:
+    app: linode-instance-scheduler
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
