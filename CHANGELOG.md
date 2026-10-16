@@ -4,6 +4,28 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.16.0
+
+### Added
+- `ask`: ask a question about the product or paste an error, and get the answer worked out on
+  this host -- nothing is sent anywhere. A small model on the host's CPU chooses among the
+  product's own reviewed answers (every feature: what it is, when to use it, how; day-2 tasks;
+  every command) and its error catalog, and fills in this deployment's facts: its version and
+  install type, a named node's effective schedule, holiday and extension, or a review of the
+  deployment against the recommendations. Typos and other wordings are understood; when it isn't
+  sure it says so and lists the closest topics. It learns on the host from "did this help?"
+  feedback and from failures seen there. CLI `ask`, `ask-feedback`, `ask-learn`; API
+  `POST /system/ask`, `POST /system/ask/feedback`, `POST /system/ask/learn`,
+  `GET /system/ask/answers` (scope `system:ask`, in `read`); dashboard Ask page (with "Learn
+  now") and an Ask card on Instances.
+- `explain`: paste an error (or `--file`, or `--name` for a node's last failure) for its cause,
+  read-only checks against this deployment and what to do; "Explain this" on every dashboard error
+  banner. API `POST /system/explain`.
+- `doctor --fix`: shows the repairs for what `doctor` found and applies them after you confirm
+  (`--only`, `--name`, `--yes`); the dashboard's Consistency check card has "Review fixes". The
+  active scheduler applies the safe ones itself after its daily check (re-upload an Object Storage
+  record, rewrite a node's tags, clear a stale in-progress mark); `LIS_AUTOFIX=off` stops that.
+
 ## v1.15.0
 
 **Upgrading from an earlier version:** this repository's history was restarted with this release,

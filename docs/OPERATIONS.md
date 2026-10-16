@@ -486,6 +486,27 @@ it's gone. `LIS_ALLOW_STANDBY_CHANGES=1` overrides. While the bucket can't be re
 scheduler that was active carries on and a host that wasn't active stays standby;
 `scheduler-lease --take-over` overrides.
 
+### Repairs, error explanations and questions (`doctor --fix`, `explain`, `ask`)
+
+`doctor --fix` turns what `doctor` found into a plan, shows it, asks once, applies it and checks
+again (`--only D7` for one kind of finding, `--name <node>` for one node, `--yes` for scripts).
+The repairs only bring the copies back in line with the database or reconcile a node with the
+account: re-upload an Object Storage record, rewrite a node's tags, clear an in-progress mark
+nothing holds, `heal` a node, move a stopped node off a VPC address another instance took. The
+first three are applied automatically by the active scheduler after its daily check
+(`LIS_AUTOFIX=off` stops that); the rest always wait for a person. Nothing is deleted, and a
+finding only a person can judge is listed, never repaired.
+
+`explain "<error>"` (or `--file <log>`, or `--name <node>` for its last failure) gives an error's
+cause, read-only checks against this deployment and what to do. `ask "<question or error>"`
+answers questions about the product -- how to do a task, what a feature is for, which rule wins,
+whether this deployment follows the recommendations -- with this deployment's facts filled in.
+Both run on this host with nothing sent anywhere: `ask` uses a small model on the host's CPU that
+only chooses among this product's own reviewed answers and error catalog, and says "not sure"
+(listing the closest topics) rather than guess. It learns on the host from `ask-feedback` and,
+once a day, from the failures seen here (`ask-learn`, or "Learn now" on the Ask page, runs that now). The dashboard has an Ask page,
+an Ask card on Instances and "Explain this" on every error banner.
+
 ### Recovery drills
 
 `recovery-drill` proves a new host could take over: it creates a throwaway `g6-nanode-1` (tagged
@@ -838,6 +859,9 @@ a week, rehearse at your real scale, then onboard production in waves.
 | Steady state | Upgrade only to tagged releases, non-production deployment first, `backup` immediately before (see Upgrading). | — |
 
 ## Troubleshooting
+
+First, `linode-instance-scheduler ask "<the error or question>"` (or the dashboard's Ask page):
+it answers most of these with this deployment's own facts.
 
 | Symptom | Most likely cause | What to check / do |
 |---|---|---|
