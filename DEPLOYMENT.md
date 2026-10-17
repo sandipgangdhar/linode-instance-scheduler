@@ -188,6 +188,7 @@ Fill in:
 - **`LINODE_OAUTH_CLIENT_ID`/`LINODE_OAUTH_CLIENT_SECRET`/`LINODE_OAUTH_REDIRECT_URI`** — only
   needed if you're running the REST API/dashboard with "Login with Linode" (§6). Leave blank if
   you're only ever using the CLI and/or poller.
+- **`LIS_DASHBOARD_USERS`** — optional. Only users of the Linode account this deployment manages can sign in: after Linode confirms who someone is, the tool checks that username against the account's users (read with `LINODE_API_TOKEN`, which needs Account (Read Only) for this) and refuses anyone else. Set `LIS_DASHBOARD_USERS` (comma-separated Linode usernames) to allow only those users; if the token has no Account access, this list is required, otherwise nobody can sign in. The check is repeated every 15 minutes for signed-in users, so someone removed from the account or the list loses access.
 - **`LINODE_SSH_KEY_PATH`** — optional; only needed if your SSH keypair (see `README.md` §2)
   isn't at the tool's default path (`~/.ssh/linode_spike_key`). The CLI's own `--ssh-key` flag and
   this variable both point at the same default, so if you generated your key at the default path

@@ -209,6 +209,7 @@ lists every setting — never commit the real file).
 | `LINODE_SSH_KEY_PATH` | No (has a default) | Path to this deployment's own SSH private key, used for every reachability check and `authorized_keys` capture. See the Definitive Guide's Security section for why this is one deployment-wide key, never a per-instance stored credential. |
 | `LINODE_OAUTH_CLIENT_ID` / `LINODE_OAUTH_CLIENT_SECRET` | Only if using the dashboard's "Login with Linode" | Register your own OAuth Client in your own Linode account (Cloud Manager → Profile → OAuth Apps) — see "Setting up dashboard login" below. |
 | `LINODE_OAUTH_REDIRECT_URI` | Only if using dashboard login | Must exactly match the redirect URI configured on the OAuth App above. |
+| `LIS_DASHBOARD_USERS` | No | Comma-separated Linode usernames allowed to sign in to the dashboard. Sign-in is always limited to users of this deployment's Linode account; this narrows it further, and is required if `LINODE_API_TOKEN` has no Account access. |
 | `LINODE_API_MAX_REQUESTS_PER_SECOND` | No (default 10) | Cap on Linode API requests per second for one process; all parallel `poll` workers share it. A rate-limited (429) response also pauses every worker for as long as the API asks. `0` removes the cap. |
 | `ACTIVITY_LOG_RETENTION_DAYS` | No (default 30) | How long the dashboard's Activity entries are kept. Service log files under `state/logs/` rotate by size (5 MB, three old files) regardless. |
 | `API_ALLOWED_ORIGINS` | No | Comma-separated browser origins allowed to call the API cross-origin (CORS). Leave unset unless a separately-hosted frontend needs to call this API from a different origin. |
@@ -633,6 +634,8 @@ no longer needed.
 3. Copy the generated Client ID and Client Secret into `LINODE_OAUTH_CLIENT_ID` /
    `LINODE_OAUTH_CLIENT_SECRET`.
 4. Restart the API server (`systemctl restart instance-scheduler-api`).
+
+Only users of the Linode account this deployment manages can sign in: after Linode confirms who someone is, the tool checks that username against the account's users (read with `LINODE_API_TOKEN`, which needs Account (Read Only) for this) and refuses anyone else. Set `LIS_DASHBOARD_USERS` (comma-separated Linode usernames) to allow only those users; if the token has no Account access, this list is required, otherwise nobody can sign in. The check is repeated every 15 minutes for signed-in users, so someone removed from the account or the list loses access. A refused user sees the reason on the sign-in page.
 
 This is entirely separate from `LINODE_API_TOKEN` — the OAuth login only ever identifies who's
 calling; it's never used to talk to Linode directly. See the Definitive Guide's Security

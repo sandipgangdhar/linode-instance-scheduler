@@ -4,6 +4,19 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.16.3
+
+### Security
+- Dashboard sign-in is limited to users of the Linode account this deployment manages. A Linode login proves who someone is but not that they belong to your account; the tool now checks the username against your account's users (read with `LINODE_API_TOKEN`, which needs Account (Read Only) for this, as the setup steps already ask) and refuses anyone else, showing the reason on the sign-in page. Signed-in users are checked again every 15 minutes, so removing someone from the account also ends their dashboard access.
+- New optional setting `LIS_DASHBOARD_USERS`: a comma-separated list of Linode usernames allowed to sign in. It narrows access further, and is required if your API token has no Account access (without either, nobody can sign in to the dashboard; the CLI and API tokens are unaffected).
+- Everyone signed in before this release is asked to sign in once more, so every session has passed the check.
+
+### Fixed
+- `explain` picks the more specific explanation when several match: a Lish console "Permission
+  denied" is explained as Lish console access (not an SSH login to the node), and recovery-drill,
+  "could not capture the instance" and ambiguous-create errors get their own explanations. It also
+  recognises "recovery-drill:" and "could not capture" as written in the tool's messages.
+
 ## v1.16.1
 
 ### Changed

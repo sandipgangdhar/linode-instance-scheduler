@@ -1651,6 +1651,8 @@ no one logged in, so it — and every API call the server itself makes to Linode
 through your deployment's own `LINODE_API_TOKEN`, exactly as before. Logging in with Linode only
 ever proves *who* is calling this API; it's never used to talk to Linode directly.
 
+**Who can sign in.** Only users of the Linode account this deployment manages can sign in: after Linode confirms who someone is, the tool checks that username against the account's users (read with `LINODE_API_TOKEN`, which needs Account (Read Only) for this) and refuses anyone else. Set `LIS_DASHBOARD_USERS` (comma-separated Linode usernames) to allow only those users; if the token has no Account access, this list is required, otherwise nobody can sign in. The check is repeated every 15 minutes for signed-in users, so someone removed from the account or the list loses access. A refused user sees the reason on the sign-in page.
+
 ### 8.9 The web dashboard (optional) — a browser UI on top of the REST API
 
 If you'd rather click around than script against the REST API directly: the dashboard is part of
