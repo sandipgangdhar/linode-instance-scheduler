@@ -62,21 +62,18 @@ Before you start, make sure you have:
 - **A Linode account** with permission to create instances, volumes, and reserved IPs.
 - **A Linode Personal Access Token** — Cloud Manager → Profile (top right) → API Tokens →
   "Create a Personal Access Token." Scopes needed: **Linodes** (Read/Write), **Volumes**
-  (Read/Write), **IPs** (Read/Write). Add **VPCs** (Read) too if any of your instances use a VPC
-  interface. Account (Read Only) is enough to satisfy the tool's own startup check.
+  (Read/Write), **IPs** (Read/Write) and **StackScripts** (Read/Write, for the recovery copy of
+  the SSH key's passphrase). Add **VPCs** (Read) too if any of your instances use a VPC
+  interface. **Account** (Read Only) is enough to satisfy the tool's own startup check, and lets
+  it confirm that dashboard sign-ins belong to your account's users.
 - **Access to this GitHub repository** (you should already have this).
-- **A dedicated SSH key pair** for this automation to use. Don't reuse a personal key you use for
-  other things — generate one specifically for this tool, so its access is clearly scoped and
-  easy to revoke independently later. Generate it at the exact path the tool defaults to, so you
-  don't need to add a `--ssh-key` flag to every command in this guide (the default is
-  `~/.ssh/linode_spike_key` — a name left over from this project's prototype phase, harmless to
-  use as-is; every command below also accepts `--ssh-key <path>` if you'd rather point it
-  somewhere else):
-  ```
-  ssh-keygen -t ed25519 -f ~/.ssh/linode_spike_key -C "linode-instance-scheduler"
-  ```
-  You'll add the **public** half (`~/.ssh/linode_spike_key.pub`) to every node you want this
-  tool to manage.
+- **A dedicated SSH key pair** for this automation to use. You don't need to make one yourself:
+  the installer (§4) generates it at `/opt/linode-instance-scheduler/keys/deploy_key` (or uses
+  the private key you give it with `--ssh-key PATH`), records it as `LINODE_SSH_KEY_PATH` in
+  `.env`, and adds its public half (`keys/deploy_key.pub`) to your Linode profile's SSH keys.
+  Don't reuse a personal key you use for other things — this one should be scoped to the tool
+  and easy to revoke on its own. Every node you want this tool to manage needs that public key
+  in root's `authorized_keys` (§3.1).
 - **Nodes on a supported OS image.** Every Linode distribution image with `cloud-init` and
   Akamai's datasource works: Ubuntu 22.04/24.04/26.04, Debian 12/13, Kali, Rocky Linux 8/9/10,
   AlmaLinux 8/9/10, CentOS Stream 9/10, Fedora 43/44, openSUSE Leap 16.0, Alpine 3.21/3.24, Arch
@@ -101,22 +98,24 @@ TiDB, skip to [§4](#4-installing-and-configuring-the-automation) and come back 
 ### 3.1 Create the Linode instance
 
 In Cloud Manager (or via the API/CLI, if you prefer): create a Linode the normal way — pick a
-region, a plan sized for your workload, and a Linux image (Ubuntu 24.04 LTS is what this
-automation has been validated against; other recent distros should work the same way, but
-haven't been tested here). Nothing special is required at this stage — this is an entirely
+region, a plan sized for your workload, and any Linux image listed under "Nodes on a supported OS
+image" in §2. Nothing special is required at this stage — this is an entirely
 ordinary Linode, local disk and all.
 
 Add the automation's SSH public key (from [§2](#2-prerequisites)) to the instance at creation
-time (Cloud Manager's "SSH Keys" field), or add it afterward:
+time (it's in your profile, so it appears in Cloud Manager's "SSH Keys" field), or add it
+afterward from the scheduler host:
 
 ```
-ssh-copy-id -i ~/.ssh/linode_spike_key.pub root@<instance-ip>
+ssh-copy-id -i /opt/linode-instance-scheduler/keys/deploy_key.pub root@<instance-ip>
 ```
 
-**This step matters**: the automation needs to be able to SSH into your node using this key —
-both to inspect it during onboarding, and because whatever's in `authorized_keys` at onboarding
-time is exactly what gets carried onto every recreated instance afterward. If this key isn't
-present, onboarding will fail.
+**This step matters**: the automation needs to be able to SSH into your node using this key, both
+to inspect it during onboarding and to check it's reachable after every recreate. The node's own
+`authorized_keys` file lives on its disk and stays as it is across every recreate, so keys you add
+or remove later are kept. If you'd rather not add the key yourself, the dashboard's onboarding
+can log in once with a root password or private key you give it and install the key for you
+(nothing you give it is stored).
 
 ### 3.2 Install and configure Redis
 
@@ -267,7 +266,7 @@ database and settings the services use. (In Kubernetes:
 | `backup-estimate` | What keeping a pre-migration backup of an instance would cost a month. |
 | `schedule-set` | Sets (or replaces) one node's automatic start/stop schedule. See §8.5. |
 | `schedule-show` | Shows one node's current schedule, if any. |
-| `schedule-clear` | Removes one node's schedule — it goes back to manual-only control. |
+| `schedule-clear` | Removes one node's own schedule — it follows its group's schedule if it's in one, otherwise it goes back to manual-only control. |
 | `group-create` | Creates a new, empty schedule group — give it a schedule afterward with `group-schedule-set`. See §8.6. |
 | `group-schedule-set` | Sets (or replaces) a group's automatic start/stop schedule — applies to every current member. See §8.6. |
 | `group-show` | Shows a group's schedule and its current members. |
@@ -299,6 +298,15 @@ database and settings the services use. (In Kubernetes:
 | `backup` | On-demand, whole-system backup — re-syncs every node's and group's Object Storage record, takes a full local/remote database snapshot, and saves the trusted host keys. Meant to be run on a schedule (cron/systemd timer). See §8.10. |
 | `holiday-add` / `holiday-remove` / `holiday-list` | Holidays: dates on which scheduled starts are skipped (every node, one group or one node); stops still happen. See §8.14. |
 | `holiday-settings` | Whether account-wide holidays apply to a group or a node (a node's own setting overrides its group's). See §8.14. |
+| `budget-set` / `budget-clear` / `budget-list` | Monthly running-hour budgets for a group or node, and this month's use. See §8.18. |
+| `guardrail-set` | Limits on manual starts and extensions: longest extension, most nodes running at once, quiet periods, the nightly safety net. See §8.18. |
+| `approval-request` / `approval-list` / `approval-approve` / `approval-deny` / `approval-grant` | Ask for, and give, approval for a start or extension a budget or guardrail refused. See §8.18. |
+| `hibernate` / `unhibernate` | Move a node stopped for a long time to Object Storage (its volumes are deleted after the grace period), and bring it back. See §8.23. |
+| `wake-policy` / `wake-link` / `wake` | Wake on demand: keep a node stopped until someone needs it (or wake it outside its schedule), stop it again when idle; a secret wake link lets people start it from a page. See §8.21. |
+| `schedule-suggest` | A schedule learned from the last 4 weeks of real use for a node or group; `--apply` applies it, `--undo` puts the previous one back. See §8.20. |
+| `insight` | This deployment's own health — start/stop times, the Linode API, the scheduler, the host — with slow/high findings (cause and fix) and right-sizing hints. `--prometheus` for Prometheus. See §8.19. |
+| `metrics-agent` | Optional server metrics on a node or group: installs node_exporter on the node (loopback only, read over SSH). See §8.19. |
+| `users` / `team-*` | Who signed in to the dashboard, and the teams that give people a role. See §8.8. |
 | `backup-config` | Shows where this tool backs itself up and how the last backup went; sets, tests or removes the Object Storage settings. See §8.10. |
 | `restore` | On a replacement host: puts the newest (or a chosen, or a local) database snapshot in place, plus the trusted host keys. Run `rebuild` afterward. See §8.10. |
 | `ssh-key-protect` / `ssh-key-restore` | The deployment SSH key is kept recoverable automatically (encrypted in the database and Object Storage, public half in your Linode profile, passphrase in your Linode account); `ssh-key-protect` checks it now, `ssh-key-restore` gets it back on a replacement host. See §8.10. (`ssh-key-backup` stores an extra copy under a passphrase you choose.) |
@@ -310,6 +318,9 @@ database and settings the services use. (In Kubernetes:
 | `rotate-credentials` | Replaces a credential — the Linode API token, the Object Storage key, the dashboard OAuth secret, or the deployment SSH key on every node. See §8.15. |
 | `recovery-drill` | Proves a new host could take over: a throwaway VM installs the release copy and the latest snapshot, checks everything would work, and is deleted. See §8.15. |
 | `set-vpc-address` | Gives a stopped node's VPC interface a different address, used from its next start — for when another instance took its address while it was stopped. |
+| `set-vlan-address` | Gives a stopped node's VLAN interface a different address, used from its next start — for when another instance on the VLAN uses the same address. |
+| `set-public-ip` | Gives a stopped node a different reserved public IP (a free one, or `--reserve-new`), used from its next start. |
+| `network-check` | Every address a node uses (public, VPC, VLAN), who holds each one right now, and a free replacement for any address someone else holds. |
 | `set-ssh-port` | Records the port a node's SSH server listens on, if not 22; a running node is checked on the new port first. |
 
 Everything in this table can also be done from the dashboard and the REST API, except what only
@@ -413,10 +424,11 @@ plus the device list, and copies nothing.
 
 **How it copies.** For an ext2/3/4 disk the command copies only the blocks the filesystem uses
 (`e2image`, keeping the filesystem's UUID and label) and then checks the result read-only with
-`e2fsck -fn`; for an xfs disk it uses `xfs_copy` and checks with `xfs_repair -n`, and if either
-of those fails it copies the whole disk with `dd` instead. Any other disk is copied whole with
-`dd` (`conv=fsync`). Each tool prints its own progress as it goes (a two-phase migration, §6.6.1,
-uses `rsync` and prints the changes since the first pass). Everything is flushed to the volume
+`e2fsck -fn` (if that copy or check fails, the command reports `COPY_FAILED`); for an xfs disk it
+uses `xfs_copy` and checks with `xfs_repair -n`, and if either of those fails it copies the whole
+disk with `dd` instead. Any other disk is copied whole with `dd` (`conv=fsync`). The command
+prints how many bytes it has copied every few seconds as it goes (a two-phase migration, §6.6.1,
+uses `rsync` and copies only the changes since the first pass). Everything is flushed to the volume
 before the command reports done. It ends with one line:
 
 - `COPY_DONE` — the copy finished and passed its check; run `migrate-resume`.
@@ -425,9 +437,9 @@ before the command reports done. It ends with one line:
   `--two-phase` again if you started with it — otherwise the retry copies the whole disk in
   Rescue Mode, with the full downtime).
 
-The dashboard's step-by-step migration (without a kept backup) still gives you a plain whole-disk
-`dd` command to paste and checks its `records in/out` summary; the faster copy is used by the
-command `migrate-start` prints and by the assisted copy.
+The dashboard's migration page shows this same command to paste, and enables "finish" once the
+pasted output shows `COPY_DONE`. A step-by-step whole-disk `dd` builder is still available there
+behind a link.
 
 For a typical node this takes a few minutes, roughly proportional to how much data is actually
 on the disk.
@@ -501,11 +513,11 @@ state. Only once the replacement volume genuinely exists and is durably checkpoi
 attempt's destination volume touched — it's **not deleted automatically**: its ID is preserved
 and printed to you, and its Cloud Manager tags are switched from "active migration" to
 "orphaned" at that point. (Every migration's destination volume is tagged this way in Cloud
-Manager from the moment it's created, precisely so it's discoverable by tag even if
-`state/migrations.json` itself is lost mid-migration, not just once an attempt is abandoned or
+Manager from the moment it's created, precisely so it's discoverable by tag even if the local
+migration record (in `state/instances.db`) is lost mid-migration, not just once an attempt is abandoned or
 completes — `migrate-orphans`' listing below merges in anything found this way even if the local
-archive doesn't know about it.) The old ID is also recorded locally in `state/orphaned_migration_
-attempts.json` (keyed by the node's name) once the *new* attempt's `migrate-resume` finally
+archive doesn't know about it.) The old ID is also recorded locally, in the database's list of orphaned migration attempts
+(keyed by the node's name), once the *new* attempt's `migrate-resume` finally
 succeeds — check on these anytime with:
 ```
 linode-instance-scheduler migrate-orphans --name redis-standby-1
@@ -515,7 +527,7 @@ and delete them once you're sure they're no longer needed:
 linode-instance-scheduler migrate-orphans --name redis-standby-1 --cleanup
 ```
 (add `--volume-id <id>` to target just one, if there's more than one). Requires typing the name
-to confirm, same as `offboard` (add `--yes` to skip the prompt, e.g. in a script). This file is
+to confirm, same as `offboard` (add `--yes` to skip the prompt, e.g. in a script). That list is
 never cleaned up on its own otherwise — nothing scans it or reminds you it exists beyond this
 command.
 
@@ -524,7 +536,7 @@ checked, and non-zero if any real conflict or a scan failure is found — a conf
 printed as a `WARNING` either way, but if you're calling this from a script, cron job, or an
 automated DR runbook, check the exit code rather than scraping the printed summary.
 
-If you've lost `state/migrations.json` entirely and `migrate-orphans` shows a volume still
+If you've lost the local migration record entirely (for example with the whole database) and `migrate-orphans` shows a volume still
 tagged "active" for a migration you know is actually dead (confirmed by hand in Cloud Manager),
 mark it orphaned so it becomes eligible for `--cleanup`:
 ```
@@ -535,10 +547,13 @@ actually tagged active for that name. Same confirmation prompt (type the name, o
 as `--cleanup` above.
 
 **A newly reserved or reused IP address won't accept an SSH connection during `migrate-start`,
-even though the node is genuinely reachable.** This can happen if Linode reissues an address that
-this tool's own trust records (`state/known_hosts`) still remember from a previous, unrelated
-node — e.g. one you `offboard`ed earlier. Since the node in question hasn't been onboarded yet,
-`reset-host-key`'s usual `--name` form doesn't apply here; use `--ip` instead:
+even though the node is genuinely reachable.** Linode can reissue an address that this tool's own
+trust records (`state/known_hosts`) still remember from a previous, unrelated node. Usually this
+sorts itself out: `offboard` forgets a released address's key, and `migrate-start` and `onboard`
+forget a stored key for an address no managed node uses before their first connection. If a
+leftover key still blocks the connection (for example, an address a managed node is recorded
+with), the node in question hasn't been onboarded yet, so `reset-host-key`'s usual `--name` form
+doesn't apply here; use `--ip` instead:
 ```
 linode-instance-scheduler reset-host-key --ip <the-address> --yes
 ```
@@ -562,8 +577,8 @@ configuration -- and each of its attached Block Storage volumes, using Linode's 
 The clone stays **powered off**, with its private (VPC/VLAN) interfaces removed so it can never take
 or clash with an address while it waits; every setting needed to put the original back (plan,
 region, label, tags, every interface and address, the public address, which volume sits in which
-slot) is recorded locally, in Object Storage when configured, and as a tag on the clone and its
-volumes. The migration then carries on as usual.
+slot) is recorded locally and in Object Storage when configured, and the clone and its volumes
+are tagged as this node's backup. The migration then carries on as usual.
 
 **The backup is a billable resource until you delete it** -- a powered-off Linode still bills at
 its plan's rate, and each cloned volume bills as Block Storage. Before creating it, `migrate-start`
@@ -615,10 +630,11 @@ confirmation step.
 
 ### 6.6 Letting the tool run the copy (optional)
 
-If a pre-migration backup is kept (§6.5), the tool can run the copy for you instead of you pasting
+If a pre-migration backup is kept (§6.5), or the migration is two-phase (§6.6.1), the tool can
+run the copy for you instead of you pasting
 the command into the Lish console. It opens the instance's Rescue Mode console over Lish (Linode's
 SSH console gateway, `lish-<region>.linode.com`), types exactly the command `migrate-start`
-printed, follows `dd`'s progress, waits for `COPY_DONE`, and then runs `migrate-resume`:
+printed, follows the copy's progress, waits for `COPY_DONE`, and then runs `migrate-resume`:
 
 ```
 linode-instance-scheduler migrate-copy --name web-1
@@ -634,15 +650,16 @@ changes it. `--check` reports whether everything is in place and what's missing:
 linode-instance-scheduler migrate-copy --name web-1 --check
 ```
 
-**What it refuses.** Without a kept backup of this same instance it does nothing (the backup is
-what makes the copy safe to automate: whatever happens, `rollback` puts the original back). It
+**What it refuses.** Without a kept backup of this same instance, or a two-phase migration, it does
+nothing (that is what makes the copy safe to automate: whatever happens, `rollback` or
+`migrate-abandon` puts the original back). It
 also refuses unless the migration is waiting for its copy. If the copy command can't identify the
-disks, or `dd` fails, nothing further happens: the migration keeps waiting for its copy, so you can
+disks, or the copy fails, nothing further happens: the migration keeps waiting for its copy, so you can
 run `migrate-copy` again, do the copy yourself, or roll back. If the copy finishes but
 `migrate-resume` fails, run `migrate-resume` again. `--no-resume` stops after the copy.
 
 **Long copies.** A large local disk (several terabytes on the biggest plans) can take many hours
-to copy. There is no limit on how long the copy may run: it only counts as failed if `dd` makes no
+to copy. There is no limit on how long the copy may run: it only counts as failed if the copy makes no
 progress for 45 minutes. The copy runs on the instance's own console, so it keeps going if the
 Lish connection drops or the scheduler host restarts. The tool reconnects and keeps watching, and
 if the copy finished while it was disconnected it reads the result from a status file the copy
@@ -824,16 +841,44 @@ interface) is fully supported — onboard, stop, start, schedules, groups, hooks
     different address.
   - **VLAN:** Linode doesn't check VLAN addresses at all. An instance given the same VLAN address
     as a stopped node starts normally, and once both run, traffic goes to whichever answers first.
-    Nothing fails, so neither Linode nor this tool can catch it; a dedicated VLAN label is the only
-    protection.
-  - **Public IPs** never collide: every managed node's public IP is reserved and stays with your
-    account while the node is stopped.
+    Nothing fails, so Linode doesn't catch it; `network-check` (below) compares the VLAN addresses
+    of every instance on that label and reports a duplicate, but a dedicated VLAN label is the
+    real protection.
+  - **Public IPs:** every managed node's public IP is reserved and stays with your account while
+    the node is stopped, but a reserved IP that isn't in use can still be assigned to another
+    instance by hand (Cloud Manager -> Reserved IPs -> Assign). The next start then refuses with
+    the instance holding it, and `network-check` reports it in advance.
 
   If a subnet has to be shared, give every other instance an explicit address from the bottom of
   the range (the tool moves nodes to addresses at the top). Onboarding warns when a node's subnet
   or VLAN already holds instances this tool doesn't manage, and
   `linode-instance-scheduler status --name db-1 --check-network` runs the same check at any time.
   The scheduler's own host is expected in the subnet (it has to reach the nodes) and isn't counted.
+- **Checking every address a node uses.** `linode-instance-scheduler network-check --name db-1`
+  (or **Check** on the instance page's **Network addresses** card) lists the node's public IP,
+  each VPC address and each VLAN address, and for each one whether another instance holds it
+  right now ("this node's address is held by web-3 right now"), plus other instances in the same
+  subnet or VLAN that this tool doesn't manage. A public IP that isn't reserved is flagged too: it
+  would change at the node's next stop (reserve it with `reserve-ip` while the node runs). It exits
+  1 when an address is held or unreserved. For a stopped node, each held address comes with a
+  replacement:
+
+  ```
+  linode-instance-scheduler set-vpc-address --name db-1 --address 10.24.1.250
+  linode-instance-scheduler set-vlan-address --name db-1 --address 192.168.5.250
+  linode-instance-scheduler set-public-ip --name db-1 --address 172.236.10.20   # a free reserved IP
+  linode-instance-scheduler set-public-ip --name db-1 --reserve-new             # reserve a new one
+  ```
+
+  The card does the same with **Use a new address**: a VPC or VLAN address comes pre-filled with a
+  free one (editable), and a public IP is chosen from your reserved IPs in the node's region that
+  no instance holds and no other node is recorded with, or **Reserve a new IP and use it**. Each
+  takes effect at the node's next start. `set-vlan-address` refuses an address outside the VLAN
+  interface's network or one another instance on that VLAN uses; `set-public-ip` refuses an
+  address that isn't reserved, is in another region, or is assigned to an instance. A new public IP
+  carries the node's recovery tags and trusted SSH host key with it; update DNS records and
+  allow-lists that point at the old address. The old address stays reserved on your account (and
+  billing) until you release it in Cloud Manager.
 - **A stopped node's VPC address can be taken — and is reclaimed automatically.** While a node
   is stopped its instance doesn't exist, so Linode treats its VPC address as unused, and an
   instance created in that subnet can be given it (Linode hands out the lowest free address).
@@ -912,14 +957,14 @@ trust to unrelated infrastructure. If that different instance's own OS volume, d
 reserved IP is *already* tagged in Cloud Manager under a **different** name (e.g. you meant to
 onboard a fresh node but typed an `--instance-id` that's already managed elsewhere), onboarding is
 refused outright, naming the conflicting node — there's no override flag or confirmation prompt
-that lets you push through this one. That's deliberate: this tool tried, in an earlier version, to
-support a confirmed "take over ownership" path, and found it couldn't actually make that safe —
-suppressing the refusal never removed the *other* name's tag, so the "successful" result was a
-resource claimed by two names at once, which is exactly what `rebuild`'s disaster-recovery scan is
-designed to detect and refuse to guess about (for *either* name, not just the one that got
-"transferred"). If you genuinely want to repoint a name at infrastructure another name currently
-owns, offboard the other name first (`offboard --name <other-name>`, see §8) — that cleanly
-releases its tags — then re-run this onboard. `--yes` still skips the identity-diff confirmation
+that lets you push through this one. That's deliberate: overriding it would leave a resource
+claimed by two names at once, which is exactly what `rebuild`'s disaster-recovery scan is designed
+to detect and refuse to guess about (for *either* name). If you genuinely want to repoint a name at
+infrastructure another name currently owns, offboard the other name first (`offboard --name
+<other-name>` without `--delete-volumes`, see §8). Its tags stay on the resources while its
+offboarding is pending deletion, and are removed from the volumes it keeps when that is carried
+out (after the grace period, or at once with `pending-deletions --delete-now ID`); then re-run this
+onboard. `--yes` still skips the identity-diff confirmation
 above; it does not, and cannot, skip this refusal. If a `--force` re-onboard moves this name to a
 **different reserved IP** than it had before (confirmed via either prompt), this tool's own
 cached SSH trust for the *old* address is also cleared automatically — the same cleanup
@@ -931,13 +976,15 @@ unrelated node won't need a manual `reset-host-key --ip` first.
 ## 8. Day-to-day usage
 
 > **One-time migration note — read this if a node in your fleet was onboarded with an older
-> version of this tool, before SSH host-key verification existed.** `start`/`stop`/`rebuild`
-> verify a node's SSH host key against a record this tool keeps itself (`state/known_hosts`) —
-> strictly, by default, since a steady-state recreate is guaranteed to present the *same* key
-> every time (see `start` below). That record has to exist first. A node with nothing recorded
-> yet will fail its very next `start` with a `SECURITY WARNING` about a key mismatch — not
-> because anything is actually wrong, but because there was nothing to compare against yet.
-> **Fix, once per node with nothing recorded, before your next `start`/`stop`:**
+> version of this tool, before SSH host-key verification existed.** `start`/`stop` verify a
+> node's SSH host key against a record this tool keeps itself (`state/known_hosts`) — strictly,
+> by default, since a steady-state recreate is guaranteed to present the *same* key every time
+> (see `start` below). For a node reached on a public reserved IP, that record has to exist
+> first: with nothing recorded yet, its next `start` or `stop` fails with a `SECURITY WARNING` —
+> not because anything is actually wrong, but because there was nothing to compare against yet.
+> (`rebuild` records the key it finds, and a node reached only over a private VPC/VLAN address
+> with no stored key is trusted on first contact, so neither needs this.)
+> **Fix, once per such node with nothing recorded, before your next `start`/`stop`:**
 > ```
 > linode-instance-scheduler reset-host-key --name redis-standby-1 --yes
 > ```
@@ -981,18 +1028,19 @@ linode-instance-scheduler stop --name redis-standby-1 --force
 ```
 
 **If the node itself is SSH-unreachable** (a guest firewall rule, a crashed `sshd`, a wedged
-network stack), the re-capture step above will retry for a while and then `stop` will refuse,
-with nothing deleted — reachability can't be assumed away when re-capturing data volumes needs
-a live SSH session. If you've independently confirmed (Cloud Manager, Lish console) that the
+network stack), the one re-capture step that needs SSH (reading the node's `authorized_keys`)
+will retry for a while and then `stop` will refuse, with nothing deleted. Network config, data
+volumes and instance settings are read from the Linode API and don't need SSH. If you've independently confirmed (Cloud Manager, Lish console) that the
 node is genuinely unreachable and you just need to stop billing, add `--skip-precapture`:
 
 ```
 linode-instance-scheduler stop --name redis-standby-1 --skip-precapture
 ```
 
-This uses the last-known data volume list from the registry instead of a fresh SSH capture. The
-trade-off: a data volume attached out of band since the last `start`/`stop` cycle would be
-silently missed from that list. Only use it when you've confirmed the unreachability yourself —
+This keeps the last-known `authorized_keys` list in the registry instead of reading it fresh over
+SSH (and skips the pre-stop hook). Data volumes and everything else are still read from the API
+as usual, and the node's own `authorized_keys` file on its disk is what the recreated instance
+uses, so nothing about its access changes. Only use it when you've confirmed the unreachability yourself —
 see [Troubleshooting](#11-troubleshooting) for the full recovery sequence if the instance ends up
 deleted out of band (e.g. via Cloud Manager) instead.
 
@@ -1130,12 +1178,12 @@ stopped at the moment you lost your local machine:
   `onboard` — including the same refusal `onboard` has if the instance somehow has more than one
   boot config (Linode's API has no "which one is active" field, so this tool won't guess): that
   one name is skipped and reported, not silently recovered against the wrong config.
-- **Node was stopped** — partial recovery. The tool can tell you which volumes and which IP are
-  yours (so nothing is left as an orphaned, unlabeled resource you'd have to hunt down
-  manually), but the finer detail (network config, SSH access, label/tags) was only ever knowable
-  while that instance actually existed, and is genuinely gone — this tool won't guess at it. A
-  node recovered this way is marked `needs_manual_recovery`; boot it once manually via Cloud
-  Manager from the recovered `os_volume_id`, then run `onboard` again as normal to fully restore
+- **Node was stopped** — the tags say which volumes and which IP are yours, and the rest of what a
+  `start` needs (network config, SSH access) comes from the node's own recovery tags for a simple
+  single-interface node, or from its Object Storage record when backups are configured (§8.10).
+  With that, the node is fully recovered as `stopped` and starts normally. If neither is enough,
+  the tool won't guess: the node is marked `needs_manual_recovery`; boot it once manually via Cloud
+  Manager from the recovered `os_volume_id`, then run `onboard --force` for it to fully restore
   management.
 
 If the tags for a name turn out ambiguous or incomplete for any reason (e.g. a stale tag left on
@@ -1315,8 +1363,9 @@ linode-instance-scheduler schedule-show --name redis-standby-1
 linode-instance-scheduler schedule-clear --name redis-standby-1
 ```
 
-`schedule-clear` just turns off automation for that node — it goes back to pure manual `start`/
-`stop` control, nothing about the node itself changes.
+`schedule-clear` removes that node's own schedule — if it's in a group with a schedule, it follows
+the group's schedule again; otherwise it goes back to pure manual `start`/`stop` control. Nothing
+about the node itself changes.
 
 **Run the scheduler** — nothing above actually starts/stops anything by itself until this runs:
 
@@ -1372,8 +1421,10 @@ failure and tried again on the next check within the catch-up window. Seeing man
 
 **Known limitations, for now:**
 - If `poll` is down for longer than the catch-up window (default one hour), a scheduled action
-  from before the outage is missed, not caught up — acceptable for a cost-scheduling tool (a late
-  start/stop costs at most a little extra compute), by deliberate design choice.
+  from before the outage isn't fired automatically — acceptable for a cost-scheduling tool (a late
+  start/stop costs at most a little extra compute), by deliberate design choice. Such nodes are
+  reported as off schedule (an alert, when alerts are set up), and `schedule-catch-up` lists them
+  and can apply the missed changes for you (§8.15).
 
 ### 8.6 Groups — one schedule for several nodes at once
 
@@ -1653,6 +1704,20 @@ ever proves *who* is calling this API; it's never used to talk to Linode directl
 
 **Who can sign in.** Only users of the Linode account this deployment manages can sign in: after Linode confirms who someone is, the tool checks that username against the account's users (read with `LINODE_API_TOKEN`, which needs Account (Read Only) for this) and refuses anyone else. Set `LIS_DASHBOARD_USERS` (comma-separated Linode usernames) to allow only those users; if the token has no Account access, this list is required, otherwise nobody can sign in. The check is repeated every 15 minutes for signed-in users, so someone removed from the account or the list loses access. A refused user sees the reason on the sign-in page.
 
+**What each person may do (teams and roles).** Signing in proves who someone is; what they may then do comes from their role. The Linode account's unrestricted users are admins automatically, and `LIS_ADMIN_USERS` (comma-separated Linode usernames) names more. Admins have full access and manage everyone else on the dashboard's **Users & teams** page (or with `users`, `team-create`, `team-update`, `team-add-member`, `team-remove-member`, `team-rule-add`, `team-delete`). A team has a role and, optionally, a list of schedule groups and/or nodes it covers (all of them if left out):
+
+| Role | May |
+|---|---|
+| `viewer` | see instances, groups, schedules, savings, history and activity |
+| `operator` | viewer, plus start, stop, extend, start/stop a group and run a hook |
+| `editor` | operator, plus change schedules, groups, membership, start order, holidays and settings |
+| `admin` | everything, including onboarding, offboarding, hooks, API tokens, logs, the console and people |
+| `custom` | exactly the operations you choose -- the same operation names as API tokens (e.g. `instances:start` alone, or `read` plus `hooks:run`) |
+
+A custom team is created with `team-create --name starters --role custom --scopes instances:list,instances:status,instances:start --groups web`, or by choosing "custom" under Permissions on **Users & teams** and picking the operations (`api-token-scopes` lists them). **Edit** on a team changes its permissions and the schedule groups and nodes it covers (`team-update`); giving `--scopes` makes a team custom, and choosing a preset role again drops its own list. The **People** list shows every user of the Linode account, including those who haven't signed in yet, so access can be given before someone's first sign-in.
+
+A person can belong to several teams; each team counts on its own, so "viewer of everything" plus "operator of the `web` group" lets them see all nodes but start and stop only the `web` group's. A username can be added to a team before the person ever signs in. A sign-in rule puts people whose Linode email has a given domain into a team automatically (`team-rule-add --team payments --email-domain payments.example.com`). Anyone else who signs in sees a "waiting for access" page, and the Activity log tells admins someone is waiting. The menu leaves out pages a person's role can't use, and the server refuses them regardless. Teams, members and rules are kept in Object Storage when it is configured and come back with `restore` or `rebuild`. If the deployment's token can't read the account's users and no `LIS_ADMIN_USERS` is set, there is no way to tell admins apart, so everyone allowed to sign in keeps full access until one of those is set.
+
 ### 8.9 The web dashboard (optional) — a browser UI on top of the REST API
 
 If you'd rather click around than script against the REST API directly: the dashboard is part of
@@ -1679,8 +1744,9 @@ external service, nothing sent anywhere for this check), and shows you its best 
 or correct via two dropdowns before anything is built; (2) only once you've confirmed which device
 is which does it build the actual `dd` command, with a working Copy button; (3) after you run it,
 you paste `dd`'s own summary output back, and the page checks it for a clean completion (matching
-"records in"/"records out" counts, no I/O error text) before letting you continue — a command that
-doesn't look like it finished cleanly blocks the next step outright, with the reason shown. This
+"records in"/"records out" counts, no I/O error text) — output that shows the copy failed blocks
+the next step outright, with the reason shown; output with no recognisable summary gets a warning
+but doesn't block it. This
 is an early, best-effort check on top of the real safety net, not a replacement for it — the
 actual proof that the migration worked is still the root-device identity check performed over SSH
 once you click "finish migration" (the CLI takes a different route to the same safety: its
@@ -1785,6 +1851,13 @@ overwritten each time), so a lost host loses at most about a minute of changes. 
 snapshots are pruned after each hourly backup: everything from the last 48 hours, then one a day
 for 30 days (`LIS_BACKUP_KEEP_ALL_HOURS`, `LIS_BACKUP_KEEP_DAILY_DAYS`). The newest snapshot and the
 continuous one are never deleted.
+
+**Snapshots are encrypted.** Every database snapshot written to Object Storage is encrypted
+(AES-256-GCM) with a key derived from `LIS_SSH_KEY_PASSPHRASE`, the deployment passphrase below, so
+reading the bucket alone doesn't reveal it. Restoring needs that passphrase: a replacement host gets
+it from your Linode account (`install.sh recover` does this for you, or `ssh-key-restore
+--save-passphrase`). Snapshots written by older versions are not encrypted and still restore. Without
+a passphrase set (some Kubernetes setups), snapshots are uploaded unencrypted; set it to encrypt them.
 
 **The deployment SSH key.** Every managed node trusts exactly one key, the deployment's own, so it's
 kept recoverable automatically: encrypted in the database (and therefore every snapshot) and in
@@ -1897,7 +1970,9 @@ Bringing a version back copies it as the newest version, so every version is sti
 API: `GET /system/bucket-protection` and `POST /system/bucket-protection` (turn it on).
 
 **Every release is checked before it's installed.** Each release archive has a published
-SHA-256 checksum; `install.sh` refuses an archive that doesn't match it.
+SHA-256 checksum; `install.sh` refuses a downloaded archive that doesn't match it, and checks an
+archive you give it with `--archive` when its `.sha256` file is next to it (keep the two together,
+or run `sha256sum -c` yourself first).
 
 ### 8.11 High availability — why this isn't an always-on active-active or active-passive setup
 
@@ -1913,14 +1988,16 @@ in real time, so nothing downstream notices. Manual `start`/`stop` keeps working
 regardless, since it never depends on `poll` being up.
 
 An **active-active** setup (two schedulers running at once) would trade that harmless delay for
-a real correctness risk instead: two processes with no genuine coordination between them could
-race to act on the same node at the same moment, or have one fire a start while the other is
+a real correctness risk instead: two processes acting at the same time could race to act on the
+same node at the same moment, or have one fire a start while the other is
 mid-firing a stop for it — a new failure mode, introduced to solve a problem (a few seconds of
 downtime) a plain restart already solves for free. An **active-passive** setup avoids the double-
 fire risk, but only by adding its own always-on standby plus real failure-detection machinery
 (health checks, a way for the standby to agree it should take over, a shared view of state) —
 infrastructure that has to be running and paid for continuously, to protect against an outage a
-single supervised process already recovers from in seconds.
+single supervised process already recovers from in seconds. (With Object Storage backups
+configured, the scheduler holds a lease there, so a second scheduler started by mistake stands by
+and does nothing until it's told to take over — see §8.15.)
 
 That's also, directly, why it saves you money rather than costs you any: this whole tool exists
 to stop you paying for compute that isn't earning its keep. Running a second, always-on
@@ -2113,6 +2190,7 @@ linode-instance-scheduler start --name web-1 --respect-dependencies
 | 3 | Busy — another operation is running on this node; retry later |
 | 4 | Security warning — the node's SSH host key changed; don't retry blindly (see `reset-host-key`) |
 | 5 | Refused by `--respect-dependencies` — the start order isn't satisfied yet |
+| 6 | Refused by a budget or guardrail — ask for approval (`approval-request`), see §8.18 |
 
 Add `--json` to `start`, `stop` or `list` to get one JSON object on stdout (progress messages go
 to stderr). `stop --json` needs `--yes`. `status` already prints JSON.
@@ -2194,7 +2272,7 @@ linode-instance-scheduler api-token-create --name nightly-stop --scopes instance
 | `credentials:rotate` | Rotate the Linode API token, bucket keys, OAuth secret or deployment SSH key (admin-level: it replaces credentials) |
 
 Settings that hold credentials -- Object Storage keys, the SMTP password -- can only be changed with
-an `admin` token or a dashboard login.
+an `admin` token or by a dashboard user with the admin role.
 
 `linode-instance-scheduler api-token-scopes` prints this list. A request without the scope it
 needs is refused with `403` naming the missing scope; anything not on this list needs `admin`.
@@ -2517,7 +2595,9 @@ really on your account: re-upload an Object Storage record, rewrite a node's tag
 in-progress mark that nothing holds, reconcile a node's instance (`heal`), move a stopped node off
 a VPC address another instance took. The first three are also applied automatically by the active
 scheduler after its daily check (set `LIS_AUTOFIX=off` in `.env` to stop that); the others always
-wait for a person. Nothing is ever deleted, no customer data is touched, and a finding only a
+wait for a person. Nothing that holds data is ever deleted (the only thing a repair deletes is a
+blank leftover instance from an interrupted start, with no disks and none of your volumes, the
+same as `heal` does), no customer data is touched, and a finding only a
 person can judge (a resource claimed by two names, a missing resource) is listed, never repaired.
 The dashboard's System backup page has the same in its "Consistency check" card ("Review fixes").
 
@@ -2533,6 +2613,237 @@ linode-instance-scheduler explain --name web-1      # that node's last failure
 ```
 
 Every error banner in the dashboard has an "Explain this" link.
+
+**Questions about the product (`ask`, and Ask on the dashboard).** Ask a question in your own words
+and get the matching part of the product's own reviewed answers:
+
+```
+linode-instance-scheduler ask "how do I move a node to another group"
+```
+
+Ask works like a search of the product's help. When it is very sure, it answers directly; otherwise
+it says it isn't sure and lists up to five answers that may help, which you open with a click (or
+`ask --answer <id>`). It never writes answers of its own -- every answer it shows was written and
+reviewed as part of the product -- and a pasted error goes to `explain` above. It runs on this host
+with a small language model shipped with the release (on the CPU, nothing sent anywhere). Questions
+about other software ("upgrade postgres") get suggestions at most, never a direct answer.
+`LIS_ENABLE_ASK=0` in `.env` turns Ask off.
+
+**Smart Ask.** When the instant answer isn't sure, an open model running on this host can read the
+few closest answers and pick the one that fits, using this deployment's own facts. It only chooses
+among the product's reviewed answers -- it never writes one -- and nothing leaves the host. The
+dashboard shows the instant answer and suggestions at once and replaces them with the model's pick
+when it arrives (on a CPU-only host that takes from a few seconds to under a minute). `install.sh`
+sets it up when the host has the memory: 16 GB or more gets Qwen 2.5 7B, 8 GB gets Qwen3 4B, a
+smaller host leaves it off (Ask still works). The model runs as its own service
+(`linode-scheduler-ollama`) at low priority, so the scheduler and the API always come first, and
+answers one question at a time. `sudo ./install.sh install --no-smart-ask` turns it off (and stops
+that service); `ask-llm status` shows whether the model answers and warns when the host is too
+small. To use a model server you run elsewhere, set `LIS_ASK_LLM_URL` and `LIS_ASK_LLM_MODEL`
+yourself; the installer leaves your own server alone.
+
+### 8.18 Budgets and guardrails — limits on manual starts and extensions
+
+Schedules save money only as long as manual starts and extensions don't eat the savings. Budgets
+and guardrails limit those; they never stop a scheduled start.
+
+**Budgets.** A budget is a number of running hours per calendar month (UTC) for a schedule group
+(its members' hours added up) or one node, counted from the start/stop history:
+
+```
+linode-instance-scheduler budget-set --group-name web --hours 300 --action block-manual
+linode-instance-scheduler budget-list
+```
+
+At 80% and at 100% an alert is recorded (and sent, if alerts are set up). At 100% the budget's
+action applies: `alert` (nothing more, the default), `block-manual` (manual and API starts and
+extensions are refused; scheduled starts still run) or `stop-after-extension` (no new
+extensions; extensions already running end normally).
+
+**Guardrails.** Set for all instances, and optionally per schedule group; all off until set. A
+group's own setting replaces the all-instances one for that group's nodes, setting by setting
+(`--group-name web`); `--clear` on a group's setting goes back to the all-instances one. A group's
+`max_running` counts only that group's nodes, and the all-instances `max_running` still limits the
+whole fleet:
+
+| Guardrail | Example | Effect |
+|---|---|---|
+| `max_extension_hours` | `guardrail-set --key max_extension_hours --value 4` | an extension longer than this is refused |
+| `max_running` | `guardrail-set --key max_running --value 20` | a manual start is refused while this many nodes are already running |
+| `quiet_periods` | `guardrail-set --key quiet_periods --value '{"timezone": "Asia/Kolkata", "rules": [{"days_of_week": ["sat", "sun"], "start_time": "00:00", "stop_time": "23:59"}]}'` | nothing may be started or extended by hand during these times (same rule format as a schedule) |
+| `safety_net` | `guardrail-set --key safety_net --value true` | once a night, nodes that have a schedule and are running outside it, with no running extension or approval, are stopped (each stop is recorded as a warning in Activity). It runs at `safety_net_hour` (default 2, i.e. 02:00) in each node's own schedule timezone -- for a group's nodes, the group's timezone -- so `--group-name web --key safety_net_hour --value 3` means 03:00 where group web's schedule runs |
+
+`--clear` removes one. On the dashboard, the Guardrails card's **Applies to** list switches between
+All instances and each group.
+
+**Approvals.** A refused start or extension can be requested — `approval-request --name web-1
+--action start --reason "release night"`, or **Request approval** under the error on the
+dashboard. An admin sees the requests on **Budgets** and approves them (for 4 hours by default)
+or denies them; `approval-grant` approves one directly. While approved, the action goes through.
+On the host, `start`/`extend --override-budget` goes through anyway and is recorded in Activity.
+A refusal exits with code 6 (409 over the API, with `guardrail_rule` in the response).
+
+Budgets and guardrails are kept in Object Storage when it is configured, and come back with
+`restore` and `rebuild`. API token scopes: `budgets:read` (in `read`), `budgets:write` (in
+`configure`), `approvals:request` (in `operate`) and `approvals:decide` (admin only).
+
+### 8.19 Health and cost insight
+
+The tool keeps 30 days of its own health figures in its database: how long starts and stops
+take, Linode API latency, errors and rate-limited (429) responses, how long each scheduler check
+takes, database lock waits, and the host's memory, load and free disk. `insight` (or **Health** on
+the dashboard) shows them, and lists **findings** — rate limiting, API errors or slowness, starts
+much slower than over the last week, slow scheduler checks, a busy database, low memory — each
+with the likely cause and the fix. Findings are also health alerts, sent like the others.
+`insight --prometheus`, or `GET /metrics` with a token holding `system:read`, gives the same
+numbers in Prometheus format for Prometheus/Grafana.
+
+**Cost insight.** While a node runs, the scheduler reads its CPU from Linode's own statistics once
+an hour (nothing is installed on the node). A node that averaged under 5% CPU with peaks under
+30% while running over the last two weeks (at least about a day of running time in that period)
+gets a right-sizing hint ("a smaller plan would likely do").
+Each instance's page shows its CPU.
+
+**Server metrics (optional, off by default).** For memory, root disk space and load from inside
+the node, turn on server metrics for a node or a whole group (`metrics-agent --name web-1`,
+`metrics-agent --group-name web`, or **Turn on server metrics** on the instance page; a node's own
+setting overrides its group's). The scheduler then installs the standard Prometheus
+node_exporter on running nodes (needs systemd, x86_64 or arm64, and one download from github.com
+checked against a pinned checksum), listening on the node's loopback address only — no port is
+opened — and reads it over the SSH access it already has, every 5 minutes. `--disable` removes it
+again. Turning it on or off needs the admin-only API scope `metrics-agent:manage`, because it
+installs a program as root.
+
+### 8.20 Usage-learned schedules
+
+Schedules are often a guess ("9 to 6 on weekdays") while real use is narrower. While a node runs,
+the scheduler keeps its CPU and outbound network per half-hour (from Linode's own statistics), and
+`schedule-suggest --name web-1` (or **Suggested schedule** on the instance or group page) turns the
+last 4 weeks into a suggestion:
+
+```
+Suggested: mon,tue,wed,thu,fri 09:30-18:30 -- saves 21 points more than today's schedule.
+Covers all activity seen in the last 26 days.
+```
+
+For each weekday it takes the first and last half-hour with real activity (CPU or network clearly
+above the node's own idle level, or a manual start/extension), adds 30 minutes before and after —
+more before when the node has a post-start check, so it is ready in time — and turns a weekday with
+no activity off. A group's suggestion covers every member. It never suggests a schedule that would
+have stopped a node during activity it saw, and it needs usage from at least 14 different days
+first. Only hours the node actually ran can be seen, so a suggestion mostly narrows a schedule; the
+margins, and manual starts or extensions counting as activity, can make it reach past today's
+hours.
+
+Nothing changes until you apply it (`--apply`, or **Apply suggestion**), which goes through the
+normal schedule setting (so the recovery copies follow); `--undo` (or **Undo last applied**) puts
+the previous schedule back.
+
+### 8.21 Wake on demand
+
+A node can stay stopped — costing no compute — until someone actually needs it, and stop again once
+it has been idle:
+
+```
+linode-instance-scheduler wake-policy --name dev-1 --mode wake --idle-minutes 30
+linode-instance-scheduler wake-link --name dev-1
+```
+
+Policies, per node or group (a node's own wins): `wake` (no schedule needed; started when someone
+wakes it), `schedule-wake` (the schedule runs as usual, and a wake outside its hours is stopped
+when idle) or `off`.
+
+**Waking it.** Signed-in people use **Wake now** on the instance page or `wake --name dev-1` (their
+normal start permission applies). The node's **wake link** — created with `wake-link` or **Create
+wake link**, shown once — opens a page that says the node is stopped and starts it when the visitor
+presses **Start it** (opening the link alone never starts anything, so link previews and bots
+don't), shows progress, and then shows the address to connect to. Traffic never goes through this
+tool: once the node is up, people connect to it directly, so use its reserved IP or a DNS name for
+it as usual. A new link replaces the old one; `wake-link --remove` turns it off. A link can't start
+the same node again within 5 minutes. Budgets and guardrails (§8.18) apply to wakes like to any
+manual start.
+
+**Idle stop.** Every 5 minutes the scheduler checks each woken node: if Linode's own CPU and
+outbound network figures stayed near idle and nobody has an SSH session open for the policy's idle
+minutes (default 30) since it was woken or last busy, it is stopped through the normal stop (hooks,
+recovery copies, history, recorded as `wake-idle`). If the check can't tell (statistics or SSH
+unavailable), the node keeps running. A woken node doesn't get the 2-hour manual-start timer, and
+the nightly safety net leaves it alone. Policies and wake links are kept in Object Storage and come
+back with `restore` and `rebuild`.
+
+### 8.22 Slack and Microsoft Teams
+
+**Notifications.** Every health alert, every approval request (with Approve/Deny buttons in Slack)
+and, if turned on, a daily summary at 03:00 UTC go to chat:
+
+| Setting (.env) | What |
+|---|---|
+| `LIS_SLACK_BOT_TOKEN` | The Slack app's bot token (`xoxb-…`), scopes `chat:write` and `commands` |
+| `LIS_SLACK_CHANNEL` | Channel ID for notifications (invite the bot to it) |
+| `LIS_SLACK_APP_TOKEN` | An app-level token (`xapp-…`, scope `connections:write`) to receive commands over Socket Mode |
+| `LIS_TEAMS_WEBHOOK_URL` | A Teams incoming webhook (Workflows) URL for notifications |
+| `LIS_TEAMS_OUTGOING_SECRET` | The security token of a Teams outgoing webhook, to receive commands |
+| `LIS_CHAT_DAILY_SUMMARY` | `1` for the daily summary (off by default) |
+
+Changes in `.env` take effect within a minute, without a restart. **Send test message** on Users &
+teams checks the setup.
+
+**Slack setup.** Create a Slack app, turn on Socket Mode (this creates the `xapp-` token), add the
+slash command `/scheduler`, turn on Interactivity, add the bot scopes `chat:write` and `commands`,
+install it to the workspace and invite the bot to the notification channel. Socket Mode is an
+outbound connection from the API server to Slack, so nothing has to be reachable from the internet.
+
+**Teams setup.** For notifications, create an incoming webhook (Workflows) for the channel. For
+commands, create an outgoing webhook pointing at `https://<your dashboard>/chat/teams` (this needs
+the dashboard's HTTPS address, e.g. `install.sh --domain`) and put its security token in
+`LIS_TEAMS_OUTGOING_SECRET`; requests are checked against it.
+
+**Commands** (`/scheduler <command>` in Slack, `@Scheduler <command>` in Teams): `status [node|group]`,
+`savings [node]`, `why <node>` (explains the node's last failure), `start <node>`, `stop <node>`,
+`extend <node> [hours]`, `approvals`, `approve <id>`, `deny <id>`, `link`, `help`. Starting and
+stopping run in the background and the result is posted when done.
+
+**Who may do what.** Anyone in the channel can read. To act, a person runs `link`; the reply holds
+a one-time dashboard link (valid 15 minutes) which, opened while signed in, links their chat user to
+their dashboard user. Their dashboard role and teams (§8.8) then apply exactly as on the dashboard,
+and budgets and guardrails (§8.18) too. Every chat action is recorded in Activity with both the chat
+user and the dashboard user; admins see and remove links on Users & teams.
+
+### 8.23 Hibernate a node stopped for a long time
+
+A stopped node still pays for its Block Storage volumes. For a node you won't need for weeks or
+months, `hibernate` moves its data to Object Storage, which costs much less per GB (and the copy is
+compressed and encrypted: each hibernation gets its own random key, every chunk is encrypted on the
+helper VM before upload, and the key is stored only sealed with the deployment passphrase, which
+`hibernate` and `unhibernate` therefore need):
+
+```
+linode-instance-scheduler hibernate --name old-1 --estimate   # what would move
+linode-instance-scheduler hibernate --name old-1              # type the name to confirm
+linode-instance-scheduler unhibernate --name old-1            # bring it back (stopped)
+```
+
+The node must be stopped and Object Storage configured. A small helper VM is created in the
+node's region with the node's volumes attached; each volume is read in 512 MiB chunks, each
+chunk's checksum is recorded, it is compressed and uploaded, then **downloaded again and checked**
+before the next one. Only when every chunk has been checked is the node marked hibernated; its
+volumes are kept for the deletion grace period (7 days by default, `LIS_DELETION_GRACE_DAYS`), so
+`unhibernate` within it simply reuses them. After that the scheduler deletes them -- all of a node's
+volumes or none, each re-checked first (unattached, still this node's).
+After that, `unhibernate` creates volumes of the same size and label (so the node's own
+`/etc/fstab` still matches), writes each chunk back, checks it again on the volume, and leaves the
+node stopped, ready to start. That takes roughly a few minutes per 10 GB. The helper VM is deleted
+afterwards either way, and the bucket keys never leave this host (the helper gets short-lived
+upload/download links). The reserved IP is kept, so the node comes back at the same address.
+Once a node is unhibernated, its copy in Object Storage is kept for the same grace period (in case
+the restored node turns out wrong), then the scheduler deletes it. If `unhibernate` fails partway,
+the volumes it created are deleted again and the copy is untouched, so it can simply be re-run.
+
+A hibernated node is never started by the scheduler and can't be started or offboarded until it is
+unhibernated. Hibernating is never automatic: the instance page shows it only for stopped nodes, it
+needs the name typed, and nodes stopped for 30 days or more are listed as suggestions. The copy's
+manifest is kept in Object Storage, so `rebuild` and `restore` know a node is hibernated and where
+its data is. API scope: `instances:hibernate` (admin only).
 
 ## 9. Costs
 
@@ -2644,12 +2955,11 @@ your local `state/` directory is otherwise intact.** Just run `stop --name <name
 this tool already detects the confirmed-404 case automatically: it resets the record straight to
 a clean `stopped` state, preserving every other already-known field (network config, authorized
 keys, label, tags, plan, data volumes, reserved IP), with zero manual Cloud Manager steps needed.
-Reach for `rebuild --force` below only if this doesn't apply — it's a strictly worse outcome
-when nothing new happens to be running against the old resources yet (see the "partial record"
-case just below) than the one-step `stop`/`start` resolution above.
+Reach for `rebuild --force` below only if this doesn't apply — for this scenario the one-step
+`stop`/`start` resolution above is the better outcome.
 
 **Your local `state/` directory itself was lost (not just one node's registry entry) — a
-disk failure, a machine rebuild, anything that wipes `instances.json` entirely — and you need
+disk failure, a machine rebuild, anything that wipes `state/instances.db` entirely — and you need
 to reconstruct it from scratch.** Recover with:
 
 ```
@@ -2663,10 +2973,11 @@ stale existing entry, if any. Two outcomes:
 - If a live instance is currently running against this node's volumes/IP (the normal case for
   a node that was simply `running` when local state was lost), the record comes back fully
   recovered and pointing at that instance — `stop`/`start` work normally right away.
-- If nothing is currently running against those resources, `rebuild` can only recover a partial
-  record (network config and authorized keys aren't knowable from tags alone with nothing live to
-  read them from) and flags it `needs_manual_recovery` — `start`/`stop` both refuse in this state.
-  Get some instance running against those volumes/IP (Cloud Manager, or by re-running whatever
+- If nothing is currently running against those resources, `rebuild` takes the network config and
+  SSH access from the node's own recovery tags (a simple single-interface node) or its Object
+  Storage record, and the node comes back `stopped`, ready to `start`. Only when neither is enough
+  is it flagged `needs_manual_recovery` — `start`/`stop` both refuse in this state. Get some
+  instance running against those volumes/IP (Cloud Manager, or by re-running whatever
   process created the node originally), then run
   `onboard --name <name> --instance-id <live-instance-id> --force` to fully re-capture the
   remaining fields and clear `needs_manual_recovery`.

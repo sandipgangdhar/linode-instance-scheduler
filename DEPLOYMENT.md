@@ -107,7 +107,9 @@ address at its next start), and on a VLAN an instance given the same address con
 silently once both run, because Linode doesn't check VLAN addresses. Place this host in that same
 subnet (or on that VLAN) so it can reach the nodes; the tool doesn't count its own host as a
 conflict. Onboarding warns about any other instances it finds there, and
-`linode-instance-scheduler status --name <node> --check-network` repeats the check.
+`linode-instance-scheduler status --name <node> --check-network` repeats the check, and
+`linode-instance-scheduler network-check --name <node>` reports every address the node uses and who
+holds it.
 
 ## 2. Choosing and preparing a host
 
@@ -131,6 +133,12 @@ resource use is minimal (one process checking schedules every few seconds, a sma
 an optional lightweight API server). Sizing should be driven by how many *managed* instances you
 have, not by this tool's own overhead, and even fleets of dozens of managed nodes don't meaningfully
 change that.
+
+**Smart Ask needs more memory.** Ask (questions about the product) works on any host. Its optional
+smart mode runs an open model on this host, which `install.sh` sets up only when there's room for
+it: 8 GB of memory for Qwen3 4B, 16 GB or more for Qwen 2.5 7B (better answers). It downloads about
+3-5 GB once and runs at low priority. Pick an 8 GB or 16 GB plan if you want it, a Dedicated CPU
+plan for faster answers, or pass `--no-smart-ask` to skip it.
 
 Create the deployment host itself the normal way (Cloud Manager, or your own existing
 provisioning process) — nothing here is specific to it beyond the requirements above.
@@ -189,10 +197,10 @@ Fill in:
   needed if you're running the REST API/dashboard with "Login with Linode" (§6). Leave blank if
   you're only ever using the CLI and/or poller.
 - **`LIS_DASHBOARD_USERS`** — optional. Only users of the Linode account this deployment manages can sign in: after Linode confirms who someone is, the tool checks that username against the account's users (read with `LINODE_API_TOKEN`, which needs Account (Read Only) for this) and refuses anyone else. Set `LIS_DASHBOARD_USERS` (comma-separated Linode usernames) to allow only those users; if the token has no Account access, this list is required, otherwise nobody can sign in. The check is repeated every 15 minutes for signed-in users, so someone removed from the account or the list loses access.
-- **`LINODE_SSH_KEY_PATH`** — optional; only needed if your SSH keypair (see `README.md` §2)
-  isn't at the tool's default path (`~/.ssh/linode_spike_key`). The CLI's own `--ssh-key` flag and
-  this variable both point at the same default, so if you generated your key at the default path
-  you don't need to set this at all.
+- **`LINODE_SSH_KEY_PATH`** — the deployment SSH private key. `install.sh` creates the key at
+  `keys/deploy_key` in the install directory and sets this for you. On a manual install it is
+  optional: without it the tool uses `~/.ssh/linode_spike_key`, the same default as the CLI's own
+  `--ssh-key` flag.
 - **`LIS_SSH_KEY_PASSPHRASE`** — encrypts the stored copies of the deployment SSH key (§8). At
   least 12 characters; `install.sh` generates one.
 - **`LIS_ENV_BACKUP_RECIPIENTS`** — your age public key(s), for the encrypted copy of these
@@ -463,14 +471,15 @@ blank: it's fetched from your Linode account. It then, before starting anything:
 7. lists nodes that aren't in the state their schedule wants (if the outage lasted longer than the
    scheduler's one-hour catch-up window) and asks whether to start/stop them now.
 
-Add `--no-start` to stop after step 4 and review `linode-instance-scheduler list` first; then run
+Add `--no-start` to stop after step 5 and review `linode-instance-scheduler list` first; then run
 `sudo ./install.sh start`.
 
 **With no snapshot at all** (`--rebuild-only`, or a bucket with none), `rebuild` alone still brings
 back every instance, its schedule, group membership, each group's schedule, hooks and start order
 (including groups with no members, from their Object Storage records), and a stopped instance's
-network and SSH settings. Two things exist only in the database and need redoing: API tokens (create
-new ones) and the audit history. A manual-override timer that was counting down is reported and
+network and SSH settings. API tokens come back from their Object Storage records (with their
+revocations); without Object Storage, create new ones. The audit history and dashboard sign-in
+sessions exist only in the database. A manual-override timer that was counting down is reported and
 not re-armed.
 
 **What to check afterwards:**

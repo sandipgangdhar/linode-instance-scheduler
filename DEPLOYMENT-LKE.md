@@ -217,8 +217,12 @@ is uploaded within a minute of every change and old ones are pruned; the deploym
 encrypted in the database and Object Storage (passphrase recoverable from your Linode account);
 the scheduler compares every node with the account every few minutes (`heal`); nodes left off
 their schedule after an outage are listed for approval (`schedule-catch-up`); and alerts reach your
-webhook or email. To move to a new cluster, deploy as usual with an empty PVC, then from the pod:
-`ssh-key-restore --save-passphrase` (if the key Secret is gone), `restore`, `rebuild`, `heal`.
+webhook or email. To move to a new cluster, create the SSH key Secret first (the pod needs it to
+start) from your own copy of the key or your age-encrypted copy (`env-restore --print`), deploy as
+usual with an empty PVC, then from the pod: `restore`, `rebuild`, `heal`. With neither copy, start
+the pod with a placeholder key Secret, run `ssh-key-restore --ssh-key /app/state/recovered_key` in
+it (the passphrase is fetched from your Linode account), `kubectl cp` that file out, recreate the
+Secret from it, delete the file from the volume and restart the pod.
 
 Also the same on LKE: `offboard` and `backup-delete` hold resources for a grace period before
 deleting them (`LIS_DELETION_GRACE_DAYS` in the Secret or ConfigMap, default 7; `pending-deletions`

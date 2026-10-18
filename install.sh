@@ -48,6 +48,15 @@ NO_START=0
 NODE_BUILD_VERSION="22.12.0"
 PREBUILT_RELEASE=0
 DRILL=0
+SMART_ASK=1
+# Smart Ask's open model server (Ollama), pinned and checked like the dashboard's Node build.
+OLLAMA_VERSION="0.40.6"
+OLLAMA_SHA256="c164ab8b1b28e2a247c29719b8e404c423c5b83ae64c3ab4e59d50c7ff7fc5e0"
+OLLAMA_DIR="/opt/lis-ollama"
+OLLAMA_DATA="/var/lib/lis-ollama"
+OLLAMA_USER="lis-ollama"
+# Not Ollama's usual 11434, so a model server already on this host is never in the way.
+OLLAMA_URL="http://127.0.0.1:11435"
 ARCHIVE_IN=""
 RELEASE_VERSION=""
 RELEASE_REPO="${LIS_RELEASE_REPO:-sandipgangdhar/linode-instance-scheduler}"
@@ -108,6 +117,10 @@ Options:
                             renews the certificate. NAME's DNS must point at this host and ports
                             80/443 must be open. Asked interactively if not given
   --no-dashboard            Don't build the web dashboard
+  --no-smart-ask            Don't set up smart Ask (an open model on this host that picks the best
+                            answer for questions the instant answer isn't sure about). By default it
+                            is set up when the host has the memory: 16 GB or more -> Qwen 2.5 7B,
+                            8 GB -> Qwen3 4B, less -> off. Ask itself always works without it
   --snapshot KEY            recover: a specific Object Storage snapshot (default: the latest)
   --from-file PATH          recover: a local snapshot file instead of Object Storage
   --known-hosts PATH        recover: trusted host keys file (default: from Object Storage)
@@ -147,6 +160,7 @@ while [[ $# -gt 0 ]]; do
     --api-port) API_PORT="$2"; shift 2 ;;
     --domain) DOMAIN="$2"; shift 2 ;;
     --no-dashboard) WITH_DASHBOARD=0; shift ;;
+    --no-smart-ask) SMART_ASK=0; shift ;;
     --snapshot) SNAPSHOT="$2"; shift 2 ;;
     --from-file) FROM_FILE="$2"; shift 2 ;;
     --known-hosts) KNOWN_HOSTS_IN="$2"; shift 2 ;;
@@ -171,6 +185,7 @@ UNIT_DIR="/etc/systemd/system"
 POLL_UNIT="linode-scheduler-poll"
 API_UNIT="linode-scheduler-api"
 BACKUP_UNIT="linode-scheduler-backup"
+OLLAMA_UNIT="linode-scheduler-ollama"
 
 confirm() {
   [[ $ASSUME_YES -eq 1 ]] && return 0
@@ -512,7 +527,7 @@ configure_env() {
   else
     [[ $ASSUME_YES -eq 0 ]] || { cleanup_env_stage; die "no LINODE_API_TOKEN -- pass --env-file with it (and Object Storage settings) for a non-interactive run"; }
     log "Credentials (saved to $file, readable only by $SERVICE_USER, once every question is answered)"
-    stage_set LINODE_API_TOKEN "$(ask_secret 'Linode API token (Linodes, Volumes, IPs read/write; VPCs read)' required)"
+    stage_set LINODE_API_TOKEN "$(ask_secret 'Linode API token (Linodes, Volumes, IPs, StackScripts read/write; VPCs, Account read only)' required)"
   fi
 
   # Optional sections: asked when missing or half-filled (a re-run fills in what an earlier one
@@ -951,6 +966,140 @@ run_backup() {
   im backup --backup-dir "$BACKUP_DIR" || warn "the backup reported a problem (see above)"
 }
 
+# --- smart Ask (an open model on this host) --------------------------------------------------------
+
+env_get() { sed -n "s/^$1=//p" "$INSTALL_DIR/.env" 2>/dev/null | tail -1; }  # non-secret keys only
+env_set() {  # env_set KEY VALUE in the installed .env (keeps its owner and mode)
+  local tmp; tmp=$(mktemp "$INSTALL_DIR/.env.tmp.XXXXXX")
+  grep -v "^$1=" "$INSTALL_DIR/.env" > "$tmp" 2>/dev/null || true
+  printf '%s=%s\n' "$1" "$2" >> "$tmp"
+  cat "$tmp" > "$INSTALL_DIR/.env"; rm -f "$tmp"
+}
+env_del() {
+  local tmp; tmp=$(mktemp "$INSTALL_DIR/.env.tmp.XXXXXX")
+  grep -v "^$1=" "$INSTALL_DIR/.env" > "$tmp" 2>/dev/null || true
+  cat "$tmp" > "$INSTALL_DIR/.env"; rm -f "$tmp"
+}
+
+smart_ask_model_for_host() {  # the model this host's memory carries, or nothing
+  local kb; kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  # A 16 GB Linode reports about 15.6 GiB, an 8 GB one about 7.7 GiB.
+  if (( kb >= 14 * 1048576 )); then echo "qwen2.5:7b-instruct"
+  elif (( kb >= 7 * 1048576 )); then echo "qwen3:4b-instruct-2507-q4_K_M"
+  fi
+}
+
+install_ollama() {
+  if ! "$OLLAMA_DIR/bin/ollama" --version 2>/dev/null | grep -q "$OLLAMA_VERSION"; then
+    command -v zstd >/dev/null || {
+      if command -v apt-get >/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zstd >/dev/null
+      elif command -v dnf >/dev/null || command -v yum >/dev/null; then "$(command -v dnf || command -v yum)" install -y -q zstd >/dev/null
+      elif command -v zypper >/dev/null; then zypper -n -q install zstd >/dev/null
+      fi
+    } || return 1
+    local tmp; tmp=$(mktemp -d)
+    log "Downloading the model server (Ollama $OLLAMA_VERSION)"
+    if ! curl -fsSL -o "$tmp/ollama.tar.zst" \
+        "https://github.com/ollama/ollama/releases/download/v$OLLAMA_VERSION/ollama-linux-amd64.tar.zst"; then
+      rm -rf "$tmp"; return 1
+    fi
+    if ! echo "$OLLAMA_SHA256  $tmp/ollama.tar.zst" | sha256sum -c --status; then
+      rm -rf "$tmp"; warn "the model server download didn't match its checksum"; return 1
+    fi
+    rm -rf "$OLLAMA_DIR.new"; mkdir -p "$OLLAMA_DIR.new"
+    if ! zstd -dcq "$tmp/ollama.tar.zst" | tar -x -C "$OLLAMA_DIR.new"; then
+      rm -rf "$tmp" "$OLLAMA_DIR.new"; return 1
+    fi
+    rm -rf "$tmp"
+    systemctl stop "$OLLAMA_UNIT" 2>/dev/null || true
+    rm -rf "$OLLAMA_DIR"; mv "$OLLAMA_DIR.new" "$OLLAMA_DIR"
+    command -v restorecon >/dev/null && restorecon -R "$OLLAMA_DIR" 2>/dev/null
+  fi
+  id "$OLLAMA_USER" >/dev/null 2>&1 || useradd --system --home-dir "$OLLAMA_DATA" --shell /usr/sbin/nologin "$OLLAMA_USER"
+  mkdir -p "$OLLAMA_DATA"; chown "$OLLAMA_USER:" "$OLLAMA_DATA"; chmod 750 "$OLLAMA_DATA"
+  # Low priority: the scheduler and the API always get the CPU and disk first, and if memory runs
+  # out the kernel ends the model server, never them. One question at a time, one model loaded.
+  cat > "$UNIT_DIR/$OLLAMA_UNIT.service" <<EOF
+[Unit]
+Description=Linode Instance Scheduler - smart Ask model server (Ollama)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$OLLAMA_USER
+ExecStart=$OLLAMA_DIR/bin/ollama serve
+Environment=OLLAMA_HOST=${OLLAMA_URL#http://}
+Environment=OLLAMA_MODELS=$OLLAMA_DATA/models
+Environment=OLLAMA_NUM_PARALLEL=1
+Environment=OLLAMA_MAX_LOADED_MODELS=1
+Environment=HOME=$OLLAMA_DATA
+Nice=15
+CPUWeight=20
+IOWeight=20
+OOMScoreAdjust=500
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable "$OLLAMA_UNIT" >/dev/null 2>&1
+  systemctl restart "$OLLAMA_UNIT"
+  local i
+  for i in $(seq 1 30); do
+    curl -fsS -o /dev/null "$OLLAMA_URL/api/version" 2>/dev/null && return 0
+    sleep 2
+  done
+  return 1
+}
+
+setup_smart_ask() {
+  [[ $DRILL -eq 1 ]] && return 0
+  local url model gib
+  url=$(env_get LIS_ASK_LLM_URL)
+  if [[ $SMART_ASK -eq 0 ]]; then
+    if [[ "$url" == "$OLLAMA_URL" ]]; then
+      env_del LIS_ASK_LLM_URL; env_del LIS_ASK_LLM_MODEL
+      systemctl disable --now "$OLLAMA_UNIT" >/dev/null 2>&1 || true
+      log "Smart Ask turned off (--no-smart-ask); the model server is stopped. Ask still answers instantly."
+    fi
+    return 0
+  fi
+  if [[ -n "$url" && "$url" != "$OLLAMA_URL" ]]; then
+    log "Smart Ask uses your own model server ($url) -- left as it is"
+    return 0
+  fi
+  model=$(env_get LIS_ASK_LLM_MODEL)
+  [[ "$url" == "$OLLAMA_URL" && -n "$model" ]] || model=$(smart_ask_model_for_host)
+  gib=$(awk '/^MemTotal:/ {printf "%.1f", $2 / 1048576}' /proc/meminfo 2>/dev/null)
+  if [[ -z "$model" ]]; then
+    log "Smart Ask stays off: this host has ${gib} GB of memory and the smallest model needs an 8 GB plan. Ask still answers instantly."
+    return 0
+  fi
+  if [[ "$(uname -m)" != "x86_64" ]]; then
+    warn "smart Ask is set up only on x86-64 hosts -- left off. Ask still answers instantly."
+    return 0
+  fi
+  log "Setting up smart Ask with $model (${gib} GB of memory; --no-smart-ask to skip)"
+  if ! install_ollama; then
+    warn "the model server couldn't be installed or didn't start -- smart Ask left off (re-run install to try again). Ask still answers instantly."
+    return 0
+  fi
+  log "Downloading $model (a few GB, once)"
+  local pull_log; pull_log=$(mktemp)
+  if ! runuser -u "$OLLAMA_USER" -- env HOME="$OLLAMA_DATA" OLLAMA_HOST="${OLLAMA_URL#http://}" \
+        "$OLLAMA_DIR/bin/ollama" pull "$model" >"$pull_log" 2>&1; then
+    tail -c 400 "$pull_log" | tr '\r' '\n' | tail -3 >&2; rm -f "$pull_log"
+    warn "couldn't download $model -- smart Ask left off (re-run install to try again). Ask still answers instantly."
+    return 0
+  fi
+  rm -f "$pull_log"
+  env_set LIS_ASK_LLM_URL "$OLLAMA_URL"
+  env_set LIS_ASK_LLM_MODEL "$model"
+}
+
 # --- modes ----------------------------------------------------------------------------------------
 
 do_install() {
@@ -965,6 +1114,7 @@ do_install() {
   backup_env_encrypted
   enable_watchdog
   build_dashboard
+  setup_smart_ask
   write_units
   start_services
   setup_https
@@ -1040,6 +1190,7 @@ EOF
   stop_services
   setup_ssh_key
   build_dashboard
+  setup_smart_ask
   write_units
 
   local restored=0
@@ -1101,7 +1252,8 @@ EOF
     \`onboard --name <name> --instance-id <id> --force\`.
   - A node that refuses to start with a host-key warning was onboarded after the last backup:
     \`reset-host-key --name <name>\` (only after confirming it's really your instance).
-  - API tokens and dashboard sessions come back only from a snapshot; otherwise create new tokens.
+  - API tokens come back from a snapshot or their Object Storage records; without either, create
+    new ones. Dashboard sessions come back only from a snapshot (otherwise just sign in again).
   - If this host has a new address or name, point DNS / your reverse proxy at it, and update the
     OAuth app's redirect URI and LINODE_OAUTH_REDIRECT_URI in $INSTALL_DIR/.env.
 EOF
@@ -1124,7 +1276,7 @@ catch_up_schedules() {
 }
 
 do_status() {
-  for u in "$POLL_UNIT.service" "$API_UNIT.service" "$BACKUP_UNIT.timer"; do
+  for u in "$POLL_UNIT.service" "$API_UNIT.service" "$BACKUP_UNIT.timer" "$OLLAMA_UNIT.service"; do
     printf '  %-36s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"
   done
   local latest; latest=$(ls -1t "$BACKUP_DIR"/*.db 2>/dev/null | head -1 || true)

@@ -140,7 +140,7 @@ both processes the same way systemd does here (automatic restart on crash, autom
 node reboot) -- there's nothing further to set up; skip to "Backup & recovery" below.
 
 ```ini
-# /etc/systemd/system/instance-scheduler-poll.service
+# /etc/systemd/system/linode-scheduler-poll.service
 [Unit]
 Description=Instance Scheduler - scheduler loop
 After=network-online.target
@@ -155,8 +155,8 @@ Restart=always
 RestartSec=15
 # Stopping lets a start/stop already in progress finish first (up to 15 minutes).
 TimeoutStopSec=900
-StandardOutput=append:/var/log/instance-scheduler-poll.log
-StandardError=append:/var/log/instance-scheduler-poll.log
+StandardOutput=append:/var/log/linode-scheduler-poll.log
+StandardError=append:/var/log/linode-scheduler-poll.log
 
 [Install]
 WantedBy=multi-user.target
@@ -164,15 +164,15 @@ WantedBy=multi-user.target
 
 ```bash
 systemctl daemon-reload
-systemctl enable --now instance-scheduler-poll.service
+systemctl enable --now linode-scheduler-poll.service
 ```
 
 `Restart=always` plus `WantedBy=multi-user.target` covers both a process crash (auto-restart)
 and a full host reboot (auto-start on boot) — confirm both with:
 
 ```bash
-systemctl is-active instance-scheduler-poll.service     # should say "active"
-systemctl is-enabled instance-scheduler-poll.service     # should say "enabled"
+systemctl is-active linode-scheduler-poll.service     # should say "active"
+systemctl is-enabled linode-scheduler-poll.service     # should say "enabled"
 ```
 
 ### Running the API server / dashboard under systemd
@@ -180,7 +180,7 @@ systemctl is-enabled instance-scheduler-poll.service     # should say "enabled"
 Same pattern, a second unit:
 
 ```ini
-# /etc/systemd/system/instance-scheduler-api.service
+# /etc/systemd/system/linode-scheduler-api.service
 [Unit]
 Description=Instance Scheduler - API server & dashboard
 After=network-online.target
@@ -210,11 +210,18 @@ lists every setting — never commit the real file).
 | `LINODE_OAUTH_CLIENT_ID` / `LINODE_OAUTH_CLIENT_SECRET` | Only if using the dashboard's "Login with Linode" | Register your own OAuth Client in your own Linode account (Cloud Manager → Profile → OAuth Apps) — see "Setting up dashboard login" below. |
 | `LINODE_OAUTH_REDIRECT_URI` | Only if using dashboard login | Must exactly match the redirect URI configured on the OAuth App above. |
 | `LIS_DASHBOARD_USERS` | No | Comma-separated Linode usernames allowed to sign in to the dashboard. Sign-in is always limited to users of this deployment's Linode account; this narrows it further, and is required if `LINODE_API_TOKEN` has no Account access. |
+| `LIS_SLACK_BOT_TOKEN` / `LIS_SLACK_APP_TOKEN` / `LIS_SLACK_CHANNEL` | No | Slack chat-ops: notifications to the channel, and `/scheduler` commands over Socket Mode (outbound only). See the customer guide, §8.22. |
+| `LIS_TEAMS_WEBHOOK_URL` / `LIS_TEAMS_OUTGOING_SECRET` | No | Microsoft Teams: notifications (incoming webhook) and commands (outgoing webhook to `/chat/teams`, verified with this secret). |
+| `LIS_CHAT_DAILY_SUMMARY` | No | `1` sends a daily summary to chat at 03:00 UTC. |
+| `LIS_ADMIN_USERS` | No | Comma-separated Linode usernames who are dashboard admins in addition to the account's unrestricted users. Everyone else gets what their dashboard teams give them. |
+| `LIS_ENABLE_ASK` | No (on with the shipped model) | `0` turns Ask (questions about the product, answered on this host) off; `explain` and `doctor` are unaffected. |
+| `LIS_ASK_LLM_URL` / `LIS_ASK_LLM_MODEL` | No (set by `install.sh` on hosts with 8 GB or more) | Smart Ask's model server and model: `install.sh` points them at the model server it installs on this host (`http://127.0.0.1:11435`; Qwen 2.5 7B on 16 GB+, Qwen3 4B on 8 GB). Unset = smart Ask off. Point them at your own Ollama or OpenAI-compatible server to use that instead; `install.sh --no-smart-ask` removes the installer's own setting. |
+| `LIS_ASK_LLM_TIMEOUT` | No (default 60) | Seconds to wait for smart Ask's pick before showing the instant answer only. |
 | `LINODE_API_MAX_REQUESTS_PER_SECOND` | No (default 10) | Cap on Linode API requests per second for one process; all parallel `poll` workers share it. A rate-limited (429) response also pauses every worker for as long as the API asks. `0` removes the cap. |
 | `ACTIVITY_LOG_RETENTION_DAYS` | No (default 30) | How long the dashboard's Activity entries are kept. Service log files under `state/logs/` rotate by size (5 MB, three old files) regardless. |
 | `API_ALLOWED_ORIGINS` | No | Comma-separated browser origins allowed to call the API cross-origin (CORS). Leave unset unless a separately-hosted frontend needs to call this API from a different origin. |
 | `LINODE_OBJ_STORAGE_BUCKET` / `LINODE_OBJ_STORAGE_ENDPOINT` / `LINODE_OBJ_STORAGE_ACCESS_KEY` / `LINODE_OBJ_STORAGE_SECRET_KEY` | No | Optional Object Storage backup of each instance's full record, for fuller disaster recovery than tags alone provide. See "Setting up Object Storage backup" below. All four must be set together — leave all four unset to skip this layer entirely. |
-| `LIS_SSH_KEY_PASSPHRASE` | Yes (generated by `install.sh`) | Encrypts the stored copies of the deployment SSH key (database, every snapshot, Object Storage). At least 12 characters. Its recovery copy lives in a private StackScript in your Linode account. |
+| `LIS_SSH_KEY_PASSPHRASE` | Yes (generated by `install.sh`) | Encrypts the stored copies of the deployment SSH key (database, every snapshot, Object Storage), the database snapshots in Object Storage and hibernated disks. At least 12 characters. Its recovery copy lives in a private StackScript in your Linode account. |
 | `LIS_ENV_BACKUP_RECIPIENTS` | No | Your age public key(s). An encrypted copy of `.env` and the deployment SSH key is kept in Object Storage that only your age identity opens (`env-backup`, `env-restore`, `install.sh recover --env-from-backup`). |
 | `LIS_HEARTBEAT_URL` | No | An uptime monitor's ping URL; the scheduler pings it every minute so the monitor can tell you when this host is gone. |
 | `LIS_BACKUP_KEEP_ALL_HOURS` / `LIS_BACKUP_KEEP_DAILY_DAYS` | No (48 / 30) | Pruning of old database snapshots in Object Storage: everything from the last N hours, then one a day for N days. |
@@ -342,7 +349,9 @@ The command exits non-zero if anything didn't complete (a per-instance Object St
 failure, either snapshot destination failing) — wire this into your own monitoring via the exit
 code, not just by reading its log output. Also worth backing up, by whatever means you already
 use for plain files: `state/known_hosts` (the tool's own SSH trust store — losing it just means
-the next `start` for each instance needs its host key re-established, not lost data).
+a node reached on a public reserved IP refuses its next `start` or `stop` until `reset-host-key`
+re-establishes its host key; a node reached over a private VPC/VLAN address re-learns it on its
+next start; no data is lost). `backup` also saves it to Object Storage when that's configured.
 
 ### Recovering from a lost or corrupted registry
 
@@ -578,6 +587,29 @@ The dashboard's **Pending deletion** page does the same. `onboard` refuses a nam
 deletion. After a lost database, `rebuild` restores a pending node as a pending deletion, never as
 a live node.
 
+### Health
+
+`insight` (or Health on the dashboard) shows this deployment's own health for the last 30 days —
+start/stop times, Linode API latency/errors/rate limiting, scheduler check time, database lock
+waits, host memory/disk/load — and findings with cause and fix; findings are also sent as alerts.
+Prometheus can scrape `GET /metrics` with an API token holding `system:read`
+(`Authorization: Bearer <token>`). Right-sizing hints come from Linode's own CPU figures. Optional
+server metrics (node_exporter, off by default) are turned on per node or group with
+`metrics-agent`; see the customer guide, §8.19.
+
+### Budgets and guardrails
+
+Monthly running-hour budgets per group or node, and limits on manual starts and extensions
+(longest extension, most nodes running at once, quiet periods), are set with `budget-set` and
+`guardrail-set`, or on the dashboard's Budgets page. Scheduled starts are never refused. A
+refused start or extension exits with code 6; people ask for approval (`approval-request`, or
+Request approval on the dashboard) and an admin approves it. The optional nightly safety net
+(`guardrail-set --key safety_net --value true`) stops nodes running outside their schedule with
+no extension or approval, at `safety_net_hour` in each node's schedule timezone. Every guardrail
+can also be set for one schedule group (`guardrail-set --group-name`), replacing the all-instances
+setting for its nodes. Budgets at 80% and 100% are recorded in
+Activity and show in `alerts-check`. Full description: the customer guide, §8.18.
+
 ### Resolving a stuck per-instance lock
 
 Every mutating operation on a given instance takes a lock for its duration. If a process is
@@ -633,9 +665,20 @@ no longer needed.
    match `LINODE_OAUTH_REDIRECT_URI` in your `.env`.
 3. Copy the generated Client ID and Client Secret into `LINODE_OAUTH_CLIENT_ID` /
    `LINODE_OAUTH_CLIENT_SECRET`.
-4. Restart the API server (`systemctl restart instance-scheduler-api`).
+4. Restart the API server (`systemctl restart linode-scheduler-api`).
 
 Only users of the Linode account this deployment manages can sign in: after Linode confirms who someone is, the tool checks that username against the account's users (read with `LINODE_API_TOKEN`, which needs Account (Read Only) for this) and refuses anyone else. Set `LIS_DASHBOARD_USERS` (comma-separated Linode usernames) to allow only those users; if the token has no Account access, this list is required, otherwise nobody can sign in. The check is repeated every 15 minutes for signed-in users, so someone removed from the account or the list loses access. A refused user sees the reason on the sign-in page.
+
+**What each person may do (teams and roles).** Signing in proves who someone is; what they may then do comes from their role. The Linode account's unrestricted users are admins automatically, and `LIS_ADMIN_USERS` (comma-separated Linode usernames) names more. Admins have full access and manage everyone else on the dashboard's **Users & teams** page (or with `users`, `team-create`, `team-update`, `team-add-member`, `team-remove-member`, `team-rule-add`, `team-delete`). A team has a role and, optionally, a list of schedule groups and/or nodes it covers (all of them if left out):
+
+| Role | May |
+|---|---|
+| `viewer` | see instances, groups, schedules, savings, history and activity |
+| `operator` | viewer, plus start, stop, extend, start/stop a group and run a hook |
+| `editor` | operator, plus change schedules, groups, membership, start order, holidays and settings |
+| `admin` | everything, including onboarding, offboarding, hooks, API tokens, logs, the console and people |
+
+A person can belong to several teams; each team counts on its own, so "viewer of everything" plus "operator of the `web` group" lets them see all nodes but start and stop only the `web` group's. A username can be added to a team before the person ever signs in. A sign-in rule puts people whose Linode email has a given domain into a team automatically (`team-rule-add --team payments --email-domain payments.example.com`). Anyone else who signs in sees a "waiting for access" page, and the Activity log tells admins someone is waiting. The menu leaves out pages a person's role can't use, and the server refuses them regardless. Teams, members and rules are kept in Object Storage when it is configured and come back with `restore` or `rebuild`. If the deployment's token can't read the account's users and no `LIS_ADMIN_USERS` is set, there is no way to tell admins apart, so everyone allowed to sign in keeps full access until one of those is set.
 
 This is entirely separate from `LINODE_API_TOKEN` — the OAuth login only ever identifies who's
 calling; it's never used to talk to Linode directly. See the Definitive Guide's Security
@@ -662,7 +705,8 @@ from the CLI, the API, or the dashboard — can run a root command on that insta
 access accordingly. Every hook change is recorded with who made it, when, and the full new command:
 
 ```bash
-linode-instance-scheduler hooks-show --name <name>      # what applies now, and where it comes from
+linode-instance-scheduler hooks-show --name <name>              # what applies now, and where it comes from
+linode-instance-scheduler hook-history --name <name> --json     # recent changes (who, when, new config) and runs
 ```
 
 The dashboard's Hooks card on each instance lists recent hook changes and runs; the API serves the
@@ -710,11 +754,11 @@ the changed values without a restart.
    `current` at it. The previous `app-<version>/` stays, so going back is pointing `current` back.
 4. Restart both services (`install.sh` does this itself):
    ```bash
-   systemctl restart instance-scheduler-poll instance-scheduler-api
+   systemctl restart linode-scheduler-poll linode-scheduler-api
    ```
 5. Confirm both came back up clean:
    ```bash
-   systemctl status instance-scheduler-poll instance-scheduler-api   # both "active (running)"
+   systemctl status linode-scheduler-poll linode-scheduler-api   # both "active (running)"
    linode-instance-scheduler list                                   # registry still reads correctly
    ```
 
@@ -736,8 +780,8 @@ each assisted migration copy's Rescue Mode console session (also on disk under `
 days without new output, or sooner with **Delete session** or `console-session-delete --name X`);
 and **Console** runs any of the commands below from the browser.
 
-- **Are both processes actually running?** `systemctl is-active instance-scheduler-poll
-  instance-scheduler-api`.
+- **Are both processes actually running?** `systemctl is-active linode-scheduler-poll
+  linode-scheduler-api`.
 - **Is the fleet in the state you expect?** `linode-instance-scheduler list` — cross-check any
   instance that's `stopped` when you didn't expect it against `history --name <name>` (a
   scheduled stop shows `triggered_by=schedule` in the audit trail; if you don't see that, it
@@ -796,7 +840,7 @@ a week, rehearse at your real scale, then onboard production in waves.
 - [ ] **SSH allowed** from the scheduler host to every managed instance (Cloud Firewall rules,
       VPC routing).
 - [ ] **Scheduler and API server under systemd** (sections above), both enabled to start at boot:
-      `systemctl enable --now instance-scheduler-poll instance-scheduler-api`.
+      `systemctl enable --now linode-scheduler-poll linode-scheduler-api`.
 - [ ] **Dashboard behind HTTPS** (reverse proxy) with "Login with Linode" configured — never
       exposed on plain HTTP.
 - [ ] **Object Storage backup configured** (bucket-scoped key) and a scheduled whole-system
@@ -836,7 +880,7 @@ a week, rehearse at your real scale, then onboard production in waves.
 
 ### 4. Monitor (daily during the pilot, weekly after)
 
-- [ ] `systemctl is-active instance-scheduler-poll instance-scheduler-api`.
+- [ ] `systemctl is-active linode-scheduler-poll linode-scheduler-api`.
 - [ ] `linode-instance-scheduler list` — every instance in the state its schedule says.
 - [ ] `history --name <name>` for any instance that surprised you; failed starts/stops are
       retried for an hour automatically, but a persistent one needs a person.
@@ -868,14 +912,14 @@ error banner) for its cause and fix, and `doctor` for the whole deployment.
 | An API call returns 401 with an API token | The token was revoked, has expired, or was mistyped | `api-token-list`; create a new one if needed |
 | Nodes listed as "not in the state their schedule wants" | The scheduler was down for longer than its one-hour catch-up window | Review them on the Instances page or with `schedule-catch-up`, then apply |
 | An alert says the deployment SSH key isn't fully protected | No passphrase in `.env`, Object Storage unreachable, or the API token lacks StackScripts read/write | `ssh-key-protect` shows which copy is missing and why |
-| A scheduled action didn't fire | The scheduler process (`poll`) wasn't running for longer than the catch-up window (default one hour), the instance's effective schedule isn't what you expect, or a manual start/stop after the scheduled time took precedence (by design) | `systemctl is-active instance-scheduler-poll`; `linode-instance-scheduler schedule-show --name <name>`; `history --name <name>` shows whether a manual action came after the scheduled time; confirm whether an individual schedule is silently overriding a group's (Part III.1 of the Definitive Guide) |
+| A scheduled action didn't fire | The scheduler process (`poll`) wasn't running for longer than the catch-up window (default one hour), the instance's effective schedule isn't what you expect, or a manual start/stop after the scheduled time took precedence (by design) | `systemctl is-active linode-scheduler-poll`; `linode-instance-scheduler schedule-show --name <name>`; `history --name <name>` shows whether a manual action came after the scheduled time; confirm whether an individual schedule is silently overriding a group's (Part III.1 of the Definitive Guide) |
 | A scheduled start keeps failing (e.g. "insufficient capacity") | The region is temporarily short of that plan | Nothing to do while it's inside the catch-up window — `poll` retries it every cycle, and each failure is in `history` and makes `poll --once` exit non-zero. If it persists, start it on another plan or spread the fleet's start times |
 | `poll` output shows many "429 Too Many Requests" responses, or a large fleet's starts run slower than expected | Parallel workers are hitting the Linode API rate limit; every worker is pausing for the time the API asks | Usually nothing — requests resume on their own and anything that still fails is retried within the catch-up window. If it's persistent, lower `poll --max-parallel` (default 10) or `LINODE_API_MAX_REQUESTS_PER_SECOND` (default 10), and check nothing else is using the same API token heavily |
 | `SECURITY WARNING` on `start` | The instance is presenting a different SSH host key than the one on record — could be a genuine security event, or simply an infrastructure change you made yourself (a rebuild via Cloud Manager, a disk swap) | Independently confirm the new key is legitimate (Lish console) before running `reset-host-key` — never bypass this check casually |
 | `migrate-start`'s copy command prints `Could not identify the disks unambiguously` | Two devices match the original disk's size, or the new volume isn't attached in Rescue Mode | Nothing was copied. Check the listed devices (`lsblk`): the original disk is the size `migrate-start` reported, the new volume is the new size. If the volume is missing, run `migrate-start --force` |
 | The copy ends with `COPY_FAILED` | The block copy hit an error | Don't run `migrate-resume`. Run `migrate-start --force` to start over with a fresh volume |
 | `migrate-copy` says the key is not one of the profile's Lish keys | The deployment's public key isn't registered for Lish, or the profile allows only password login | Add the key in Cloud Manager: Profile → LISH Console Settings, allow keys; `migrate-copy --check` confirms |
-| `migrate-copy` reports the copy made no progress for 45 minutes | `dd` is stuck, or very slow | Open the Lish console to see it. If it's still moving, run `migrate-copy` again: it watches the running copy instead of starting another. Once the console shows `COPY_DONE`, `migrate-resume` finishes the migration |
+| `migrate-copy` reports the copy made no progress for 45 minutes | The copy is stuck, or very slow | Open the Lish console to see it. If it's still moving, run `migrate-copy` again: it watches the running copy instead of starting another. Once the console shows `COPY_DONE`, `migrate-resume` finishes the migration |
 | `onboard` refuses with "still on local disk" | The instance hasn't been migrated onto a Block Storage volume yet | Run the Path B migration (`migrate-start` / `migrate-resume`) first — see the Definitive Guide, Part II.2 |
 | `onboard` refuses with "was offboarded and is pending deletion" | That name was offboarded and is inside its grace period | `pending-deletions` — recover it, delete it now, or use another name |
 | Any change on the dashboard or API returns 409 "This host is a standby", or the CLI refuses with "this host is a standby" | Another scheduler holds the lease | Make the change on the active host. If it's gone for good, `scheduler-lease --take-over` (or System backup → Active scheduler) here first |
