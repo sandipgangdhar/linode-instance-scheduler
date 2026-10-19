@@ -4,6 +4,12 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.17.1
+
+### Fixed
+- `install.sh`: smart Ask's model server could never start on a fresh install (its folder was created readable by root only); re-running the installer repairs an existing install. When smart Ask can't be set up, the installer now shows why.
+- `install.sh`: the dashboard domain question asks again when the answer isn't a domain name, instead of skipping HTTPS and showing a wrong dashboard address.
+
 ## v1.17.0
 
 ### Added

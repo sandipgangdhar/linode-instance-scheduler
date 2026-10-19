@@ -541,7 +541,11 @@ configure_env() {
     fi
   fi
   if [[ $ASSUME_YES -eq 0 && $WITH_API -eq 1 && -z "$DOMAIN" ]]; then
-    DOMAIN=$(ask "Domain name for the dashboard, already pointing at this host (blank to skip HTTPS)" "$(caddy_managed_domain)")
+    while :; do
+      DOMAIN=$(ask "Domain name for the dashboard, already pointing at this host (blank to skip HTTPS)" "$(caddy_managed_domain)")
+      [[ -z "$DOMAIN" ]] || valid_domain "$DOMAIN" && break
+      warn "'$DOMAIN' isn't a domain name (it needs a dot, e.g. scheduler.example.com) -- try again"
+    done
   fi
   if [[ $ASSUME_YES -eq 0 && $WITH_API -eq 1 ]] && ! stage_oauth_complete; then
     if confirm "Set up \"Login with Linode\" for the dashboard now (needs an OAuth app)?"; then
@@ -800,11 +804,19 @@ host_addresses() {
   im host-addresses 2>/dev/null || true
 }
 
+valid_domain() {
+  [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
+}
+
 setup_https() {
   [[ -n "$DOMAIN" ]] || DOMAIN=$(caddy_managed_domain)  # a re-run keeps the earlier domain
   [[ -n "$DOMAIN" ]] || return 0
-  [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]] \
-    || { warn "'$DOMAIN' isn't a valid domain name -- skipping HTTPS setup"; return 0; }
+  if ! valid_domain "$DOMAIN"; then
+    warn "'$DOMAIN' isn't a valid domain name -- skipping HTTPS setup"
+    DOMAIN=$(caddy_managed_domain)   # what the closing summary shows: the HTTPS set up earlier, if any
+    valid_domain "$DOMAIN" || DOMAIN=""
+    return 0
+  fi
   log "Setting up HTTPS for https://$DOMAIN (Caddy)"
   if ! command -v caddy >/dev/null; then
     if command -v apt-get >/dev/null; then
@@ -1015,6 +1027,8 @@ install_ollama() {
     rm -rf "$OLLAMA_DIR"; mv "$OLLAMA_DIR.new" "$OLLAMA_DIR"
     command -v restorecon >/dev/null && restorecon -R "$OLLAMA_DIR" 2>/dev/null
   fi
+  # Readable by the service user whatever umask this installer runs under (configure_env sets 077).
+  chmod -R u=rwX,go=rX "$OLLAMA_DIR"
   id "$OLLAMA_USER" >/dev/null 2>&1 || useradd --system --home-dir "$OLLAMA_DATA" --shell /usr/sbin/nologin "$OLLAMA_USER"
   mkdir -p "$OLLAMA_DATA"; chown "$OLLAMA_USER:" "$OLLAMA_DATA"; chmod 750 "$OLLAMA_DATA"
   # Low priority: the scheduler and the API always get the CPU and disk first, and if memory runs
@@ -1084,7 +1098,9 @@ setup_smart_ask() {
   fi
   log "Setting up smart Ask with $model (${gib} GB of memory; --no-smart-ask to skip)"
   if ! install_ollama; then
-    warn "the model server couldn't be installed or didn't start -- smart Ask left off (re-run install to try again). Ask still answers instantly."
+    journalctl -u "$OLLAMA_UNIT" -n 5 --no-pager 2>/dev/null | sed 's/^/    /' >&2 || true
+    warn "the model server couldn't be installed or didn't start (see above) -- smart Ask left off (re-run install to try again). Ask still answers instantly."
+    systemctl disable --now "$OLLAMA_UNIT" >/dev/null 2>&1 || true
     return 0
   fi
   log "Downloading $model (a few GB, once)"
