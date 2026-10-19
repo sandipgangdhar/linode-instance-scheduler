@@ -205,7 +205,7 @@ lists every setting — never commit the real file).
 
 | Variable | Required | What it does |
 |---|---|---|
-| `LINODE_API_TOKEN` | Yes | A Linode Personal Access Token scoped read/write to Linodes, Volumes, IPs and StackScripts (the last for the SSH key passphrase's recovery copy; add VPCs (Read) too if any managed instance uses a VPC interface); Account (Read Only) is enough to satisfy the tool's own startup check. The one credential that actually performs every create/delete/tag/volume operation. Used by the CLI, the scheduler, and the API server alike. |
+| `LINODE_API_TOKEN` | Yes | A Linode Personal Access Token scoped read/write to Linodes, Volumes, IPs and StackScripts (the last for the SSH key passphrase's recovery copy; add VPCs (Read) too if any managed instance uses a VPC interface, and NodeBalancers (Read/Write) to keep managed nodes behind their NodeBalancers across stop and start and for waking through a NodeBalancer); Account (Read Only) is enough to satisfy the tool's own startup check. The one credential that actually performs every create/delete/tag/volume operation. Used by the CLI, the scheduler, and the API server alike. |
 | `LINODE_SSH_KEY_PATH` | No (has a default) | Path to this deployment's own SSH private key, used for every reachability check and `authorized_keys` capture. See the Definitive Guide's Security section for why this is one deployment-wide key, never a per-instance stored credential. |
 | `LINODE_OAUTH_CLIENT_ID` / `LINODE_OAUTH_CLIENT_SECRET` | Only if using the dashboard's "Login with Linode" | Register your own OAuth Client in your own Linode account (Cloud Manager → Profile → OAuth Apps) — see "Setting up dashboard login" below. |
 | `LINODE_OAUTH_REDIRECT_URI` | Only if using dashboard login | Must exactly match the redirect URI configured on the OAuth App above. |
@@ -231,6 +231,40 @@ lists every setting — never commit the real file).
 | `LIS_RECOVERY_DRILL_DAYS` | No (off) | Run a recovery drill every N days (e.g. `7`). See "Recovery drills" below. |
 | `LIS_ALLOW_STANDBY_CHANGES` | No | `1` lets a standby host (another scheduler holds the lease) make changes anyway. Normally left unset. |
 | `LINODE_SSH_PREVIOUS_KEY_PATH` | Set automatically | During a deployment SSH key rotation, the previous key, offered alongside the new one until every node has moved. Removed when the rotation finishes; don't set it by hand. |
+| `LIS_WAKE_IDLE_CPU_PCT` / `LIS_WAKE_IDLE_NET_BPS` / `LIS_WAKE_NB_BUSY_CONNECTIONS` | No (15 / 100000 / 5) | What counts as "in use" for wake on demand's idle stop: CPU percent, outbound bits per second, and connections per second on a NodeBalancer that wakes the node (over the limit for two readings in a row, 10 minutes). A bad or negative value falls back to the default. |
+| `LIS_AUTOFIX` | No (on) | `off` stops the active scheduler applying the safe repairs after its daily consistency check; `doctor --fix` still works by hand. |
+| `LINODE_SCHEDULER_BACKUP_DIR` | No | Where `backup` writes local snapshots when no `--backup-dir` is given (also the dashboard's Back up now). Default: `backups/` in the install directory. The scheduled backup `install.sh` sets up passes `--backup-dir` itself. |
+| `LIS_ASK_LLM_PROTOCOL` / `LIS_ASK_LLM_API_KEY` | No | Smart Ask's server protocol, `ollama` or `openai` (unset: `openai` when the URL ends in `/v1`, else `ollama`), and an API key sent as a Bearer token to a server that needs one (a secret). |
+| `LIS_ASK_LLM_SEND_FACTS` / `LIS_ASK_LLM_KEEP_ALIVE` | No (off / -1) | `1` lets questions sent to a model server on another host include this host's facts (a server on this host always gets them). Keep-alive: how long the model stays loaded; `-1` for good, or a duration such as `30m`. |
+| `LIS_ASK_MODEL_DIR` | No | Where Ask's question model files are; default `ask-model/` next to the program. |
+
+### Applying a change
+
+A running scheduler re-reads `.env` at its next check (every 15 seconds by default) and the API at
+its next request, whenever the file has changed, so these settings apply without a restart:
+`LINODE_API_TOKEN`, `LINODE_OAUTH_CLIENT_SECRET`, the four `LINODE_OBJ_STORAGE_*` settings, every
+`LIS_ALERT_*` setting, `LIS_ENV_BACKUP_RECIPIENTS`, `LIS_HEARTBEAT_URL`, `LIS_BACKUP_KEEP_ALL_HOURS`,
+`LIS_BACKUP_KEEP_DAILY_DAYS`, `LIS_DELETION_GRACE_DAYS`, `LIS_RECOVERY_DRILL_DAYS`, the three
+`LIS_WAKE_*` levels, `LIS_DASHBOARD_USERS`, `LIS_ADMIN_USERS`, the `LIS_SLACK_*` and `LIS_TEAMS_*`
+settings, `LIS_CHAT_DAILY_SUMMARY` and `LINODE_SSH_PREVIOUS_KEY_PATH`. The commands that write `.env`
+for you (`backup-config`, `alerts-config`, `env-backup --set-recipients`, `rotate-credentials`, the
+dashboard's System backup page) only change settings from this list.
+
+Every other setting is read when a service starts. Restart the scheduler
+(`sudo systemctl restart linode-scheduler-poll`) after changing `ACTIVITY_LOG_RETENTION_DAYS` or
+`LIS_AUTOFIX`; the API (`sudo systemctl restart linode-scheduler-api`) after
+`LINODE_OAUTH_CLIENT_ID`, `LINODE_OAUTH_REDIRECT_URI`, `API_ALLOWED_ORIGINS`,
+`LIS_ALLOW_STANDBY_CHANGES`, `LINODE_SCHEDULER_BACKUP_DIR` or any `LIS_ASK_LLM_*` setting; both after
+`LINODE_SSH_KEY_PATH`, `LINODE_API_MAX_REQUESTS_PER_SECOND`, `LIS_SSH_KEY_PASSPHRASE`,
+`LIS_ENABLE_ASK` or `LIS_ASK_MODEL_DIR`. CLI commands, and the scheduled backup, read `.env` each time
+they run. The scheduler's check interval, catch-up window and parallelism are `poll` options
+(`--interval-seconds`, `--window-seconds`, `--max-parallel`), not `.env` settings: add them with
+`sudo systemctl edit linode-scheduler-poll` (an override survives `install.sh` re-runs) and restart it.
+
+On LKE the settings are environment variables from the `linode-instance-scheduler-secrets` Secret and
+the `linode-instance-scheduler-config` ConfigMap (which also holds `POLL_INTERVAL_SECONDS`,
+`POLL_WINDOW_SECONDS` and `POLL_MAX_PARALLEL`). Nothing is re-read live there: change the Secret or
+ConfigMap, then `kubectl rollout restart deployment/linode-instance-scheduler -n linode-instance-scheduler`.
 
 ## Backup & recovery
 
@@ -906,6 +940,8 @@ error banner) for its cause and fix, and `doctor` for the whole deployment.
 
 | Symptom | Most likely cause | What to check / do |
 |---|---|---|
+| A stop is refused: "could not read the NodeBalancers to keep … membership" | Before deleting the instance, a stop records which NodeBalancers the node is behind (Linode removes it from them); the NodeBalancers couldn't be read | Run the stop again; the Linode API wasn't reachable or failed (a token without NodeBalancer access only warns). `stop --force` stops anyway and loses a membership not already recorded. `nb-membership --name <name>` lists what is recorded. |
+| A node didn't rejoin its NodeBalancer after a start | The re-add failed and is retried within 5 minutes, the NodeBalancer reaches it by a 192.168 private address (can't be kept), or it was removed from the NodeBalancer while running | Activity (action wake) says which; `nb-membership --name <name>` shows what will be added back. |
 | Instance shows `unreachable` | Created successfully but the network reachability check hasn't yet succeeded, or the instance was powered off out-of-band (e.g. directly via Cloud Manager, not through this tool) | Run `start` again — the tool detects a confirmed-gone or genuinely powered-off instance and recovers automatically; a second `start` completes the recovery rather than creating a duplicate |
 | A node never starts or stops on its schedule, and `poll` shows nothing for it | It's manual-only | `list` shows `[manual-only]`; `set-mode --name <name> --auto` to let schedules govern it again |
 | An API call returns 403 with an API token | The token lacks the scope this route needs, or the node/group is outside its limits | `api-token-list` for the token's scopes and limits; create a new token with the right ones (tokens can't be edited) |

@@ -302,7 +302,8 @@ database and settings the services use. (In Kubernetes:
 | `guardrail-set` | Limits on manual starts and extensions: longest extension, most nodes running at once, quiet periods, the nightly safety net. See §8.18. |
 | `approval-request` / `approval-list` / `approval-approve` / `approval-deny` / `approval-grant` | Ask for, and give, approval for a start or extension a budget or guardrail refused. See §8.18. |
 | `hibernate` / `unhibernate` | Move a node stopped for a long time to Object Storage (its volumes are deleted after the grace period), and bring it back. See §8.23. |
-| `wake-policy` / `wake-link` / `wake` | Wake on demand: keep a node stopped until someone needs it (or wake it outside its schedule), stop it again when idle; a secret wake link lets people start it from a page. See §8.21. |
+| `nb-membership` | Lists the VPC NodeBalancers a node is added back to after each start (a stop removes it from them), and `--forget` stops adding one back. See §8.24. |
+| `wake-policy` / `wake-link` / `wake` / `wake-nodebalancer` | Wake on demand: keep a node or group stopped until someone needs it (or wake it outside its schedule), stop it again when idle; a secret wake link, or visitors through your NodeBalancer, can start it from a page. See §8.21. |
 | `schedule-suggest` | A schedule learned from the last 4 weeks of real use for a node or group; `--apply` applies it, `--undo` puts the previous one back. See §8.20. |
 | `insight` | This deployment's own health — start/stop times, the Linode API, the scheduler, the host — with slow/high findings (cause and fix) and right-sizing hints. `--prometheus` for Prometheus. See §8.19. |
 | `metrics-agent` | Optional server metrics on a node or group: installs node_exporter on the node (loopback only, read over SSH). See §8.19. |
@@ -2631,9 +2632,11 @@ about other software ("upgrade postgres") get suggestions at most, never a direc
 
 **Smart Ask.** When the instant answer isn't sure, an open model running on this host can read the
 few closest answers and pick the one that fits, using this deployment's own facts. It only chooses
-among the product's reviewed answers -- it never writes one -- and nothing leaves the host. The
-dashboard shows the instant answer and suggestions at once and replaces them with the model's pick
-when it arrives (on a CPU-only host that takes from a few seconds to under a minute). `install.sh`
+among the product's reviewed answers -- it never writes one -- and nothing leaves the host. Its pick is
+listed first among "These may help", marked as the model's pick with its one-line reason, rather
+than shown as the answer: on questions the instant search isn't sure about, a model's pick is
+wrong too often to present as certain, so you open the one that fits. The dashboard waits for the model when the instant
+answer isn't sure (about 5-10 seconds on an 8-vCPU host; "Show suggestions now" skips the wait). `install.sh`
 sets it up when the host has the memory: 16 GB or more gets Qwen 2.5 7B, 8 GB gets Qwen3 4B, a
 smaller host leaves it off (Ask still works). The model runs as its own service
 (`linode-scheduler-ollama`) at low priority, so the scheduler and the API always come first, and
@@ -2767,9 +2770,58 @@ manual start.
 outbound network figures stayed near idle and nobody has an SSH session open for the policy's idle
 minutes (default 30) since it was woken or last busy, it is stopped through the normal stop (hooks,
 recovery copies, history, recorded as `wake-idle`). If the check can't tell (statistics or SSH
-unavailable), the node keeps running. A woken node doesn't get the 2-hour manual-start timer, and
+unavailable), the node keeps running. "Near idle" means CPU below 15% (Linode's figure includes I/O
+wait, which sits around 5-10% on an idle node booted from a volume), outbound traffic below
+100,000 bits/s and, for a node woken through a NodeBalancer, no two readings in a row (10 minutes)
+above 5 connections/s on that NodeBalancer (a public one sees short bursts of stray internet traffic). Change these with
+`LIS_WAKE_IDLE_CPU_PCT`, `LIS_WAKE_IDLE_NET_BPS` and `LIS_WAKE_NB_BUSY_CONNECTIONS` in `.env`.
+Activity says why a woken node is being kept running. A woken node doesn't get the 2-hour manual-start timer, and
 the nightly safety net leaves it alone. Policies and wake links are kept in Object Storage and come
 back with `restore` and `rebuild`.
+
+**Waking a group.** A group's policy applies to every member without its own. **Wake the group
+now** on the group page, or `wake --group-name app`, starts the groups it depends on first, deepest
+first (members already running are skipped), then the group; if a stage doesn't come up, the chain
+stops there. Waking a single node that's in a group also starts that group's dependencies first.
+Each member started is marked woken, so its idle stop applies; a dependency group stops when idle
+only if it has wake on demand on itself, otherwise its own schedule stops it.
+
+**Waking through a NodeBalancer.** Visitors to a site's normal address can wake its node or group.
+Attach one port of your NodeBalancer to it: this scheduler host joins that port as a **backup**
+node, which the NodeBalancer uses only while every real backend fails its health check — that is,
+while the node or group is stopped. Visitors then see a "the service is starting" page, which
+starts it when someone presses **Start it** (the default) or on any request (`--trigger any`, at
+most once per cooldown, 15 minutes by default — bots and crawlers count as visitors too; within the
+cooldown the page offers the Start button instead, so a person can still start it). The
+NodeBalancer's own health checks never start anything, and the page names nothing. As soon as the
+real backends pass their health checks again, the NodeBalancer sends traffic to them by itself:
+
+```
+linode-instance-scheduler wake-policy --group-name app --mode wake --idle-minutes 30
+linode-instance-scheduler wake-nodebalancer --show 203.0.113.7
+linode-instance-scheduler wake-nodebalancer --group-name app --nodebalancer 203.0.113.7 --port 80
+```
+
+or the **Wake through a NodeBalancer** part of the instance's or group's Wake card. Requirements:
+
+- a **VPC NodeBalancer** in the same region as this scheduler, with this scheduler host on the
+  NodeBalancer's VPC subnet (the backends are reached by VPC address, which the scheduler keeps
+  across stop and start; backends on 192.168 private addresses aren't supported);
+- an **HTTP** port, or **HTTPS terminated at the NodeBalancer** (TCP passthrough isn't supported),
+  with a health check — best an HTTP check of a path your app answers only when it's ready;
+- the host firewall letting the NodeBalancer's subnet reach the port shown when you attach
+  (19200–19499); the scheduler (`poll`) service serves the page.
+
+The managed nodes behind the NodeBalancer are added back to it after every start, as for any node
+(see §8.24). A woken node also counts NodeBalancer connections as use, so it isn't stopped while
+visitors are on the site.
+
+Everything is recoverable: the attachments and remembered backends are in Object Storage and on the
+NodeBalancer itself (tags `lis-wake:…` and `lis-wake-be:…`, and our backup node labelled
+`lis-wake-…`), so `restore` and `rebuild` bring them back. On a replacement host, the scheduler
+checks every few minutes that each port has exactly one backup node of ours pointing at this host,
+adds it if it's missing and removes ours that still point at the old host. `wake-nodebalancer
+--name … --remove` (or **Remove**) detaches it. API scope: `wake:manage`.
 
 ### 8.22 Slack and Microsoft Teams
 
@@ -2844,6 +2896,41 @@ unhibernated. Hibernating is never automatic: the instance page shows it only fo
 needs the name typed, and nodes stopped for 30 days or more are listed as suggestions. The copy's
 manifest is kept in Object Storage, so `rebuild` and `restore` know a node is hibernated and where
 its data is. API scope: `instances:hibernate` (admin only).
+
+### 8.24 NodeBalancer membership — nodes rejoin their NodeBalancer after every start
+
+Linode removes an instance from its NodeBalancers when the instance is deleted, which every stop
+does. So for **VPC NodeBalancers** the tool keeps a node's membership across stop and start, with
+nothing to set up and with or without wake on demand: three app servers behind a NodeBalancer,
+stopped every night and started every morning, rejoin it every morning.
+
+Before each stop (before the pre-stop hook) it looks through your NodeBalancers for nodes at the
+node's VPC address and records each one: the node's label, IP address and port, mode, weight and
+VPC subnet, plus the NodeBalancer's label, address and region and the port's settings at that
+moment (protocol, algorithm, session stickiness, health check type, path, interval, timeout,
+attempts and expected body, passive checks, proxy protocol; never certificates or keys). Right
+after the next start, whatever started it, each node is added back with the same label, mode and
+weight; if that fails, the scheduler retries within 5 minutes. If the node's VPC address was moved
+while it was stopped, the entry follows it. The port and its settings belong to the NodeBalancer
+and aren't touched by a stop, so they are kept for reference: the list shows which settings were
+changed on the NodeBalancer since. Other backends are never touched.
+
+If you remove a node from a NodeBalancer while it runs, it isn't put back at its next stop.
+`nb-membership --name <name>` lists a node's memberships (`--json` for scripts), and
+`nb-membership --name <name> --forget [--nodebalancer-id N [--config-id M]]` stops adding one
+back; on the dashboard, the instance page's **NodeBalancer membership** card does the same. API:
+`GET`/`DELETE /instances/{name}/nodebalancer-membership` (scopes `instances:status`,
+`instances:vpc-address`).
+
+A NodeBalancer that reaches a node by its 192.168 private IP can't be kept: that address is new each
+time the node starts. The stop warns about it; use a VPC NodeBalancer. If the NodeBalancers can't be
+read before a stop (a Linode API problem, or a token without NodeBalancer access), the stop is
+refused and nothing changes (a token without NodeBalancer access only warns: give it NodeBalancers Read/Write to keep memberships); `stop --force` stops anyway and loses any membership not already
+recorded. The memberships are kept in the database, in Object Storage, as `lis-wake-be:…` tags on
+the NodeBalancer and as `lis-nbm:…` tags (NodeBalancer, port, address, mode and weight) on the node's
+own OS volume, so `restore` and `rebuild` bring them back, from the tags alone if need be -- also for
+a node that was stopped at the time (without Object Storage, a node's own NodeBalancer label is then
+replaced by its name).
 
 ## 9. Costs
 

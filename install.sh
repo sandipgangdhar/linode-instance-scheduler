@@ -527,7 +527,7 @@ configure_env() {
   else
     [[ $ASSUME_YES -eq 0 ]] || { cleanup_env_stage; die "no LINODE_API_TOKEN -- pass --env-file with it (and Object Storage settings) for a non-interactive run"; }
     log "Credentials (saved to $file, readable only by $SERVICE_USER, once every question is answered)"
-    stage_set LINODE_API_TOKEN "$(ask_secret 'Linode API token (Linodes, Volumes, IPs, StackScripts read/write; VPCs, Account read only)' required)"
+    stage_set LINODE_API_TOKEN "$(ask_secret 'Linode API token (Linodes, Volumes, IPs, StackScripts, NodeBalancers read/write; VPCs, Account read only)' required)"
   fi
 
   # Optional sections: asked when missing or half-filled (a re-run fills in what an earlier one

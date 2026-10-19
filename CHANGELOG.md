@@ -4,6 +4,27 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.18.0
+
+### Added
+- Wake through a NodeBalancer: visitors to a site's normal address wake its node or group. The scheduler host joins one port of a VPC NodeBalancer as a backup node, which serves a "the service is starting" page only while the real backends are down, and starts them on a click (or any request, with a cooldown); the NodeBalancer switches back by itself once they pass their health checks. Set up per node or group (`wake-nodebalancer`, or the Wake card); recovered from Object Storage and the NodeBalancer's own tags.
+- NodeBalancer membership: Linode removes an instance from its NodeBalancers when it is deleted, which every stop does. Before each stop the tool now records every VPC NodeBalancer node at the node's VPC address (label, IP address and port, mode, weight, VPC subnet, and the port's settings for reference) and adds each back right after the next start, with or without wake on demand. A node removed from a NodeBalancer while running isn't put back. New `nb-membership` command, a NodeBalancer membership card on the instance page and `GET`/`DELETE /instances/{name}/nodebalancer-membership`. A stop is refused if the NodeBalancers can't be read (`--force` overrides).
+- Wake on demand for groups in the dashboard (a Wake card on the group page) and `wake --group-name`: a group wakes with the groups it depends on first.
+- `nb-membership`: lists the VPC NodeBalancers a node is added back to after each start (with the NodeBalancer and port settings recorded at the stop), and `--forget` stops adding one back. Also on the instance page and in the API.
+- `rebuild --name <node>` (repeatable; `names` in the API) recovers only the named nodes and leaves everything else found on the account alone.
+- Ask answers questions about Linode's own services as this tool handles them (onboarding a NodeBalancer, a Managed Database or an LKE cluster, storage, Linode Backups) and about every configuration setting: what it does, where it is set, how to change it and whether a restart is needed.
+
+### Changed
+- Smart Ask: its pick is listed first among the suggestions, starred and with a one-line reason, instead of being shown as the answer, so a wrong pick never reads as certain. It also reads a shorter prompt, about twice as fast on a CPU-only host.
+- Ask's question model is updated, and corrects common misspellings and joined forms of product words ("on-board", "node balancer").
+- The Linode API token needs NodeBalancers (Read/Write) to keep nodes in their NodeBalancers across stop and start; without it a stop warns and continues.
+- Wake on demand's idle stop: a node now counts as in use at 15% CPU (was 5%; an idle node booted from a volume reads 5-10% because Linode's figure includes I/O wait), and the levels can be changed in `.env` (`LIS_WAKE_IDLE_CPU_PCT`, `LIS_WAKE_IDLE_NET_BPS`, `LIS_WAKE_NB_BUSY_CONNECTIONS`). A NodeBalancer counts as busy only when two readings in a row (10 minutes) are over its limit, so short bursts of stray traffic don't keep a node up. Activity now says why a woken node is kept running.
+
+### Fixed
+- A replacement scheduler host could overwrite the backed-up trusted SSH host keys with its own before they were restored, so nodes that were stopped at the time failed their next start with a host-key error. The backup now keeps the keys of every node still managed, and a restore never adds a second key for an address already trusted.
+- Group recovery tags: Linode treats tags as case-insensitive across the account, so a group's tag could be stored in another casing and every start and stop reported a failed tag write; recovery could also bring the group back under that casing. Tags are now compared without case, `rebuild` restores the group's real name from Object Storage, and group names that differ only in case are refused.
+- Removing a node's wake-through-NodeBalancer attachment no longer forgets that node's NodeBalancer membership.
+
 ## v1.17.1
 
 ### Fixed
