@@ -1,57 +1,70 @@
-# Redis / TiDB Standby Automation — Setup & Usage Guide
+# Linode Instance Scheduler — Setup & Usage Guide
 
-This guide walks you through everything needed to use this automation, end to end: building a
-node the normal way, pulling this tool from GitHub, configuring it, migrating an existing node
-onto the storage layout the automation requires, and running it day to day.
+Linode Instance Scheduler runs your Linode instances only when you need them — on a schedule, by
+hand, or when someone asks for them — and stops paying for their compute the rest of the time,
+while each instance keeps its IP addresses, its disks and its identity.
+
+This guide walks you through everything needed to use it, end to end: preparing a node, installing
+the tool, bringing existing nodes under its management, and running it day to day (schedules,
+groups, start order, hooks, wake on demand, budgets, backups and recovery).
 
 It assumes no prior familiarity with this tool. If you follow it top to bottom on a real node,
-you'll end with a working `start`/`stop` workflow for that node.
+you'll end with that node starting and stopping on its own.
 
 ---
 
 ## 1. What this is, and why it exists
 
-On AWS, a common pattern for Redis failover standbys and TiDB replica pools is: keep several
-instances built and ready, but **stopped**, until you actually need one. Stopping an EC2
-instance is free — you only pay for the storage. When you need a standby, you start it and
-repoint DNS (or, for TiDB, bring a replica online), rather than debugging a live problem under
-pressure.
-
-**That exact pattern does not work on Linode as-is**, because of one billing difference:
+On most clouds, stopping an instance you don't need right now — a development environment
+overnight, a test system at the weekend, a standby that waits for an incident — stops its compute
+charges. **That doesn't work on Linode as-is**, because of one billing difference:
 
 > A *stopped* Linode instance bills at the same rate as a running one. Powering it off does not
 > stop charges. The only thing that actually stops compute billing is fully **deleting** the
 > instance.
 
-So a literal "stop" isn't the right tool here. This automation instead **deletes the instance
-when you don't need it, and recreates it the moment you do** — but it's built so that from your
-side, it behaves exactly like stop/start:
+So a literal "stop" isn't the right tool here. This tool instead **deletes the instance when you
+don't need it, and recreates it the moment you do** — but it's built so that from your side, it
+behaves exactly like stop/start:
 
 - The **public IP never changes** across cycles (it's reserved to your account, not tied to the
-  instance's lifecycle) — no DNS or allow-list updates needed.
-- **Data is never lost** — it lives on a separate Block Storage volume, independent of the
-  instance, and survives every delete/recreate cycle.
+  instance's lifecycle), and VPC and VLAN addresses are kept too — no DNS or allow-list updates
+  needed.
+- **Data is never lost** — the system disk and data disks live on Block Storage volumes,
+  independent of the instance, and survive every delete/recreate cycle.
 - The **SSH host key stays stable** — no "remote host identity changed" warnings when you
   reconnect after a recreate.
 - **Label, tags, plan/size, firewall, and other instance settings** are all captured and
   reapplied automatically, so the recreated instance looks identical in Cloud Manager and in
   your cost reports — not like a brand-new resource.
 
-The only real difference from AWS: while "stopped," you pay a small ongoing fee for the Block
-Storage volume(s) and for the reserved IP sitting idle — both far cheaper than running compute
-24/7, but not literally free. See [§9, Costs](#9-costs) for the numbers.
+While "stopped," you pay a small ongoing fee for the Block Storage volume(s) and for the reserved
+IP sitting idle — far cheaper than running compute 24/7, but not literally free. See
+[§9, Costs](#9-costs) for the numbers.
 
-### Use cases this is built for
+### What you can do with it
 
-- **Redis failover standbys.** You keep one or more pre-configured Redis nodes ready but not
-  running. When your primary misbehaves, you start a standby, point your application at it, and
-  investigate the original at your leisure — rather than firefighting a live node under load.
-- **TiDB replica pool.** You keep a pool of pre-configured replica nodes ready. When you need
-  more read capacity, you bring one online; when load drops, you take it back down.
+- **Schedules.** Run a node, or a whole group of nodes, only during the hours you choose — for
+  example 09:00–18:00 on weekdays in your own timezone — with holidays skipped. A node can follow
+  its group's schedule or have its own.
+- **Start order.** Start a database group before the application group that needs it, and stop
+  them in reverse, waiting for each to be up and ready.
+- **Hooks.** Run your own command on a node before it stops (flush a database, drain a queue) or
+  after it starts (wait until a service is really ready).
+- **Wake on demand.** Keep a node stopped until someone needs it — a secret link, or a visitor to
+  your site through a NodeBalancer, starts it — and stop it again once it's unused.
+- **Manual control.** Start, stop or extend from the dashboard, the CLI, the REST API with scoped
+  tokens, or Slack/Teams; a manual start outside the schedule stops by itself after a while.
+- **Keeping costs in check.** See what each schedule saves, set monthly running-hour budgets and
+  guardrails, and get suggested schedules learned from real usage.
+- **Standbys.** Keep pre-configured nodes — failover standbys, extra replicas — stopped until an
+  incident or a traffic spike, then start them in minutes at their usual addresses.
+- **Recovery.** Everything needed to rebuild the tool's own state is kept in Linode tags and,
+  optionally, in your Object Storage bucket, so losing the scheduler's host loses nothing.
 
-Both are the same underlying pattern: a named, pre-configured node that's brought up and torn
-down on demand, always coming back identical. The commands in this guide are the same for
-either.
+Every one of these uses the same underlying idea: a named node that's brought up and torn down,
+always coming back identical. `why --name <node>` tells you at any time why a node is running or
+stopped.
 
 ---
 
@@ -89,9 +102,9 @@ Before you start, make sure you have:
 
 ## 3. Building a node the normal way
 
-This section is exactly what you'd do today, with no automation involved — building a Redis
-standby or TiDB replica node from scratch. If you already have existing nodes running Redis or
-TiDB, skip to [§4](#4-installing-and-configuring-the-automation) and come back to
+This section is what you'd do today with no automation involved: build an ordinary Linode node
+running your application. If you already have nodes you want to schedule, skip to
+[§4](#4-installing-and-configuring-the-automation) and come back to
 [§6](#6-one-time-migration-onto-block-storage-path-b) for what's different about bringing an
 *existing* node under this tool's management.
 
@@ -117,31 +130,17 @@ or remove later are kept. If you'd rather not add the key yourself, the dashboar
 can log in once with a root password or private key you give it and install the key for you
 (nothing you give it is stored).
 
-### 3.2 Install and configure Redis
+### 3.2 Install and configure your application
 
-```
-apt update && apt install -y redis-server
-```
+Install and configure whatever the node runs — a web or application server, a database, a build
+runner, a development environment — exactly as you normally would. Nothing about how you
+configure or operate it changes because of this tool.
 
-Edit `/etc/redis/redis.conf` for your actual requirements — at minimum, review:
-
-- `bind` — restrict this to the interfaces/IPs that should actually be able to reach it (don't
-  leave it open to `0.0.0.0` unless you have a firewall doing that job instead).
-- `requirepass` — set a real password; don't run Redis unauthenticated.
-- **Persistence** — this is the setting that matters most for this automation. Decide between
-  RDB snapshots (`save` directives) and/or AOF (`appendonly yes`), and make sure whichever you
-  choose is actually **writing to the data volume you'll attach in the next step**, not to local
-  disk. Local disk does not survive a delete/recreate cycle; the data volume does.
-
-Restart Redis after any config change: `systemctl restart redis-server`.
-
-### 3.3 (TiDB) Install and configure TiDB / TiKV / PD
-
-TiDB's own install tooling (`tiup`) and cluster topology are outside the scope of this guide —
-follow TiDB's own documentation for provisioning your cluster's components. The one thing that
-matters for *this* automation is the same as for Redis: **make sure each node's actual data
-directory is on the Block Storage volume from the next step, not local disk.** Everything else
-about how you configure and operate TiDB is unchanged by this tool.
+The one thing that matters for this tool is **where the application keeps data that must
+survive**: databases, uploads, caches you want to keep warm. Put it on a Block Storage data
+volume (next step) or on the node's own system disk — both survive every stop/start. Make sure
+the services you need start on boot (`systemctl enable <service>`), since every start is a real
+boot.
 
 ### 3.4 Attach a Block Storage volume for your data
 
@@ -174,10 +173,10 @@ you out of SSH on every single recreate. `nofail` tells the boot process to cont
 this particular mount isn't ready yet, and it always catches up correctly once the volume is
 actually attached (which happens before the OS boots on every recreate this tool performs).
 
-Point Redis's persistence files (or TiDB's data directory) at `/mnt/data`, and restart the
-service so it's actually using it.
+Point your application's data directory at `/mnt/data`, and restart the service so it's actually
+using it.
 
-At the end of this section, you have a completely ordinary, real, running node — Redis or TiDB,
+At the end of this section, you have a completely ordinary, real, running node — your application,
 your normal config, a data volume with real data on it, reachable at whatever public IP Linode
 assigned it. Nothing about it is special yet; this is exactly the starting point the automation
 expects.
@@ -361,7 +360,7 @@ is the only manual step in this entire process.
 ### 6.1 `migrate-start`
 
 ```
-linode-instance-scheduler migrate-start --name redis-standby-1 --instance-id <your-instance-id>
+linode-instance-scheduler migrate-start --name app-1 --instance-id <your-instance-id>
 ```
 
 - `--name` — a short name **you choose**, to refer to this node by from here on. Doesn't have to
@@ -399,7 +398,7 @@ YOUR TURN -- this is the one manual step in the whole process:
      ambiguous. (Rescue Mode's device letters vary between systems, so don't type a
      dd command with fixed device names.)
 
-       DST=$(readlink -f /dev/disk/by-id/scsi-0Linode_Volume_redis-standby-1-os-vol-1a2b3c4d); ... COPY_DONE ...
+       DST=$(readlink -f /dev/disk/by-id/scsi-0Linode_Volume_app-1-os-vol-1a2b3c4d); ... COPY_DONE ...
 
   3. Wait for COPY_DONE (this takes a few minutes). COPY_FAILED means the copy did not
      complete -- don't continue; run migrate-start --force to start over (add
@@ -407,7 +406,7 @@ YOUR TURN -- this is the one manual step in the whole process:
   4. If it printed 'Could not identify the disks', stop and check `lsblk`: the
      original disk is ~20480MB, the new volume ~25GB.
   5. Once it prints COPY_DONE, run:
-       linode-instance-scheduler migrate-resume --name redis-standby-1
+       linode-instance-scheduler migrate-resume --name app-1
 ```
 
 ### 6.2 The one manual step
@@ -449,13 +448,13 @@ on the disk.
 ### 6.3 `migrate-resume`
 
 ```
-linode-instance-scheduler migrate-resume --name redis-standby-1
+linode-instance-scheduler migrate-resume --name app-1
 ```
 
 **What this actually does:**
 
 1. Builds a real boot configuration pointing at the migrated volume, and reattaches any other
-   Block Storage volumes (like your Redis/TiDB data volume) that were already on the node.
+   Block Storage volumes (like your application's data volume) that were already on the node.
 2. Shuts the node down (exiting Rescue Mode) and boots it from the new configuration.
 3. Verifies it's genuinely booted from the *migrated* volume — not just that the API reports
    "running," and not just that SSH answers at all (a `dd` byte-for-byte copy means the guest's
@@ -483,7 +482,7 @@ and boots from its own disk, which a migration never changes before `migrate-res
 destination volume (the copy) is deleted:
 
 ```
-linode-instance-scheduler migrate-abandon --name redis-standby-1
+linode-instance-scheduler migrate-abandon --name app-1
 ```
 
 It asks you to type the name (`--yes` skips that; `--no-boot` leaves the original powered off). A
@@ -522,11 +521,11 @@ archive doesn't know about it.) The old ID is also recorded locally, in the data
 (keyed by the node's name), once the *new* attempt's `migrate-resume` finally
 succeeds — check on these anytime with:
 ```
-linode-instance-scheduler migrate-orphans --name redis-standby-1
+linode-instance-scheduler migrate-orphans --name app-1
 ```
 and delete them once you're sure they're no longer needed:
 ```
-linode-instance-scheduler migrate-orphans --name redis-standby-1 --cleanup
+linode-instance-scheduler migrate-orphans --name app-1 --cleanup
 ```
 (add `--volume-id <id>` to target just one, if there's more than one). Requires typing the name
 to confirm, same as `offboard` (add `--yes` to skip the prompt, e.g. in a script). That list is
@@ -542,7 +541,7 @@ If you've lost the local migration record entirely (for example with the whole d
 tagged "active" for a migration you know is actually dead (confirmed by hand in Cloud Manager),
 mark it orphaned so it becomes eligible for `--cleanup`:
 ```
-linode-instance-scheduler migrate-orphans --name redis-standby-1 --volume-id <id> --mark-orphaned
+linode-instance-scheduler migrate-orphans --name app-1 --volume-id <id> --mark-orphaned
 ```
 This only ever retags — it never deletes anything on its own, and refuses if the volume isn't
 actually tagged active for that name. Same confirmation prompt (type the name, or pass `--yes`)
@@ -760,7 +759,7 @@ hand-written network files can only be checked over SSH, so `migrate-start` chec
 run it. The dashboard's Onboard page has the same report ("Account readiness").
 
 ```
-linode-instance-scheduler onboard --name redis-standby-1 --instance-id <your-instance-id>
+linode-instance-scheduler onboard --name app-1 --instance-id <your-instance-id>
 ```
 
 If you just did a migration in §6, use the same `--name` you used there. If your node was
@@ -789,7 +788,7 @@ From this point on, the node is under this tool's management by the name you gav
 **SSH on another port.** If the node's SSH server listens on a port other than 22, pass it:
 
 ```
-linode-instance-scheduler onboard --name redis-standby-1 --instance-id <id> --ssh-port 2222
+linode-instance-scheduler onboard --name app-1 --instance-id <id> --ssh-port 2222
 ```
 
 `migrate-start` takes the same `--ssh-port`, and a node migrated that way is onboarded on that
@@ -798,7 +797,7 @@ the key re-read before a stop, hooks, SSH key rotation — uses it. To change it
 changing sshd's own port on the node), run:
 
 ```
-linode-instance-scheduler set-ssh-port --name redis-standby-1 --port 2222
+linode-instance-scheduler set-ssh-port --name app-1 --port 2222
 ```
 
 On a running node this first logs in on the new port and refuses if it can't, so a wrong port
@@ -943,7 +942,7 @@ find it (a scoping issue, or the VPC belongs to a different account/project), `o
 with a clear error and you supply it explicitly:
 
 ```
-linode-instance-scheduler onboard --name redis-standby-1 --instance-id <id> --vpc-id <vpc-id>
+linode-instance-scheduler onboard --name app-1 --instance-id <id> --vpc-id <vpc-id>
 ```
 
 (The VPC ID is visible in Cloud Manager under VPCs, or via the API.) You'll only ever need this
@@ -988,7 +987,7 @@ unrelated node won't need a manual `reset-host-key --ip` first.
 > with no stored key is trusted on first contact, so neither needs this.)
 > **Fix, once per such node with nothing recorded, before your next `start`/`stop`:**
 > ```
-> linode-instance-scheduler reset-host-key --name redis-standby-1 --yes
+> linode-instance-scheduler reset-host-key --name app-1 --yes
 > ```
 > This connects once, trusts whatever key the node currently presents, and records it. Do this
 > for every node in this situation — after that, every future `start`/`stop` verifies against it
@@ -1007,7 +1006,7 @@ backups, each one stops at its copy step, with a link to its migration page.
 ### `stop` — take a node offline
 
 ```
-linode-instance-scheduler stop --name redis-standby-1
+linode-instance-scheduler stop --name app-1
 ```
 
 Prompts for confirmation (add `--yes` to skip it, e.g. in a script). Re-captures everything
@@ -1026,7 +1025,7 @@ refuses; a plain transient API error also refuses by default, but can be overrid
 anyway:
 
 ```
-linode-instance-scheduler stop --name redis-standby-1 --force
+linode-instance-scheduler stop --name app-1 --force
 ```
 
 **If the node itself is SSH-unreachable** (a guest firewall rule, a crashed `sshd`, a wedged
@@ -1036,7 +1035,7 @@ volumes and instance settings are read from the Linode API and don't need SSH. I
 node is genuinely unreachable and you just need to stop billing, add `--skip-precapture`:
 
 ```
-linode-instance-scheduler stop --name redis-standby-1 --skip-precapture
+linode-instance-scheduler stop --name app-1 --skip-precapture
 ```
 
 This keeps the last-known `authorized_keys` list in the registry instead of reading it fresh over
@@ -1049,7 +1048,7 @@ deleted out of band (e.g. via Cloud Manager) instead.
 ### `start` — bring it back online
 
 ```
-linode-instance-scheduler start --name redis-standby-1
+linode-instance-scheduler start --name app-1
 ```
 
 Recreates the instance from scratch: same plan, same reserved IP, same volumes reattached at the
@@ -1068,8 +1067,8 @@ linode-instance-scheduler list
 ```
 
 ```
-redis-standby-1: running  ip=172.x.x.x  region=in-bom-2  linode_id=123456
-tidb-replica-1:  stopped  ip=172.x.x.x  region=in-bom-2  linode_id=None
+app-1: running  ip=172.x.x.x  region=in-bom-2  linode_id=123456
+db-1:  stopped  ip=172.x.x.x  region=in-bom-2  linode_id=None
 ```
 
 (`in-bom-2` here is just an example, not a required region — your instances' regions are
@@ -1080,7 +1079,7 @@ volume.)
 ### `status` — full detail on one node
 
 ```
-linode-instance-scheduler status --name redis-standby-1
+linode-instance-scheduler status --name app-1
 ```
 
 Prints the complete captured record for that node — useful for confirming exactly what will be
@@ -1089,7 +1088,7 @@ reproduced on the next `start`, or for debugging.
 ### `why` — why is it running (or stopped) right now?
 
 ```
-linode-instance-scheduler why --name redis-standby-1
+linode-instance-scheduler why --name app-1
 linode-instance-scheduler why --group-name app
 ```
 
@@ -1112,7 +1111,7 @@ as **Why** on the instance page, and as **Now** on a group page; the API is
 ### `history` — "why was my instance down at 9am?"
 
 ```
-linode-instance-scheduler history --name redis-standby-1
+linode-instance-scheduler history --name app-1
 ```
 
 ```
@@ -1136,7 +1135,7 @@ operations can never run against the same node at the same time (e.g. two people
 as locked when nothing is actually still running:
 
 ```
-linode-instance-scheduler clear-lock --name redis-standby-1
+linode-instance-scheduler clear-lock --name app-1
 ```
 
 You'll get a warning first and a `[y/N]` prompt — **only confirm after independently checking in
@@ -1157,7 +1156,7 @@ catch a real problem (wrong disk, a misconfigured DNS/routing issue, or worse). 
 the *only* way to move past a genuine mismatch:
 
 ```
-linode-instance-scheduler reset-host-key --name redis-standby-1 --yes
+linode-instance-scheduler reset-host-key --name app-1 --yes
 ```
 
 **Only use this after independently confirming the new key is legitimate** — e.g. via Cloud
@@ -1185,7 +1184,7 @@ accidentally wiped laptop, whatever — this command gets you back.
 
 **How it works**: every time you `onboard`, `start`, or `stop` a node, this tool tags that node's OS
 volume, data volume(s), and reserved IP directly in your Linode account with the mapping
-("these resources belong to `redis-standby-1`"). That's the one piece of information that isn't
+("these resources belong to `app-1`"). That's the one piece of information that isn't
 recoverable from Linode's API on its own — everything else about a node (its network config,
 tags, size, etc.) can always be re-read from the live instance. So instead of backing up the
 whole local file somewhere, the one thing that actually matters is written directly onto your
@@ -1258,10 +1257,10 @@ different — it's for when you're genuinely done with a node for good, not just
 offline until next time.
 
 ```
-linode-instance-scheduler offboard --name redis-standby-1
+linode-instance-scheduler offboard --name app-1
 ```
 
-**Requires the node to already be stopped** — `stop --name redis-standby-1` first if it's still
+**Requires the node to already be stopped** — `stop --name app-1` first if it's still
 running. Offboarding refuses cleanly on a running node rather than doing something surprising
 with a live instance.
 
@@ -1285,13 +1284,13 @@ deletion, re-checking each resource first: anything no longer marked, now attach
 instance, or claimed by another name is left alone. To skip the grace period:
 
 ```
-linode-instance-scheduler offboard --name redis-standby-1 --now
+linode-instance-scheduler offboard --name app-1 --now
 ```
 
 **To also permanently delete the volumes**, not just release the IP:
 
 ```
-linode-instance-scheduler offboard --name redis-standby-1 --delete-volumes
+linode-instance-scheduler offboard --name app-1 --delete-volumes
 ```
 
 This destroys the actual data on those volumes — irreversibly. Only use it once you're certain
@@ -1362,7 +1361,7 @@ scheduling yet (see the "Known limitations" note below).
 **Set a schedule**, e.g. weekdays 9am–6pm India time:
 
 ```
-linode-instance-scheduler schedule-set --name redis-standby-1 --timezone Asia/Kolkata \
+linode-instance-scheduler schedule-set --name app-1 --timezone Asia/Kolkata \
   --days mon,tue,wed,thu,fri --start-time 09:00 --stop-time 18:00
 ```
 
@@ -1376,7 +1375,7 @@ names the day each window *starts*). Start and stop must differ.
 Need more than one rule (e.g. different hours on weekends)? Pass a full JSON array instead:
 
 ```
-linode-instance-scheduler schedule-set --name redis-standby-1 --timezone Asia/Kolkata \
+linode-instance-scheduler schedule-set --name app-1 --timezone Asia/Kolkata \
   --rules-json '[{"days_of_week":["mon","tue","wed","thu","fri"],"start_time":"09:00","stop_time":"18:00"},
                  {"days_of_week":["sat","sun"],"start_time":"10:00","stop_time":"14:00"}]'
 ```
@@ -1384,8 +1383,8 @@ linode-instance-scheduler schedule-set --name redis-standby-1 --timezone Asia/Ko
 **View or remove it:**
 
 ```
-linode-instance-scheduler schedule-show --name redis-standby-1
-linode-instance-scheduler schedule-clear --name redis-standby-1
+linode-instance-scheduler schedule-show --name app-1
+linode-instance-scheduler schedule-clear --name app-1
 ```
 
 `schedule-clear` removes that node's own schedule — if it's in a group with a schedule, it follows
@@ -1476,8 +1475,8 @@ what the group's rules are resolved against from that point on.
 **Add nodes to it** (also works to move a node from one group to another):
 
 ```
-linode-instance-scheduler group-add --name redis-standby-1 --group-name "Dev Environment"
-linode-instance-scheduler group-add --name redis-standby-2 --group-name "Dev Environment"
+linode-instance-scheduler group-add --name app-1 --group-name "Dev Environment"
+linode-instance-scheduler group-add --name app-2 --group-name "Dev Environment"
 ```
 
 **A node's own individual schedule (§8.5) always wins over its group's**, if it has one — the
@@ -1495,7 +1494,7 @@ linode-instance-scheduler group-list                                    # every 
 **Remove a node from its group:**
 
 ```
-linode-instance-scheduler group-remove --name redis-standby-1
+linode-instance-scheduler group-remove --name app-1
 ```
 
 If that node has no individual schedule of its own, this asks what to do — copy the group's
@@ -1588,20 +1587,20 @@ manually outside its own scheduled "on" hours, this tool automatically arms a co
 doesn't stay running forever by accident:
 
 ```
-linode-instance-scheduler start --name redis-standby-1
+linode-instance-scheduler start --name app-1
 ```
 
 ```
-'redis-standby-1' is up at 203.0.113.10.
+'app-1' is up at 203.0.113.10.
   manually started outside its scheduled hours -- auto-stops at 2026-08-25 20:00 UTC unless
-  extended (`extend --name redis-standby-1`).
+  extended (`extend --name app-1`).
 ```
 
 The default window is 2 hours from when you started it. `status` and `list` both show the same
 countdown for as long as it's active:
 
 ```
-linode-instance-scheduler status --name redis-standby-1
+linode-instance-scheduler status --name app-1
 linode-instance-scheduler list
 ```
 
@@ -1609,8 +1608,8 @@ linode-instance-scheduler list
 to ask:
 
 ```
-linode-instance-scheduler extend --name redis-standby-1
-linode-instance-scheduler extend --name redis-standby-1 --hours 4    # a different window, just this once
+linode-instance-scheduler extend --name app-1
+linode-instance-scheduler extend --name app-1 --hours 4    # a different window, just this once
 ```
 
 Each `extend` sets the stop to `--hours` (or the 2h default) from **now** -- but never earlier
@@ -1624,7 +1623,7 @@ own or its group's), `extend` skips today's scheduled stop and keeps it running 
 it (or from now, if the stop time has already passed):
 
 ```
-linode-instance-scheduler extend --name redis-standby-1 --hours 3
+linode-instance-scheduler extend --name app-1 --hours 3
 ```
 
 The scheduler holds the scheduled stop until then, and stops the node when the extension runs out.
@@ -1668,7 +1667,7 @@ resumes normally at its next window, whether you stopped it manually or not.
 that one start, if you already know you'll need more (or less) time:
 
 ```
-linode-instance-scheduler start --name redis-standby-1 --override-window-hours 6
+linode-instance-scheduler start --name app-1 --override-window-hours 6
 ```
 
 ### 8.8 The REST API (optional) — for a dashboard, or your own scripts
@@ -3000,46 +2999,64 @@ configurations.
 
 ## 10. Realistic walkthroughs
 
-### Redis failover
+### A development environment that runs only in office hours
 
-You maintain two standby nodes, onboarded as `redis-standby-1` and `redis-standby-2`, both
-`stopped` day to day.
-
-Your primary Redis starts misbehaving. Rather than debugging it live:
+Your team's development environment is three nodes — `app-1`, `app-2` and `db-1` — used
+09:00–19:00 on weekdays in India. Put them in one group with that schedule:
 
 ```
-linode-instance-scheduler start --name redis-standby-1
+linode-instance-scheduler group-create --name dev --timezone Asia/Kolkata
+linode-instance-scheduler group-schedule-set --group-name dev --timezone Asia/Kolkata \
+    --days mon,tue,wed,thu,fri --start-time 09:00 --stop-time 19:00
+linode-instance-scheduler group-add --name app-1 --group-name dev
+linode-instance-scheduler group-add --name app-2 --group-name dev
+linode-instance-scheduler group-add --name db-1 --group-name dev
 ```
 
-A couple of minutes later, it's up at its known, stable IP. Repoint your application at it (DNS,
-config, however you normally do failover). Investigate the original primary at your leisure —
-no pressure, no live production system to poke at while it's still serving traffic.
+From then on they start every weekday morning and stop every evening, at the same addresses each
+day. Compute is paid for 50 of the week's 168 hours — about a 70% saving. Someone working late
+extends the group for a couple of hours from the dashboard; a public holiday added with
+`holiday-add` keeps them stopped all day.
 
-Once you've resolved the original issue and are ready to switch back:
+### An application that needs its database first
 
-```
-linode-instance-scheduler stop --name redis-standby-1
-```
-
-`redis-standby-1` goes back to costing almost nothing until you need it again.
-
-### TiDB replica pool scaling
-
-You keep three replica nodes onboarded — `tidb-replica-1`, `-2`, `-3` — normally all `stopped`.
-A traffic spike means you need more read capacity:
+The application nodes in group `app` can't start until the database in group `db` is up and
+accepting connections. Give the database a post-start check and make `app` depend on `db`:
 
 ```
-linode-instance-scheduler start --name tidb-replica-1
-linode-instance-scheduler start --name tidb-replica-2
+linode-instance-scheduler hooks-set --group-name db --post-start 'pg_isready -t 5'
+linode-instance-scheduler group-depends --group-name app --on db
 ```
 
-Both come up at their stable, known IPs and rejoin your cluster the way any TiDB replica would.
-When the spike passes:
+Each morning the database starts first and the application nodes wait until its check passes;
+each evening the application stops first, then the database.
+
+### A rarely used tool that starts when someone needs it
+
+An internal reporting server, `reports-1`, is used a few times a week at unpredictable times.
+Instead of a schedule, keep it stopped and let people wake it:
 
 ```
-linode-instance-scheduler stop --name tidb-replica-1
-linode-instance-scheduler stop --name tidb-replica-2
+linode-instance-scheduler wake-policy --name reports-1 --mode wake --idle-minutes 30
+linode-instance-scheduler wake-link --name reports-1
 ```
+
+Share the link. Opening it shows the node's state and a Start button; once nobody has used the
+node for 30 minutes it stops again by itself.
+
+### Standbys that wait for an incident or a traffic spike
+
+You keep extra nodes — `standby-1`, `standby-2` — onboarded and `stopped` day to day. When you
+need them (a failover, a busy day), start them:
+
+```
+linode-instance-scheduler start --name standby-1
+linode-instance-scheduler start --name standby-2
+```
+
+A couple of minutes later they're up at their known, stable addresses with their data, and
+rejoin whatever they belong to the way they always do. When you're done, `stop` them and they go
+back to costing almost nothing.
 
 ---
 

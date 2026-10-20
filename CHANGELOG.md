@@ -4,6 +4,17 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.19.1
+
+### Changed
+- The README describes the product as a whole -- schedules, groups and start order, hooks, wake on demand, manual control, costs and recovery -- with general walkthroughs (an office-hours development environment, an application that needs its database first, a tool woken on demand, standbys). Examples use generic node names, and the onboarding form's example name is `app-1`.
+
+### Fixed
+- Smart Ask: after an upgrade or a restart of its service, the first question waited while the model loaded (about 10 seconds on 8 vCPUs). The API server now keeps the model loaded and its fixed instructions read, checking every minute.
+- Ask: answers written after the installed question model was built couldn't be found by it; they are now added to its index when it loads. New answer: what Create wake link does.
+- Ask names Smart Ask instead of the model behind it ("Smart Ask thinks the first one fits best").
+- Wake on demand: Activity now says when a woken node can't be judged yet (Linode has no statistics for an instance's first minutes), and, before every idle stop, what it was idle since -- a node whose idle minutes ran out before its first figures arrived used to stop with no line explaining it.
+
 ## v1.19.0
 
 ### Added
