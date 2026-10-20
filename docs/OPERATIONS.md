@@ -434,7 +434,10 @@ passphrase from its recovery copy in your Linode account). It restores the newes
 snapshot — usually the one uploaded within a minute of the last change — and the trusted host
 keys, runs `rebuild` for anything newer and `heal` to match the account (adopting an instance the
 snapshot thinks is stopped), starts the services, and lists nodes left off their schedule for you
-to approve. `--no-start` lets you review first, `--rebuild-only` skips the snapshot. Shut the old
+to approve. Wake-on-demand settings, budgets and guardrails, and holidays are kept in Object
+Storage one record per setting and merged into the restored database setting by setting: the newer
+copy wins, one deleted after the snapshot stays deleted, and none is lost because something was
+changed on the new host before the restore. `--no-start` lets you review first, `--rebuild-only` skips the snapshot. Shut the old
 host's poller down first: two pollers must never run at once. Full details, including what to
 check afterwards: `DEPLOYMENT.md` §8.1.
 

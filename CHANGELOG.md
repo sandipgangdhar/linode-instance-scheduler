@@ -4,6 +4,13 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.19.2
+
+### Fixed
+- Wake-on-demand settings (policies, wake links, NodeBalancer attachments and remembered backends), budgets and guardrails, and holidays are now kept in Object Storage one record per setting instead of one record per kind. Before, a change made on a new host before its database was restored (for example creating a wake link) replaced the stored copy with only what that empty database held, and a later restore removed every other setting. A restore now merges setting by setting: the newer copy wins, a setting deleted after the snapshot stays deleted, and nothing the database already has is removed. Settings saved by earlier versions are still read. `doctor` checks all three and `doctor --fix` re-uploads any that are missing.
+- Ask answers a question that names a feature ("What is budgets?", "how do I use wake links", "when should I use hibernate") or matches an answer's title directly, instead of sometimes saying it wasn't sure.
+- When Ask isn't sure and Smart Ask is set up, the suggestions now show at once; Smart Ask's answer or pick replaces them when it's ready, instead of the page waiting for Smart Ask with nothing shown.
+
 ## v1.19.1
 
 ### Changed
