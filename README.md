@@ -2775,6 +2775,9 @@ wait, which sits around 5-10% on an idle node booted from a volume), outbound tr
 100,000 bits/s and, for a node woken through a NodeBalancer, no two readings in a row (10 minutes)
 above 5 connections/s on that NodeBalancer (a public one sees short bursts of stray internet traffic). Change these with
 `LIS_WAKE_IDLE_CPU_PCT`, `LIS_WAKE_IDLE_NET_BPS` and `LIS_WAKE_NB_BUSY_CONNECTIONS` in `.env`.
+Linode's figures come as 5-minute samples and the newest ones are filled in late, so a node counts
+as in use until 15 minutes after its last busy sample ends: a node stops about 15 minutes plus its
+idle minutes after the last real use (an open SSH terminal session counts up to the last 5-minute check that still sees it).
 Activity says why a woken node is being kept running. A woken node doesn't get the 2-hour manual-start timer, and
 the nightly safety net leaves it alone. Policies and wake links are kept in Object Storage and come
 back with `restore` and `rebuild`.

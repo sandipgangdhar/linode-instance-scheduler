@@ -4,6 +4,15 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.18.1
+
+### Fixed
+- Wake on demand's idle stop: a woken node that had been busy (NodeBalancer visitors, CPU or network) was kept running for good, because the same busy reading counted again at every check. A node now stops once its idle minutes have passed after its last use; since Linode fills in its newest figures late, use counts until 15 minutes after the last busy reading.
+- Waking through a NodeBalancer: the NodeBalancer's figures give the number of connections in each 5-minute sample, which was read as connections per second, so a few stray requests counted as visitors. The limit (`LIS_WAKE_NB_BUSY_CONNECTIONS`, 5 per second) now applies to the real rate.
+- Two scheduler deployments sharing one SSH key on the same Linode account replaced each other's recovery copy of the key's passphrase; each now keeps its own.
+- Wake on demand: an open SSH terminal session wasn't seen on systems whose `who` lists the session type before the terminal (Debian 13), so a node could be stopped while someone was logged in.
+- Activity names a wake from a NodeBalancer's starting page as such, not as a wake link.
+
 ## v1.18.0
 
 ### Added
