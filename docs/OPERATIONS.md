@@ -820,6 +820,11 @@ and **Console** runs any of the commands below from the browser.
   instance that's `stopped` when you didn't expect it against `history --name <name>` (a
   scheduled stop shows `triggered_by=schedule` in the audit trail; if you don't see that, it
   didn't come from this tool's own scheduling).
+- **Why is a node (or group) in this state?** `why --name <name>` (or `why --group-name <group>`)
+  names the rule deciding it right now -- its schedule and whether it is inside the hours, a
+  holiday, an extension or manual start, wake on demand, a group dependency, manual-only -- and
+  when it changes next. The dashboard shows it as **Why** on the instance page and **Now** on a
+  group page.
 - **Did a scheduled action actually fire when it should have?** `linode-instance-scheduler
   history --name <name> --limit 10` shows the real recorded outcome, not just whether the
   poller is running.

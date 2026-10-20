@@ -257,6 +257,7 @@ database and settings the services use. (In Kubernetes:
 | `api-token-create` / `api-token-list` / `api-token-revoke` | Manage API tokens for scripts calling the REST API. See §8.13. |
 | `list` | Shows every node you've onboarded and its current status at a glance. |
 | `status` | Shows the full captured record for one node. |
+| `why` | Says in one line why a node (`--name`) is running or stopped right now, and when it changes next; with `--group-name`, the same for every member of a group. |
 | `history` | Shows the audit trail (create/delete events) for one node — "why was my instance down at 9am?" Works even for a node you've since `offboard`ed. |
 | `savings` | A node's (`--name`) or group's (`--group-name`) configured savings and, for a node, what it actually saved over the last `--days` (default 7). |
 | `activity` | What the scheduler, API and CLI did, filtered by node, group, level or text — the dashboard's Activity page. |
@@ -1084,6 +1085,29 @@ linode-instance-scheduler status --name redis-standby-1
 
 Prints the complete captured record for that node — useful for confirming exactly what will be
 reproduced on the next `start`, or for debugging.
+
+### `why` — why is it running (or stopped) right now?
+
+```
+linode-instance-scheduler why --name redis-standby-1
+linode-instance-scheduler why --group-name app
+```
+
+```
+Running: inside group 'app''s schedule hours (Asia/Kolkata); it stops at 18:00 Asia/Kolkata today.
+  Started by the scheduler at 09:00 Asia/Kolkata today.
+```
+
+Names the one rule deciding the node's state right now, worked out from the same rules the scheduler
+itself uses: its schedule (its own or its group's) and whether it is inside the hours, a holiday, an
+extension or a manual start's auto-stop, wake on demand (with the earliest idle stop time), a start
+waiting on a group it depends on, a stop waiting on the groups that depend on it, manual-only,
+hibernation, or a state needing attention. Supporting lines say who last started or stopped it and
+whether its last start or stop failed. For a group, the first line rolls the members up ("3 of 4
+running -- 3 inside the schedule, 1 stopped by hand") and one line per member follows. `--json`
+prints it for scripts. `status` also prints the one-line answer (to stderr). The dashboard shows it
+as **Why** on the instance page, and as **Now** on a group page; the API is
+`GET /instances/{name}/why` and `GET /groups/{name}/why`; in Slack or Teams, `why <node>`.
 
 ### `history` — "why was my instance down at 9am?"
 
@@ -2778,7 +2802,10 @@ above 5 connections/s on that NodeBalancer (a public one sees short bursts of st
 Linode's figures come as 5-minute samples and the newest ones are filled in late, so a node counts
 as in use until 15 minutes after its last busy sample ends: a node stops about 15 minutes plus its
 idle minutes after the last real use (an open SSH terminal session counts up to the last 5-minute check that still sees it).
-Activity says why a woken node is being kept running. A woken node doesn't get the 2-hour manual-start timer, and
+Activity says why a woken node is being kept running (in use, and by what), when it stops being
+used ("not in use since 10:15; it stops at about 10:45 unless used"), and when a `schedule-wake`
+node is inside its schedule's hours and left to the schedule -- each once, when it changes. `why
+--name` gives the same answer on demand, with the earliest idle stop time. A woken node doesn't get the 2-hour manual-start timer, and
 the nightly safety net leaves it alone. Policies and wake links are kept in Object Storage and come
 back with `restore` and `rebuild`.
 

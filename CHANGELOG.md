@@ -4,6 +4,15 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.19.0
+
+### Added
+- `why`: says in one line why a node is running or stopped right now (its schedule and whether it is inside the hours, a holiday, an extension or a manual start's auto-stop, wake on demand, a start or stop waiting on a group dependency, manual-only, hibernation), who last started or stopped it, and when it changes next. `--group-name` rolls a group's members up. Also `GET /instances/{name}/why`, `GET /groups/{name}/why`, a **Why** line on the dashboard's instance page, a **Now** card on the group page, and the chat `why <node>` command; `status` prints the same line.
+- Wake on demand: Activity now also says when a woken node stops being used and when it will stop unless used again, and when a `schedule-wake` node is left to its schedule inside its hours.
+
+### Fixed
+- Ask's "why is it running" answer said "its group's schedule" for a node following its own schedule.
+
 ## v1.18.1
 
 ### Fixed
