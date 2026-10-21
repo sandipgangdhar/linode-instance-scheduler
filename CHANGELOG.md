@@ -4,6 +4,20 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.20.0
+
+### Added
+- `diagnose` (dashboard: "Investigate" next to a node's or group's "Why" line, and "Why?" on the off-schedule card): works out why a node or group is in its state, or why a pasted alert fired, from what was recorded -- start/stop history and failures, the activity log, when the scheduler was stopped or standing by, setting changes, start-order waits, holidays, and Linode's own events and the instance's live state for changes made in Cloud Manager (for example a node powered off there while this tool still records it as running). It names only causes it can prove, with the evidence and suggested next steps (one-click in the dashboard); otherwise it says it can't tell and shows the timeline. Ask answers "why" questions about named nodes, and pasted alerts, the same way.
+- Setting change history: every change to a schedule, group, membership, start order, holiday, wake policy, manual-only setting, hooks, budget, guardrail, address or SSH port is recorded with the old and new value, who made it and when, for 90 days, backed up to Object Storage and restored by `restore`/`rebuild`. `changes`, `GET /changes`, and a "Setting changes" card on node and group pages.
+- "Leave as is" on the off-schedule card (`schedule-catch-up --dismiss`, `POST /schedule/missed/dismiss`): the listed nodes are no longer listed or alerted on for that missed time and follow their schedule again from its next start or stop.
+- Token scopes `system:diagnose` and `changes:read` (both in the `read` bundle).
+
+### Fixed
+- Changing a schedule (a node's own, its group's, its group membership, or the holidays) no longer makes the nodes look as if they missed a start or stop from before the change: the old schedule was in force then, so no "off schedule" alert is raised for it.
+- `why` names a schedule edit made after a running node's stop time instead of calling it a missed stop.
+- `wake-policy --name X` (or `--group-name`) without `--mode` now shows the current policy. It used to set it to `wake`.
+- The catch-up API routes answer 400, not 500, for a malformed node name.
+
 ## v1.19.2
 
 ### Fixed

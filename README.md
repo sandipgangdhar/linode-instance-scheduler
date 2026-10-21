@@ -257,6 +257,8 @@ database and settings the services use. (In Kubernetes:
 | `list` | Shows every node you've onboarded and its current status at a glance. |
 | `status` | Shows the full captured record for one node. |
 | `why` | Says in one line why a node (`--name`) is running or stopped right now, and when it changes next; with `--group-name`, the same for every member of a group. |
+| `diagnose` | Works out why a node (`--name`) or group (`--group-name`) is in its state, or why an alert fired (`--text` with the pasted alert), from what was recorded: start/stop history and failures, activity, when the scheduler was stopped or standing by, setting changes, start order, holidays and Linode's own events. Names the cause with its evidence and what to do; changes nothing. |
+| `changes` | The setting change history (90 days): who changed a schedule, group, membership, start order, holiday, wake policy, manual-only setting, hooks, budget, guardrail, address or SSH port, with the old and new value. |
 | `history` | Shows the audit trail (create/delete events) for one node — "why was my instance down at 9am?" Works even for a node you've since `offboard`ed. |
 | `savings` | A node's (`--name`) or group's (`--group-name`) configured savings and, for a node, what it actually saved over the last `--days` (default 7). |
 | `activity` | What the scheduler, API and CLI did, filtered by node, group, level or text — the dashboard's Activity page. |
@@ -303,7 +305,7 @@ database and settings the services use. (In Kubernetes:
 | `approval-request` / `approval-list` / `approval-approve` / `approval-deny` / `approval-grant` | Ask for, and give, approval for a start or extension a budget or guardrail refused. See §8.18. |
 | `hibernate` / `unhibernate` | Move a node stopped for a long time to Object Storage (its volumes are deleted after the grace period), and bring it back. See §8.23. |
 | `nb-membership` | Lists the VPC NodeBalancers a node is added back to after each start (a stop removes it from them), and `--forget` stops adding one back. See §8.24. |
-| `wake-policy` / `wake-link` / `wake` / `wake-nodebalancer` | Wake on demand: keep a node or group stopped until someone needs it (or wake it outside its schedule), stop it again when idle; a secret wake link, or visitors through your NodeBalancer, can start it from a page. See §8.21. |
+| `wake-policy` / `wake-link` / `wake` / `wake-nodebalancer` | Wake on demand: keep a node or group stopped until someone needs it (or wake it outside its schedule), stop it again when idle; a secret wake link, or visitors through your NodeBalancer, can start it from a page. `wake-policy --name X` without `--mode` shows the current policy. See §8.21. |
 | `schedule-suggest` | A schedule learned from the last 4 weeks of real use for a node or group; `--apply` applies it, `--undo` puts the previous one back. See §8.20. |
 | `insight` | This deployment's own health — start/stop times, the Linode API, the scheduler, the host — with slow/high findings (cause and fix) and right-sizing hints. `--prometheus` for Prometheus. See §8.19. |
 | `metrics-agent` | Optional server metrics on a node or group: installs node_exporter on the node (loopback only, read over SSH). See §8.19. |
@@ -2410,10 +2412,38 @@ Instances page and here — but nothing is started or stopped until you approve 
 linode-instance-scheduler schedule-catch-up                     # list
 linode-instance-scheduler schedule-catch-up --apply             # act on them, after confirming
 linode-instance-scheduler schedule-catch-up --apply --include-changed-by-hand --yes
+linode-instance-scheduler schedule-catch-up --dismiss           # leave them as they are
 ```
 
 A node someone started or stopped by hand after the scheduled time is marked as such and left
 alone unless you include it. Stops run before starts, following each group's start order.
+`--dismiss` (the card's "Leave as is") leaves the listed nodes as they are: they're no longer listed
+or alerted on for that missed time, and follow their schedule again from its next start or stop.
+
+A start or stop time from before a schedule was changed is not treated as missed, because the old
+schedule was in force then. This covers a node's own schedule, its group's schedule, a change of
+group membership and holidays. A node then changes state at the new schedule's next time. To bring
+it in line sooner, start or stop it by hand.
+
+**Finding out why (`diagnose`).** "Why didn't this node start at 21:00?" is answered from the
+records, not guessed:
+
+```
+linode-instance-scheduler diagnose --name web-1
+linode-instance-scheduler diagnose --group-name app
+linode-instance-scheduler diagnose --text "3 nodes not in the state their schedule wants: web-1 ..."
+linode-instance-scheduler changes --group-name app      # who changed what, before and after
+```
+
+It checks, in order: a schedule, membership or holiday change made after the time in question; a
+change by hand; failed attempts (and why: SSH host key, the account's instance limit, an address
+in use, capacity, a guardrail); the scheduler stopped or standing by across that time; a wait on the
+start order; a holiday; and, when the Linode token can read them, changes made to the instance in
+Cloud Manager -- including a node powered off or deleted there while this tool still records it as
+running (it reads the instance's live state for that). It names only a cause it can prove, with the evidence and the next step; otherwise
+it says it can't tell and shows the timeline. In the dashboard, "Investigate" next to a node's or
+group's "Why" line, and "Why?" on the off-schedule card, show the same, with buttons for the
+suggested steps. Ask answers a "why" question about a named node, or a pasted alert, the same way.
 
 **Alerts.** Set a webhook (`LIS_ALERT_WEBHOOK_URL` — Slack and Teams incoming webhooks work as is)
 and/or email (`LIS_ALERT_EMAIL_TO` plus the `LIS_ALERT_SMTP_*` settings; see `DEPLOYMENT.md`
