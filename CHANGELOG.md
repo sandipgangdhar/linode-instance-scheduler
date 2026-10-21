@@ -4,6 +4,11 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.20.2
+
+### Changed
+- Adding the deployment SSH key to the API token owner's Linode profile is now optional. A token without Account Read/Write (a least-privilege token) can't add profile SSH keys; the tool now notes this once in Activity instead of warning every hour, and `ssh-key-protect` shows the step as skipped. Nothing else changes: the key stays protected in the database, Object Storage and the passphrase's recovery copy, and a stopped node's SSH keys are recovered from Object Storage.
+
 ## v1.20.1
 
 ### Added

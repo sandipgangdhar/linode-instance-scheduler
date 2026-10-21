@@ -194,7 +194,11 @@ Fill in:
   (Read Only) so `diagnose` can read Linode's own record of changes; **Firewalls** (Read/Write) if
   any managed instance has a Cloud Firewall (it is re-attached on every start);
   **NodeBalancers** (Read/Write) if nodes sit behind a NodeBalancer or use wake on demand through
-  one; and **Kubernetes** (Read/Write) only if you schedule LKE node pools. Create one at Cloud
+  one; and **Kubernetes** (Read/Write) only if you schedule LKE node pools. **Account**
+  (Read/Write) is optional: with it, the tool also adds its deployment SSH key to the token
+  owner's Linode profile, so a stopped node's account-registered SSH keys can be recovered from
+  tags alone; without it, those keys are recovered from Object Storage instead, and the tool
+  notes once that it skipped the step. A least-privilege token can leave it at Read Only. Create one at Cloud
   Manager → Profile → API Tokens. This is the one credential every part of the tool
   uses to actually talk to Linode — the CLI, the poller, and the API server alike.
   **Recommended: create the token from a dedicated Linode user** (for example

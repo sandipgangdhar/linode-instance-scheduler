@@ -81,7 +81,8 @@ Before you start, make sure you have:
   it confirm that dashboard sign-ins belong to your account's users. Add **Events** (Read Only)
   for `diagnose`, **Firewalls** (Read/Write) if instances have Cloud Firewalls, **NodeBalancers**
   (Read/Write) if nodes sit behind a NodeBalancer, and **Kubernetes** (Read/Write) only for LKE
-  node pools. Create it from a dedicated
+  node pools. Account (Read/Write) is optional: it only lets the tool add its SSH key to the
+  token owner's profile (see `DEPLOYMENT.md`). Create it from a dedicated
   Linode user (e.g. `instance-scheduler`) rather than a person's login: Linode records every
   change under the token's owner, so its events then tell the tool's changes apart from changes
   people make in Cloud Manager.
