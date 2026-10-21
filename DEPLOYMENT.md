@@ -190,9 +190,19 @@ Fill in:
 - **`LINODE_API_TOKEN`** — a Personal Access Token scoped to **Linodes** (Read/Write), **Volumes**
   (Read/Write), and **IPs** (Read/Write); add **VPCs** (Read) too if any managed instance uses a
   VPC interface, and **StackScripts** (Read/Write) for the passphrase's recovery copy (§8).
-  **Account** (Read Only) is enough to satisfy the tool's own startup check. Create one at Cloud
+  **Account** (Read Only) is enough to satisfy the tool's own startup check. Also add **Events**
+  (Read Only) so `diagnose` can read Linode's own record of changes; **Firewalls** (Read/Write) if
+  any managed instance has a Cloud Firewall (it is re-attached on every start);
+  **NodeBalancers** (Read/Write) if nodes sit behind a NodeBalancer or use wake on demand through
+  one; and **Kubernetes** (Read/Write) only if you schedule LKE node pools. Create one at Cloud
   Manager → Profile → API Tokens. This is the one credential every part of the tool
   uses to actually talk to Linode — the CLI, the poller, and the API server alike.
+  **Recommended: create the token from a dedicated Linode user** (for example
+  `instance-scheduler`, given only the access listed above) rather than a person's own login.
+  Linode records every change under the user who owns the token, so with a dedicated user its
+  events show plainly which changes came from this tool and which a person made in Cloud Manager;
+  `diagnose` shows each of the tool's changes with who asked for it (the dashboard user, API token
+  or schedule).
 - **`LINODE_OAUTH_CLIENT_ID`/`LINODE_OAUTH_CLIENT_SECRET`/`LINODE_OAUTH_REDIRECT_URI`** — only
   needed if you're running the REST API/dashboard with "Login with Linode" (§6). Leave blank if
   you're only ever using the CLI and/or poller.

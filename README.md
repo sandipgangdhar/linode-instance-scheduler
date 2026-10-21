@@ -78,7 +78,13 @@ Before you start, make sure you have:
   (Read/Write), **IPs** (Read/Write) and **StackScripts** (Read/Write, for the recovery copy of
   the SSH key's passphrase). Add **VPCs** (Read) too if any of your instances use a VPC
   interface. **Account** (Read Only) is enough to satisfy the tool's own startup check, and lets
-  it confirm that dashboard sign-ins belong to your account's users.
+  it confirm that dashboard sign-ins belong to your account's users. Add **Events** (Read Only)
+  for `diagnose`, **Firewalls** (Read/Write) if instances have Cloud Firewalls, **NodeBalancers**
+  (Read/Write) if nodes sit behind a NodeBalancer, and **Kubernetes** (Read/Write) only for LKE
+  node pools. Create it from a dedicated
+  Linode user (e.g. `instance-scheduler`) rather than a person's login: Linode records every
+  change under the token's owner, so its events then tell the tool's changes apart from changes
+  people make in Cloud Manager.
 - **Access to this GitHub repository** (you should already have this).
 - **A dedicated SSH key pair** for this automation to use. You don't need to make one yourself:
   the installer (§4) generates it at `/opt/linode-instance-scheduler/keys/deploy_key` (or uses
@@ -2440,7 +2446,11 @@ change by hand; failed attempts (and why: SSH host key, the account's instance l
 in use, capacity, a guardrail); the scheduler stopped or standing by across that time; a wait on the
 start order; a holiday; and, when the Linode token can read them, changes made to the instance in
 Cloud Manager -- including a node powered off or deleted there while this tool still records it as
-running (it reads the instance's live state for that). It names only a cause it can prove, with the evidence and the next step; otherwise
+running (it reads the instance's live state for that). Linode records the tool's own starts and
+stops under the Linode user that owns its API token; `diagnose` matches each of those to the
+tool's record of who asked for it (shown in its timeline as, for example, "Linode: delete of
+instance 123 by instance-scheduler -- this product (stop by alice)"), and reports any change by
+another Linode user, or by the token's user with no matching record, as made outside the tool. It names only a cause it can prove, with the evidence and the next step; otherwise
 it says it can't tell and shows the timeline. In the dashboard, "Investigate" next to a node's or
 group's "Why" line, and "Why?" on the off-schedule card, show the same, with buttons for the
 suggested steps. Ask answers a "why" question about a named node, or a pasted alert, the same way.

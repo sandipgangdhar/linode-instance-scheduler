@@ -4,6 +4,14 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.20.1
+
+### Added
+- `diagnose` matches Linode's own events to this tool's records. Every start and stop now records which Linode instance it created or deleted, and Linode's events for those instances appear in the timeline with who asked for them (for example "Linode: delete of instance 123 by instance-scheduler -- this product (stop by alice)"). A change by any other Linode user is reported as made outside the tool, however soon it followed one of the tool's own starts or stops; a change by the tool's own Linode user that the tool has no record of is reported too (another deployment, script or person using the same user or token).
+
+### Changed
+- Recommended setup: create the tool's API token from a dedicated Linode user, so Linode's events show the tool's changes apart from people's.
+
 ## v1.20.0
 
 ### Added
