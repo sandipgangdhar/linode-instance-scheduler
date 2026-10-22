@@ -2867,7 +2867,7 @@ only if it has wake on demand on itself, otherwise its own schedule stops it.
 Attach your NodeBalancer's ports to it -- every port visitors use, such as both 80 and 443 (each
 port is attached on its own; the dashboard lets you tick several at once): this scheduler host
 joins each port as a **backup** node, which the NodeBalancer uses only while every real backend fails its health check — that is,
-while the node or group is stopped. Visitors then see a "the service is starting" page, which
+while the node or group is stopped. Visitors then see a "the service is starting" page (a progress bar with the percentage done, the current step, the time it has taken so far and a usual-time estimate, plus a tiny game to pass the wait; it names no servers and loads nothing from elsewhere), which
 starts it when someone presses **Start it** (the default) or on any request (`--trigger any`, at
 most once per cooldown, 15 minutes by default — bots, crawlers and internet scanners count as
 visitors too, and a public NodeBalancer gets them all day, so `any` suits a private address best;

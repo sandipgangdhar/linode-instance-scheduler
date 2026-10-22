@@ -4,6 +4,11 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.21.2
+
+### Changed
+- The "service is starting" page shown through a NodeBalancer now has a progress bar with a percentage that follows the real start (the services it needs first, then the service itself, server by server), the current step, a live elapsed time, an estimate from the last wake, and a tiny jump-the-bugs game to play while waiting. It is a single light page (about 4 KB, nothing loaded from elsewhere), names no servers, and opens the service by itself when it's ready.
+
 ## v1.21.1
 
 ### Changed
