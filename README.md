@@ -1037,6 +1037,11 @@ anyway:
 linode-instance-scheduler stop --name app-1 --force
 ```
 
+**If the instance is already powered off** (for example an earlier stop shut it down but Linode
+took longer than the tool waits to confirm it), `stop` doesn't need SSH at all: it keeps the
+node's last-known `authorized_keys`, skips the pre-stop hook and deletes the instance as usual,
+so a retried scheduled stop finishes by itself.
+
 **If the node itself is SSH-unreachable** (a guest firewall rule, a crashed `sshd`, a wedged
 network stack), the one re-capture step that needs SSH (reading the node's `authorized_keys`)
 will retry for a while and then `stop` will refuse, with nothing deleted. Network config, data
@@ -2129,7 +2134,7 @@ linode-instance-scheduler hooks-run --name pg-1 --post-start
 
 `start --skip-hooks` starts a node without running its post-start check, and
 `stop --skip-precapture` (for a node that can't be reached over SSH) skips the pre-stop hook too,
-since there's no way to run it. Both are recorded in the node's hook history.
+since there's no way to run it, as does a stop of an instance that is already powered off. Both are recorded in the node's hook history.
 
 `hooks-run --name pg-1 --pre-stop` runs the pre-stop hook on demand. It asks for confirmation
 first (`--yes` skips the prompt), because the node is **not** stopped afterward, so whatever the
@@ -2818,7 +2823,9 @@ linode-instance-scheduler wake-link --name dev-1
 
 Policies, per node or group (a node's own wins): `wake` (no schedule needed; started when someone
 wakes it), `schedule-wake` (the schedule runs as usual, and a wake outside its hours is stopped
-when idle) or `off`.
+when idle) or `off`. Either way, while a node is inside an active schedule's hours the schedule
+decides when it stops, never the idle stop; and a wake ends when the node is next stopped by any
+means, so its next start (by its schedule or by hand) is never treated as a wake.
 
 **Waking it.** Signed-in people use **Wake now** on the instance page or `wake --name dev-1` (their
 normal start permission applies). The node's **wake link** — created with `wake-link` or **Create
@@ -2843,7 +2850,7 @@ Linode's figures come as 5-minute samples and the newest ones are filled in late
 as in use until 15 minutes after its last busy sample ends: a node stops about 15 minutes plus its
 idle minutes after the last real use (an open SSH terminal session counts up to the last 5-minute check that still sees it).
 Activity says why a woken node is being kept running (in use, and by what), when it stops being
-used ("not in use since 10:15; it stops at about 10:45 unless used"), and when a `schedule-wake`
+used ("not in use since 10:15; it stops at about 10:45 unless used"), and when a woken
 node is inside its schedule's hours and left to the schedule -- each once, when it changes. `why
 --name` gives the same answer on demand, with the earliest idle stop time. A woken node doesn't get the 2-hour manual-start timer, and
 the nightly safety net leaves it alone. Policies and wake links are kept in Object Storage and come
@@ -2857,8 +2864,9 @@ Each member started is marked woken, so its idle stop applies; a dependency grou
 only if it has wake on demand on itself, otherwise its own schedule stops it.
 
 **Waking through a NodeBalancer.** Visitors to a site's normal address can wake its node or group.
-Attach one port of your NodeBalancer to it: this scheduler host joins that port as a **backup**
-node, which the NodeBalancer uses only while every real backend fails its health check — that is,
+Attach your NodeBalancer's ports to it -- every port visitors use, such as both 80 and 443 (each
+port is attached on its own; the dashboard lets you tick several at once): this scheduler host
+joins each port as a **backup** node, which the NodeBalancer uses only while every real backend fails its health check — that is,
 while the node or group is stopped. Visitors then see a "the service is starting" page, which
 starts it when someone presses **Start it** (the default) or on any request (`--trigger any`, at
 most once per cooldown, 15 minutes by default — bots and crawlers count as visitors too; within the
@@ -2870,6 +2878,7 @@ real backends pass their health checks again, the NodeBalancer sends traffic to 
 linode-instance-scheduler wake-policy --group-name app --mode wake --idle-minutes 30
 linode-instance-scheduler wake-nodebalancer --show 203.0.113.7
 linode-instance-scheduler wake-nodebalancer --group-name app --nodebalancer 203.0.113.7 --port 80
+linode-instance-scheduler wake-nodebalancer --group-name app --nodebalancer 203.0.113.7 --port 443
 ```
 
 or the **Wake through a NodeBalancer** part of the instance's or group's Wake card. Requirements:
@@ -2879,8 +2888,11 @@ or the **Wake through a NodeBalancer** part of the instance's or group's Wake ca
   across stop and start; backends on 192.168 private addresses aren't supported);
 - an **HTTP** port, or **HTTPS terminated at the NodeBalancer** (TCP passthrough isn't supported),
   with a health check — best an HTTP check of a path your app answers only when it's ready;
-- the host firewall letting the NodeBalancer's subnet reach the port shown when you attach
-  (19200–19499); the scheduler (`poll`) service serves the page.
+- the host firewall (and any Cloud Firewall on the scheduler host) letting the NodeBalancer's
+  subnet reach the port shown when you attach -- each attached port gets its own, from
+  19200–19499; the scheduler (`poll`) service serves the page. `wake-nodebalancer --show <IP>`
+  lists this host's backup node on each port: **DOWN** there means the NodeBalancer can't reach
+  the page, so visitors can't wake anything until the firewall allows it.
 
 The managed nodes behind the NodeBalancer are added back to it after every start, as for any node
 (see §8.24). A woken node also counts NodeBalancer connections as use, so it isn't stopped while

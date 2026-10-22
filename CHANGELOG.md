@@ -4,6 +4,14 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.20.3
+
+### Fixed
+- Wake on demand: a node that had been woken and was then stopped by its schedule (or by hand) was still treated as woken after its next start, so it could be stopped for being idle shortly after its scheduled morning start and stay off for the rest of the day. A wake now ends at the node's next stop.
+- Wake on demand: a node woken just before its schedule's hours could be stopped for being idle inside those hours, again leaving it off for the day. Inside an active schedule's hours the schedule now always decides, whichever wake mode is set.
+- Stop: if an earlier stop had already powered the instance off (Linode sometimes takes longer than the tool waits), every retried stop tried to read the node's SSH keys from the powered-off instance and failed, so the instance was never deleted and kept billing. A stop of a powered-off instance now keeps the node's last-known SSH keys and skips its pre-stop hook.
+- Dashboard: the Wake card's NodeBalancer section can now add several ports at once (for example 80 and 443). Ports already added are shown as such and the section stays open after adding.
+
 ## v1.20.2
 
 ### Changed
