@@ -2888,11 +2888,20 @@ or the **Wake through a NodeBalancer** part of the instance's or group's Wake ca
   across stop and start; backends on 192.168 private addresses aren't supported);
 - an **HTTP** port, or **HTTPS terminated at the NodeBalancer** (TCP passthrough isn't supported),
   with a health check — best an HTTP check of a path your app answers only when it's ready;
-- the host firewall (and any Cloud Firewall on the scheduler host) letting the NodeBalancer's
-  subnet reach the port shown when you attach -- each attached port gets its own, from
-  19200–19499; the scheduler (`poll`) service serves the page. `wake-nodebalancer --show <IP>`
-  lists this host's backup node on each port: **DOWN** there means the NodeBalancer can't reach
-  the page, so visitors can't wake anything until the firewall allows it.
+- the NodeBalancer able to reach this host on TCP 19200–19499 (each attached port gets its own
+  page port from that range; the scheduler (`poll`) service serves the page). This is set up for
+  you: if the scheduler host has a Cloud Firewall that drops inbound traffic by default, the tool
+  adds one rule to it, `lis-wake-pages`, allowing TCP 19200–19499 from the NodeBalancers' VPC
+  subnets, keeps it in place, and removes it when nothing wakes through a NodeBalancer any more.
+  Nothing else in the firewall is changed. If that firewall also protects other servers, the rule
+  applies to them too, and Activity says so. The API token needs **Firewalls** (Read/Write) for
+  this; set `LIS_WAKE_MANAGE_FIREWALL=0` in `.env` to manage the firewall yourself. `install.sh`
+  opens the same range to private (VPC) addresses in the host's own ufw or firewalld. On a
+  replacement host the rule is added again by itself.
+
+  `wake-nodebalancer --show <IP>` lists this host's backup node on each port. **DOWN** there means
+  the NodeBalancer can't reach the page, so visitors can't wake anything; this is also reported
+  as a health alert (`wake-page`).
 
 The managed nodes behind the NodeBalancer are added back to it after every start, as for any node
 (see §8.24). A woken node also counts NodeBalancer connections as use, so it isn't stopped while
@@ -2981,8 +2990,10 @@ its data is. API scope: `instances:hibernate` (admin only).
 
 ### 8.24 NodeBalancer membership — nodes rejoin their NodeBalancer after every start
 
-Linode removes an instance from its NodeBalancers when the instance is deleted, which every stop
-does. So for **VPC NodeBalancers** the tool keeps a node's membership across stop and start, with
+When an instance is deleted, which every stop does, Linode removes it from its NodeBalancers if it
+uses configuration-profile interfaces; with Linode Interfaces it leaves the entry in place, pointing
+at a VPC address that is now free and could be given to another instance. The tool removes such a
+left-behind entry right after the stop, so both kinds behave the same. So for **VPC NodeBalancers** the tool keeps a node's membership across stop and start, with
 nothing to set up and with or without wake on demand: three app servers behind a NodeBalancer,
 stopped every night and started every morning, rejoin it every morning.
 

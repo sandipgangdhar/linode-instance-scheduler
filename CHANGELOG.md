@@ -4,6 +4,17 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.21.0
+
+### Added
+- Wake through a NodeBalancer opens the scheduler host's firewall by itself: one rule on the host's Cloud Firewall (`lis-wake-pages`, TCP 19200–19499 from the NodeBalancers' VPC subnets) is added when needed, kept in place and removed when nothing wakes through a NodeBalancer any more. Nothing else in the firewall is changed. Needs the Firewalls (Read/Write) token scope; `LIS_WAKE_MANAGE_FIREWALL=0` turns it off. `install.sh` opens the same range to private addresses in ufw or firewalld.
+- A health alert (`wake-page`) when a NodeBalancer reports this host's starting page as down, so visitors can't wake anything through it.
+- Dashboard: each NodeBalancer port in a Wake card has its own "Start on a click / Start on any request" switch, so an added port's trigger can be changed in place.
+
+### Fixed
+- `wake-nodebalancer` (and the dashboard) reported the wrong port after attaching when the node or group already had more than one port attached; the settings themselves were applied correctly.
+- NodeBalancer membership: when a node using Linode Interfaces was stopped, Linode kept its NodeBalancer entries, pointing at a VPC address that is free while the node is stopped and could be given to another instance (which would then get the site's traffic). The tool now removes those entries right after the stop and adds them back after the next start, as it already did for configuration-profile interfaces. Entries left from earlier stops are removed by the scheduler within 5 minutes.
+
 ## v1.20.3
 
 ### Fixed

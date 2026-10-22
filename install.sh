@@ -718,6 +718,22 @@ enable_watchdog() {
   im host-watchdog --enable || warn "couldn't turn on the Shutdown Watchdog (see above) -- turn it on in Cloud Manager: Settings, Shutdown Watchdog"
 }
 
+open_wake_pages() {  # the host's own firewall: NodeBalancer starting pages, private VPC addresses only
+  local range="19200:19499" net
+  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+      ufw allow proto tcp from "$net" to any port "$range" >/dev/null || true
+    done
+    log "Opened TCP ${range/:/-} to private (VPC) addresses in ufw, for wake-through-NodeBalancer pages"
+  elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+    for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+      firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$net port port=${range/:/-} protocol=tcp accept" >/dev/null 2>&1 || true
+    done
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    log "Opened TCP ${range/:/-} to private (VPC) addresses in firewalld, for wake-through-NodeBalancer pages"
+  fi
+}
+
 pre_upgrade_snapshot() {  # an upgrade (re-run on an existing install): a snapshot taken with the OLD code first
   installed && [[ -s "$INSTALL_DIR/state/instances.db" ]] || return 0
   local dir; dir="$BACKUP_DIR/pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -1129,6 +1145,7 @@ do_install() {
   protect_ssh_key
   backup_env_encrypted
   enable_watchdog
+  open_wake_pages
   build_dashboard
   setup_smart_ask
   write_units
@@ -1237,6 +1254,7 @@ EOF
   protect_ssh_key
   backup_env_encrypted
   enable_watchdog
+  open_wake_pages
   # The old host was confirmed gone above: this host becomes the active scheduler right away,
   # instead of waiting for the old host's lease to expire.
   if obj_configured; then
