@@ -4,6 +4,14 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.21.1
+
+### Changed
+- Activity now records who woke a node or group through a NodeBalancer: the visitor's address, the page it asked for and its browser (or "Start pressed" for a click), so a wake by a bot or scanner can be told apart from a real visitor.
+
+### Fixed
+- A group woken through a NodeBalancer (and the groups it depends on) got the 2-hour manual-start timer, which would stop it when the timer ran out even while visitors were using it. Woken members are now governed only by the idle stop, as a single woken node already was.
+
 ## v1.21.0
 
 ### Added

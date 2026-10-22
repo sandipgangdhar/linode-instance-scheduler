@@ -2869,7 +2869,9 @@ port is attached on its own; the dashboard lets you tick several at once): this 
 joins each port as a **backup** node, which the NodeBalancer uses only while every real backend fails its health check — that is,
 while the node or group is stopped. Visitors then see a "the service is starting" page, which
 starts it when someone presses **Start it** (the default) or on any request (`--trigger any`, at
-most once per cooldown, 15 minutes by default — bots and crawlers count as visitors too; within the
+most once per cooldown, 15 minutes by default — bots, crawlers and internet scanners count as
+visitors too, and a public NodeBalancer gets them all day, so `any` suits a private address best;
+Activity records each wake's visitor address, the page asked for and its browser; within the
 cooldown the page offers the Start button instead, so a person can still start it). The
 NodeBalancer's own health checks never start anything, and the page names nothing. As soon as the
 real backends pass their health checks again, the NodeBalancer sends traffic to them by itself:
