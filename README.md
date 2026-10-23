@@ -2821,11 +2821,22 @@ linode-instance-scheduler wake-policy --name dev-1 --mode wake --idle-minutes 30
 linode-instance-scheduler wake-link --name dev-1
 ```
 
-Policies, per node or group (a node's own wins): `wake` (no schedule needed; started when someone
-wakes it), `schedule-wake` (the schedule runs as usual, and a wake outside its hours is stopped
-when idle) or `off`. Either way, while a node is inside an active schedule's hours the schedule
-decides when it stops, never the idle stop; and a wake ends when the node is next stopped by any
-means, so its next start (by its schedule or by hand) is never treated as a wake.
+Policies, per node or group (a node's own wins):
+
+- `wake` — **no schedule**: the node or group stays stopped until someone wakes it, and stops again
+  when idle. Choosing it while the node's or group's own schedule is on turns that schedule off
+  (its rules are kept): the dashboard asks you to type the name to confirm, and the command line
+  and API need `--disable-schedule` / `"disable_schedule": true`, refusing otherwise. While a
+  node or group is set to `wake`, its schedule can't be turned back on; switch to `schedule-wake`
+  or `off` first. A node that follows its group's schedule can't be set to `wake` on its own (set
+  the group, or remove the node from it), and a node set to `wake` can't join a group whose
+  schedule is on. Members of a `wake` group that have their own schedule keep it.
+- `schedule-wake` — the schedule runs as usual; a wake outside its hours is stopped when idle.
+- `off` — no waking.
+
+Inside an active schedule's hours the schedule decides when a node stops, never the idle stop; and
+a wake ends when the node is next stopped by any means, so its next start (by its schedule or by
+hand) is never treated as a wake.
 
 **Waking it.** Signed-in people use **Wake now** on the instance page or `wake --name dev-1` (their
 normal start permission applies). The node's **wake link** — created with `wake-link` or **Create

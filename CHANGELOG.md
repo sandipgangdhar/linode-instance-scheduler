@@ -4,6 +4,12 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.21.3
+
+### Changed
+- Choosing **Wake on demand** (stopped until someone needs it) for a node or group that has a schedule now turns that schedule off, after you confirm by typing the name; its rules are kept, and switching back to "Schedule, plus wake outside it" or "Off" lets you turn it on again. Before, the schedule kept starting and stopping it, so the two options behaved the same. The command line (`wake-policy --mode wake --disable-schedule`) and the API (`"disable_schedule": true`) refuse without that confirmation, and a schedule can't be turned on, nor a node set to Wake on demand join a scheduled group, while Wake on demand is set. Settings made with earlier versions keep working as before.
+- The dashboard asks before every action that creates or deletes Linode instances: **Start** (an instance) and **Start group** say billing starts and what stops it again; **Stop group** needs the group name typed, as instance Stop already did; **Wake now** and **Wake the group now** ask first. The command line and API are unchanged.
+
 ## v1.21.2
 
 ### Changed
