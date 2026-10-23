@@ -254,13 +254,21 @@ release_arch() {
 }
 
 # Decides what to install, without downloading anything yet.
+# True unless --version names a different version than the release in $1. Running the installer
+# that sits inside an installed release (current/install.sh) with --version must download that
+# version, not reinstall the release it sits in.
+version_matches() {
+  [[ -z "$RELEASE_VERSION" ]] && return 0
+  [[ "$(cat "$1/VERSION" 2>/dev/null)" == "$RELEASE_VERSION" ]]
+}
+
 choose_release() {
   if [[ -n "$ARCHIVE_IN" ]]; then
     [[ -f "$ARCHIVE_IN" ]] || die "--archive: $ARCHIVE_IN not found"
     INSTALL_KIND=compiled
-  elif [[ -x "$SRC_DIR/linode-instance-scheduler" ]]; then
+  elif [[ -x "$SRC_DIR/linode-instance-scheduler" ]] && version_matches "$SRC_DIR"; then
     INSTALL_KIND=compiled; APP_SRC="$SRC_DIR"            # this script inside a release directory
-  elif compgen -G "$SRC_DIR/app-*/linode-instance-scheduler" >/dev/null; then
+  elif [[ -z "$RELEASE_VERSION" ]] && compgen -G "$SRC_DIR/app-*/linode-instance-scheduler" >/dev/null; then
     INSTALL_KIND=compiled                                 # a release copy from Object Storage
     APP_SRC=$(ls -d "$SRC_DIR"/app-*/ | sort -V | tail -1); APP_SRC="${APP_SRC%/}"
   elif [[ -f "$SRC_DIR/instance_manager.py" ]]; then

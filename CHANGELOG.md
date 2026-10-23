@@ -4,6 +4,22 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.22.0
+
+### Added
+- **Hibernate: choose the helper VM, see the time it takes.** `hibernate` and `unhibernate` take `--helper-type` (and the dashboard a list): the helper runs two copy workers per vCPU, so a bigger type copies several chunks at once and finishes sooner. `--estimate` and the dashboard show, for each type, the expected time for your volumes and what the helper costs.
+- **Hibernate progress.** While a copy runs, the instance page shows its progress (chunks, GB, speed, time left), `hibernate --status` prints it, and the Activity log notes every 10%.
+- **Resume and abandon.** Every checked chunk is recorded. A chunk that fails is handed out again with fresh links; a copy interrupted by a restart is carried on by the scheduler; a copy that stops can be resumed from where it was (**Resume**, or the same command again) or given up (**Abandon**, `--abandon`).
+
+- **Ask** answers questions about very large hibernations, how hibernated data is compressed, and installing a specific version with `install.sh install --version`.
+
+### Changed
+- Hibernate copies faster: chunks are compressed with zstd instead of gzip, and a chunk that doesn't get smaller (already-compressed data) is stored as it is. On the smallest helper, data that doesn't compress copies about three times faster than before. Copies made by earlier versions are still read back as before.
+
+### Fixed
+- A hibernate or unhibernate of a large volume could fail after 12 hours, because every upload/download link was created at the start. Links now last two hours and are handed out a few at a time as the copy goes, so a copy can take as long as it needs.
+- `install.sh install --version vX.Y.Z` run from an installed copy (`/opt/linode-instance-scheduler/current/install.sh`) reinstalled the version it belongs to and ignored `--version`. It now downloads the version asked for.
+
 ## v1.21.3
 
 ### Changed

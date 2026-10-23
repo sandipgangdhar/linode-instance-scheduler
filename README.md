@@ -310,7 +310,7 @@ database and settings the services use. (In Kubernetes:
 | `budget-set` / `budget-clear` / `budget-list` | Monthly running-hour budgets for a group or node, and this month's use. See §8.18. |
 | `guardrail-set` | Limits on manual starts and extensions: longest extension, most nodes running at once, quiet periods, the nightly safety net. See §8.18. |
 | `approval-request` / `approval-list` / `approval-approve` / `approval-deny` / `approval-grant` | Ask for, and give, approval for a start or extension a budget or guardrail refused. See §8.18. |
-| `hibernate` / `unhibernate` | Move a node stopped for a long time to Object Storage (its volumes are deleted after the grace period), and bring it back. See §8.23. |
+| `hibernate` / `unhibernate` | Move a node stopped for a long time to Object Storage (its volumes are deleted after the grace period), and bring it back; choose the helper type, follow progress, resume or abandon. See §8.23. |
 | `nb-membership` | Lists the VPC NodeBalancers a node is added back to after each start (a stop removes it from them), and `--forget` stops adding one back. See §8.24. |
 | `wake-policy` / `wake-link` / `wake` / `wake-nodebalancer` | Wake on demand: keep a node or group stopped until someone needs it (or wake it outside its schedule), stop it again when idle; a secret wake link, or visitors through your NodeBalancer, can start it from a page. `wake-policy --name X` without `--mode` shows the current policy. See §8.21. |
 | `schedule-suggest` | A schedule learned from the last 4 weeks of real use for a node or group; `--apply` applies it, `--undo` puts the previous one back. See §8.20. |
@@ -2974,26 +2974,49 @@ helper VM before upload, and the key is stored only sealed with the deployment p
 `hibernate` and `unhibernate` therefore need):
 
 ```
-linode-instance-scheduler hibernate --name old-1 --estimate   # what would move
-linode-instance-scheduler hibernate --name old-1              # type the name to confirm
+linode-instance-scheduler hibernate --name old-1 --estimate   # what would move, and how long
+linode-instance-scheduler hibernate --name old-1 --helper-type g6-standard-4   # type the name to confirm
+linode-instance-scheduler hibernate --name old-1 --status     # progress while it runs
 linode-instance-scheduler unhibernate --name old-1            # bring it back (stopped)
 ```
 
-The node must be stopped and Object Storage configured. A small helper VM is created in the
-node's region with the node's volumes attached; each volume is read in 512 MiB chunks, each
-chunk's checksum is recorded, it is compressed and uploaded, then **downloaded again and checked**
-before the next one. Only when every chunk has been checked is the node marked hibernated; its
-volumes are kept for the deletion grace period (7 days by default, `LIS_DELETION_GRACE_DAYS`), so
-`unhibernate` within it simply reuses them. After that the scheduler deletes them -- all of a node's
-volumes or none, each re-checked first (unattached, still this node's).
-After that, `unhibernate` creates volumes of the same size and label (so the node's own
+The node must be stopped and Object Storage configured. A helper VM is created in the node's region
+with the node's volumes attached. You choose its type (`--helper-type`, or the dashboard's list; the
+default is the smallest, `g6-nanode-1`): the helper runs two copy workers per vCPU, so a bigger one
+finishes sooner and costs more per hour while it runs. Above about 8 vCPUs Object Storage sets the
+pace, so bigger types gain little. `--estimate` (and the dashboard) shows, for your volumes, the time
+each type takes and what its helper costs. As a guide, 1 TB takes about 3.5-7 hours on `g6-nanode-1`
+and about 1.5-2 hours on `g6-standard-4`; empty space copies faster than data that doesn't compress.
+
+Each volume is read in 512 MiB chunks; each chunk's checksum is recorded, it is compressed with
+zstd (a chunk that doesn't get smaller, such as already-compressed data, is stored as it is),
+encrypted and uploaded, then **downloaded again and checked**. Only when every chunk has been
+checked is the node marked hibernated; its volumes are kept for the deletion grace period (7 days by
+default, `LIS_DELETION_GRACE_DAYS`), so `unhibernate` within it simply reuses them. After that the
+scheduler deletes them -- all of a node's volumes or none, each re-checked first (unattached, still
+this node's). After that, `unhibernate` creates volumes of the same size and label (so the node's own
 `/etc/fstab` still matches), writes each chunk back, checks it again on the volume, and leaves the
-node stopped, ready to start. That takes roughly a few minutes per 10 GB. The helper VM is deleted
-afterwards either way, and the bucket keys never leave this host (the helper gets short-lived
-upload/download links). The reserved IP is kept, so the node comes back at the same address.
-Once a node is unhibernated, its copy in Object Storage is kept for the same grace period (in case
-the restored node turns out wrong), then the scheduler deletes it. If `unhibernate` fails partway,
-the volumes it created are deleted again and the copy is untouched, so it can simply be re-run.
+node stopped, ready to start. It also takes a helper type. The helper VM is deleted afterwards, and
+the bucket keys never leave this host: the helper gets upload/download links that expire after two
+hours, handed out a few at a time as the copy goes, so a copy can run for as long as it needs. The
+reserved IP is kept, so the node comes back at the same address. Once a node is unhibernated, its
+copy in Object Storage is kept for the same grace period (in case the restored node turns out wrong),
+then the scheduler deletes it.
+
+**Progress, interruptions and retries.** While a copy runs, the instance page shows how far it got
+(chunks, GB, speed, time left; `--status` prints the same), and the Activity log notes every 10%.
+Every checked chunk is recorded, so nothing is copied twice:
+
+- A chunk that fails (a network error, an expired link) is handed out again with fresh links; only
+  a chunk that fails six times stops the copy.
+- If the scheduler or API restarts, or the host reboots, the active scheduler carries the copy on
+  by itself from the last checked chunk.
+- If the copy stops (a chunk keeps failing, the helper is lost), the helper is deleted so it doesn't
+  keep billing, and the instance page offers **Resume** (or run the same command again: it carries
+  on from where it was, with a new helper if needed) and **Abandon** (`--abandon`): abandoning a
+  hibernate leaves the node with its volumes, as it was, and the partial copy is deleted after the
+  grace period; abandoning an unhibernate deletes the volumes it created, and the node stays
+  hibernated with its copy untouched.
 
 A hibernated node is never started by the scheduler and can't be started or offboarded until it is
 unhibernated. Hibernating is never automatic: the instance page shows it only for stopped nodes, it

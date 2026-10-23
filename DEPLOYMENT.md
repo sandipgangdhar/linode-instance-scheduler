@@ -699,6 +699,13 @@ re-running `install.sh install --version <previous version>` (and, only if neede
 pre-upgrade snapshot — the installer prints the command). The database schema upgrades itself
 automatically on first connection after an update.
 
+`install.sh install --version vX.Y.Z` installs exactly that release, whether you run it from your
+clone or from the installed copy (`<install dir>/current/install.sh`). Installers older than v1.22.0,
+run from inside an installed release, reinstall that same release and ignore `--version`: to leave
+such a version, download the new release's archive and `.sha256`, check it with `sha256sum -c`,
+unpack it and run its own `sudo ./app-vX.Y.Z/install.sh install`. `current/VERSION` shows what is
+installed.
+
 By hand: unpack the new archive (§3), point `current` at it, and
 `sudo systemctl restart linode-scheduler-poll linode-scheduler-api` (the second only if you run it).
 
