@@ -4,6 +4,17 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.23.0
+
+### Added
+- **Hibernate: Pause and Cancel while a copy runs.** The instance page has Pause and Cancel buttons during a hibernate or unhibernate (`hibernate --pause`, `--cancel`). Pause lets the chunks in progress finish, deletes the helper VM and keeps every checked chunk; Resume carries on from there with a new helper. Cancel gives the copy up: a hibernate leaves the node with its volumes as they were, an unhibernate deletes the volumes it created.
+- **Hibernate leftovers on Pending deletion.** A hibernated node's kept volumes and the Object Storage copy an unhibernate leaves are listed on the Pending deletion page with their deletion date and a Delete now button. The Hibernate card shows where the copy is (bucket, folder, manifest).
+- **Resize: move a node to another plan.** `resize --name X --type <plan>`, or the Plan (resize) card on the instance page, which lists the plans with their prices. A stopped node uses the new plan from its next start; a running node is stopped and started again on it (and goes back to its old plan if the new one can't be created). New API token scope `instances:resize`.
+- **Hibernate: optional fast check.** `hibernate --fast-check` (or the "Fast check" box) checks each chunk on the helper and by its upload checksum instead of downloading it again: about half the transfer, at most a little faster (the copy is limited by the upload and the helper's CPU), slightly weaker. The full check stays the default; the estimate shows both times and transfers.
+
+### Fixed
+- A node with a hibernate copy in progress (running, paused or stopped) can no longer be started or offboarded until the copy is finished or cancelled.
+
 ## v1.22.1
 
 ### Added

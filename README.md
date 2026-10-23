@@ -2977,6 +2977,8 @@ helper VM before upload, and the key is stored only sealed with the deployment p
 linode-instance-scheduler hibernate --name old-1 --estimate   # what would move, and how long
 linode-instance-scheduler hibernate --name old-1 --helper-type g6-standard-4   # type the name to confirm
 linode-instance-scheduler hibernate --name old-1 --status     # progress while it runs
+linode-instance-scheduler hibernate --name old-1 --pause      # pause; run the command again to resume
+linode-instance-scheduler hibernate --name old-1 --cancel     # give it up (type the name to confirm)
 linode-instance-scheduler unhibernate --name old-1            # bring it back (stopped)
 ```
 
@@ -2995,7 +2997,14 @@ and about 1.5-2 hours on `g6-standard-4`; empty space copies faster than data th
 
 Each volume is read in 512 MiB chunks; each chunk's checksum is recorded, it is compressed with
 zstd (a chunk that doesn't get smaller, such as already-compressed data, is stored as it is),
-encrypted and uploaded, then **downloaded again and checked**. Only when every chunk has been
+encrypted and uploaded, then **downloaded again and checked**. With `--fast-check` (or the dashboard's
+"Fast check" box), a chunk is instead checked on the helper -- the packed chunk is decrypted and
+decompressed and its checksum compared with the original -- and by its upload checksum (the MD5
+Object Storage reports for what it stored, compared with what was sent). That avoids downloading
+every chunk again, so it uses about half the transfer; it is at most a little faster, since the copy
+is limited by the upload and the helper VM's CPU. It no longer proves each chunk can be read back
+right away, so it isn't recommended unless transfer cost matters; the estimate shows both times
+and transfers. Only when every chunk has been
 checked is the node marked hibernated; its volumes are kept for the deletion grace period (7 days by
 default, `LIS_DELETION_GRACE_DAYS`), so `unhibernate` within it simply reuses them. After that the
 scheduler deletes them -- all of a node's volumes or none, each re-checked first (unattached, still
@@ -3008,6 +3017,15 @@ reserved IP is kept, so the node comes back at the same address. Once a node is 
 copy in Object Storage is kept for the same grace period (in case the restored node turns out wrong),
 then the scheduler deletes it.
 
+Both waits are listed on the dashboard's **Pending deletion** page: a hibernated node's kept volumes
+("hibernated volumes") and an unhibernated node's copy ("hibernate copy in Object Storage"), each with
+its deletion date and a **Delete now** button (type the node's name) to stop paying for it early. The
+same checks apply as for the scheduler's own deletion: volumes attached somewhere or claimed by another
+name are kept, and a copy that a hibernated node still uses can't be deleted. Once a node is
+hibernated, its Hibernate card shows **where the copy is** -- the bucket and its endpoint, the folder
+`hibernate/<node>/<run>/` and the manifest `hibernate/<node>/manifest.json` (`hibernate --status`
+prints the same); the chunks there are encrypted with the deployment passphrase.
+
 **Progress, interruptions and retries.** While a copy runs, the instance page shows how far it got
 (chunks, GB, speed, time left; `--status` prints the same), and the Activity log notes every 10%.
 Every checked chunk is recorded, so nothing is copied twice:
@@ -3016,12 +3034,21 @@ Every checked chunk is recorded, so nothing is copied twice:
   a chunk that fails six times stops the copy.
 - If the scheduler or API restarts, or the host reboots, the active scheduler carries the copy on
   by itself from the last checked chunk.
-- If the copy stops (a chunk keeps failing, the helper is lost), the helper is deleted so it doesn't
-  keep billing, and the instance page offers **Resume** (or run the same command again: it carries
-  on from where it was, with a new helper if needed) and **Abandon** (`--abandon`): abandoning a
-  hibernate leaves the node with its volumes, as it was, and the partial copy is deleted after the
-  grace period; abandoning an unhibernate deletes the volumes it created, and the node stays
-  hibernated with its copy untouched.
+- **Pause** (the instance page, or `--pause`) stops a running copy: no more chunks are handed out,
+  the ones in progress finish (a few minutes at most), and the helper VM is deleted so it stops
+  billing. The checked chunks are kept. **Resume** (or the same command again) carries on from there
+  with a new helper. While paused, the node's volumes (for an unhibernate, also the new volumes) and
+  the copy made so far in Object Storage are still billed.
+- If the copy stops by itself (a chunk keeps failing, the helper is lost), the helper is deleted the
+  same way and the copy waits, paused, for Resume or Cancel.
+- **Cancel** (`--cancel`, type the name to confirm) gives a copy up, also while it runs (it stops at
+  its next check, like Pause, then cancels). Cancelling a hibernate leaves the node with its
+  volumes, as it was -- hibernating only ever reads them -- and the partial copy is deleted after the
+  grace period. Cancelling an unhibernate deletes the volumes it created; the node stays hibernated
+  with its copy untouched.
+- While a hibernate or unhibernate is in progress -- running, paused or stopped -- the node can't be
+  started (by hand, by its schedule or by wake on demand) or offboarded: starting it would change
+  disks part of which are already copied. Finish or cancel the copy first.
 
 A hibernated node is never started by the scheduler and can't be started or offboarded until it is
 unhibernated. Hibernating is never automatic: the instance page shows it only for stopped nodes, it
@@ -3065,6 +3092,34 @@ the NodeBalancer and as `lis-nbm:…` tags (NodeBalancer, port, address, mode an
 own OS volume, so `restore` and `rebuild` bring them back, from the tags alone if need be -- also for
 a node that was stopped at the time (without Object Storage, a node's own NodeBalancer label is then
 replaced by its name).
+
+### 8.25 Resize: move a node to another plan
+
+A managed node has no local disk: its operating system and data are on Block Storage volumes, and
+every start creates the instance from the node's record. Changing its plan (CPU, memory, shared or
+dedicated) is therefore quick and doesn't touch the volumes.
+
+```bash
+python instance_manager.py resize --name app-1                       # current plan, every plan and its price
+python instance_manager.py resize --name app-1 --type g6-dedicated-8 # move it
+```
+
+- **A stopped node** keeps its new plan in its record and uses it from its next start (scheduled,
+  manual or a wake). Nothing happens now.
+- **A running node** is stopped and started again on the new plan, which takes the usual few minutes
+  of a stop and a start. The command asks you to type the name first (`--yes` skips the question).
+  If Linode can't create the new plan (for example no capacity for it in the region), the node goes
+  back to its old plan and is started again on it. An extension or manual-start timer it had is kept.
+- Refused, with nothing changed, for a plan name Linode doesn't know or reports unavailable in the
+  region, a plan too small for the node's volumes (8 volumes, or one per GB of memory above that), a
+  node that is starting, stopping, unreachable, hibernated or being copied, and an LKE pool (a pool's
+  size and type are changed in its own settings).
+- The plan is kept in the node's record, its Object Storage copy and a `plan:` tag on its OS volume,
+  so a recovery from tags alone brings the node back on its current plan.
+- The dashboard's **Plan (resize)** card on the instance page lists the plans with their monthly price
+  and the difference from the current one; you pay only for the hours the node runs.
+- API: `GET /instances/{name}/resize` (plans) and `POST /instances/{name}/resize` with `{"type": ...}`
+  (a running node also needs `"confirm_name"`); scope `instances:resize`.
 
 ## 9. Costs
 
