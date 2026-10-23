@@ -2985,7 +2985,12 @@ with the node's volumes attached. You choose its type (`--helper-type`, or the d
 default is the smallest, `g6-nanode-1`): the helper runs two copy workers per vCPU, so a bigger one
 finishes sooner and costs more per hour while it runs. Above about 8 vCPUs Object Storage sets the
 pace, so bigger types gain little. `--estimate` (and the dashboard) shows, for your volumes, the time
-each type takes and what its helper costs. As a guide, 1 TB takes about 3.5-7 hours on `g6-nanode-1`
+each type takes and what its helper VM costs (a one-time cost: the helper is deleted when the copy is
+done). Both also compare, at your region's Linode prices and before compression, what the data costs
+per month on Block Storage and on Object Storage, and the network transfer each copy can use:
+hibernating uploads every chunk and downloads it again to check it (about twice the data), and
+unhibernating downloads it once. Transfer is taken first from your account's monthly network transfer
+pool and charged only past it. As a guide, 1 TB takes about 3.5-7 hours on `g6-nanode-1`
 and about 1.5-2 hours on `g6-standard-4`; empty space copies faster than data that doesn't compress.
 
 Each volume is read in 512 MiB chunks; each chunk's checksum is recorded, it is compressed with

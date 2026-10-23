@@ -4,6 +4,11 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.22.1
+
+### Added
+- **Hibernate: what storage and transfer cost.** `hibernate --estimate` and the dashboard's Hibernate card compare, at your region's Linode prices, the monthly cost of the data on Block Storage and on Object Storage, and the network transfer hibernating and unhibernating can use (charged only past your account's transfer pool). The helper VM's cost is now labelled as a one-time cost.
+
 ## v1.22.0
 
 ### Added
