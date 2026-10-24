@@ -4,6 +4,11 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.25.1
+
+### Fixed
+- The waves **Check access** (and **Test login**) reported an SSH host-key mismatch for an instance that Linode gave the VPC address of a stopped managed node. Migrating or onboarding moves such a stopped node to a free VPC address first (its trusted key moves with it), so the check no longer compares the new instance against that node's key; it says the stopped node will be moved. A node at the address that is running or busy still makes the check fail, as before.
+
 ## v1.25.0
 
 ### Added
