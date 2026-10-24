@@ -426,9 +426,15 @@ linode-instance-scheduler migrate-start --name app-1 --instance-id <your-instanc
    "which one is active" field, so this tool won't guess which one to read the current disk from
    (the same refusal `onboard`/`rebuild` have for the same reason).
 2. Warns (but doesn't block) if it finds hand-configured networking outside the OS's normal
-   Network Helper — e.g. a custom netplan file. If you've done this deliberately, that's fine to
-   proceed past, just be aware it'll be overwritten by this tool's own network handling on the
-   next recreate.
+   Network Helper — e.g. a custom netplan file — and says, for each file, what happens to it on
+   a recreate. This tool never edits or deletes such files; on every start it writes the
+   instance's own addresses, gateway and DNS in its own files. For systemd-networkd, the first
+   file in name order that matches an interface decides it: a file named before
+   `05-eth<N>.network` (e.g. `00-eth0-custom.network`) keeps deciding that interface (fine as long
+   as its addresses stay right; this tool keeps them the same unless it has to give a stopped node
+   a new VPC address), a file named after it stops applying, and a file for other interfaces (a
+   Docker bridge) is left alone. NetworkManager's ethernet connection profiles are replaced with
+   ones carrying the same addresses.
 3. Creates a new, appropriately-sized Block Storage volume to hold the migrated OS.
 4. Boots your instance into Rescue Mode, with the original disk and the new volume attached.
 5. Prints a single copy command for you to paste into the rescue console. The command finds the
@@ -809,6 +815,42 @@ backup bills like its instance until you delete it with `backup-delete`. `onboar
 shows which instances need migrating, how big each volume will be and roughly how long each copy
 takes. The same is available as `POST /migrations/waves` (`method`, `two_phase`) and in the
 dashboard's waves panel on the Onboard page.
+
+**Logging in to each instance.** A wave logs in to each instance as root with this deployment's SSH
+key. For an instance that doesn't have the key yet, do one of these before starting:
+
+- Add the key yourself. `migrate-wave --print-key-setup` (or **Show the command to add the key** in
+  the waves panel) prints one command to run as root on each instance, in its console or over SSH. It
+  adds the key to root's `authorized_keys` once, with the right permissions, and prints
+  `LIS_KEY_READY`; running it again changes nothing.
+- Give its root password. `migrate-wave --ask-passwords` asks for it for each instance that refuses
+  the key; in the dashboard, type it in the instance's **root password** box; in the API, send
+  `ssh_password` with that instance. Its migration logs in with the password once and adds this
+  deployment's key, which every later step uses. The password is used for that wave only and is never
+  stored; cancelling that migration removes the key again.
+
+Check first with `migrate-wave --check-access --instance ...` (or **Check access** in the panel, or
+`POST /migrations/waves/access-check`): it logs in to each instance the way the wave will and says
+which are ready and why the others aren't (the port didn't answer, the host key differs, or the key or
+password was refused). It changes nothing. The dashboard runs the same check when you start, and
+starts nothing if any instance can't be logged in to; `--ask-passwords` does the same on the command
+line.
+
+**Good practice for waves:**
+
+- Start with a pilot: a first wave of 1-2 instances that matter least; check them before the rest.
+- A wave size of 3 to 5 is a good default; 10 is the most allowed. A bigger wave isn't faster for
+  each instance, and if something is wrong it fails on more of them at once.
+- There is no limit on the number of waves. They run one after another, and the total time is about
+  the slowest copy in each wave, added up (the waves panel shows an estimate). Keep
+  `--stop-after-failed-wave` on so a problem stops the remaining waves.
+- Leave room on the account: with no-touch, each instance needs one more Linode while it migrates
+  (the original stays, powered off and billed, until you delete it), and every instance gets a new
+  Block Storage volume. Check that your account's instance and volume limits cover a whole wave.
+- Use a maintenance window: each instance is offline from the start of its copy until it boots from
+  its new volume (with `--two-phase`, only for the final pass).
+- Keep an application and the database it needs in the same or back-to-back waves, and put similar
+  instances together. Migrate the biggest disks last, or in a wave of their own.
 
 ## 7. Onboarding
 

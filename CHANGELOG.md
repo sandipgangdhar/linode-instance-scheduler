@@ -4,6 +4,16 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.25.0
+
+### Added
+- Waves can log in to instances that don't have this deployment's SSH key yet: give an instance's root password (`migrate-wave --ask-passwords`, the waves panel's **root password** box, or `ssh_password` per instance in `POST /migrations/waves`) and its migration logs in with it once and adds the key. The password is never stored; cancelling the migration removes the key again.
+- `migrate-wave --print-key-setup` and the panel's **Show the command to add the key** give one command to run as root on each instance to add the key yourself.
+- `migrate-wave --check-access`, the panel's **Check access** and `POST /migrations/waves/access-check` log in to each instance the way the wave will and say which are ready, without changing anything. The dashboard checks every instance when you start a wave and starts nothing if one can't be logged in to.
+- The dashboard shows the version it runs at the bottom of its menu.
+- The migration pre-check no longer says hand-configured network files "will be overwritten" (this tool never edits or deletes them). It says, per file, what happens after a stop/start. A systemd-networkd file named before the tool's own `05-eth<N>.network` (for example `00-eth0-no-gateway.network`) keeps deciding its interface: shown as a note, not a warning -- not harmful and not a blocker -- with the addresses and gateway it sets, since what happens after a stop/start depends on what it contains. A file for other interfaces (a Docker bridge) is a note too. A file named after the tool's (it stops applying), netplan configuration and NetworkManager ethernet profiles (replaced with ones carrying the same addresses) stay warnings.
+- The waves panel lists good practice for waves (pilot wave, wave size, number of waves, account limits, maintenance window) and estimates the total copy time.
+
 ## v1.24.4
 
 ### Fixed
