@@ -719,8 +719,11 @@ mid-copy, the copy is gone and it says so: start it again.
 
 The console session is recorded in `state/logs/lish-<name>.log`, cleaned of terminal control codes
 and with each line timestamped (UTC), so `dd`'s progress reads as one line per update. In the
-dashboard, the migration's copy step shows **Run the copy for me** when a backup is kept and the
-key is registered, or the setup steps above (with the key to paste) when it isn't. While the copy
+dashboard, the migration's copy step shows **Run the copy for me** when a backup is kept, or the
+migration is no-touch or two-phase (the original is the fallback), and the key is registered, or
+the setup steps above (with the key to paste) when it isn't. A no-touch or two-phase migration
+started from the migration page runs the copy by itself as soon as it reaches that step with the
+key registered, so it needs nothing typed into the console at all. While the copy
 runs, **Watch the console session** opens it on the Logs page, updating live. After the copy it
 finishes the migration and onboards the instance, the same as the manual path.
 

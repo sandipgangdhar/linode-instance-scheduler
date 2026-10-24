@@ -4,6 +4,15 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.24.2
+
+### Fixed
+- No-touch migration of a Linode Interfaces instance whose public address is a VPC 1:1 NAT address: the address now moves to the new instance (it used to stay on the original and the migration stopped).
+- If moving the original's addresses fails, the original gets its network interfaces and addresses back before the error is shown, and cancelling such a migration puts them back too. Before, the original could be left with no network interface ("The Linode must have at least 1 interface defined to boot").
+- Cancelling a migration leaves the original as it was: besides booting it from its unchanged boot config and giving back any network interfaces the migration had taken off it, it removes what the migration added (this deployment's SSH key in root's `authorized_keys`, if the migration installed it, and the cloud-init file that keeps SSH host keys). If the original can't be reached, the result says what is left.
+- The onboarding page's **Test login** no longer fails with "Host key differs" for an address no managed node uses (a key left from an earlier instance at a reused VPC address): onboarding forgets such a key before first contact, and the test now does the same, so it actually tries the password or key you gave.
+- "Run the copy for me" is offered for two-phase and no-touch migrations even without a kept backup (the original is the fallback). Started from the migration page, such a migration now runs the Rescue Mode copy by itself once this deployment's key is in the profile's Lish keys, so the whole migration needs no commands from you.
+
 ## v1.24.1
 
 ### Added
