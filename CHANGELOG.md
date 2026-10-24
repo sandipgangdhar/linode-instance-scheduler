@@ -4,6 +4,12 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.24.4
+
+### Fixed
+- A two-phase migration started from the dashboard with root's password was refused ("a one-time password isn't enough"). The migration adds this deployment's SSH key first and the two-phase copy now uses it; cancelling removes the key again. The **Install what's missing** box says so.
+- Cancelling a migration right after it started, while the instance was still rebooting into Rescue Mode, failed with "Linode busy". Cancel now waits for the instance to settle before shutting it down, and if Linode still refuses, it says so plainly and leaves the migration as it was, so you can simply try again.
+
 ## v1.24.3
 
 ### Added
