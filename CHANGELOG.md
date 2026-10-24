@@ -4,6 +4,20 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.24.0
+
+### Added
+- **Snapshot-first migrations.** `--method snapshot`: a Linode Backups snapshot is taken while the instance runs, then a short one when it is powered off, before migrating in place; restored automatically if the check after migrating fails. Backups is left as the original had it, and the summary says what was done.
+- **Check after migrating.** Every migration checks that every filesystem in the migrated system's `/etc/fstab` is mounted; a failure rolls back automatically (no-touch, clone, snapshot) or is reported (in place).
+- **Re-hibernate.** Hibernating a node again reuses the copy its unhibernate left when the node hasn't run since, and otherwise uploads only the chunks that changed. `hibernate --fresh` makes a full copy.
+- **No-touch onboarding (the new default).** Migrating an instance off its local disk no longer has to change it: its disk is copied to a volume, it is powered off, and a new instance with the same public IP, VPC/VLAN addresses, plan, kernel, label and data volumes boots from the copy. The original stays powered off as the fallback (listed on the Backups page with its monthly cost) until you delete it; Roll back puts it back exactly as it was. If the switch fails, the original gets its addresses back and is booted again automatically. `migrate-start --method no-touch|clone|in-place`, the same choice on the migration screen and for waves.
+
+### Fixed
+- After a total loss of the local database during a hibernation's grace period, `rebuild` recovered the node from its kept volumes as if it had been unhibernated, leaving its Object Storage copy behind. It is now restored as hibernated.
+- A boot config's root device is kept through a migration, every stop and every start (it was always `/dev/sda`), so an instance booting Linode's kernel from a partition comes back the same way.
+- Checking that a migrated system runs from its copy now works when the root filesystem is on a partition of the copied volume (for example a GPT disk).
+- Stopping an instance right after an in-place migration is no longer refused while Linode is still deleting the old local disk.
+
 ## v1.23.0
 
 ### Added

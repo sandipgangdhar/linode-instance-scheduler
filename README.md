@@ -366,6 +366,45 @@ disk copy only runs inside Linode's Rescue Mode, which is only reachable through
 Lish console — there's no way to run an arbitrary command there through the API. That one command
 is the only manual step in this entire process.
 
+### 6.0 How the original instance is treated: no-touch, clone or in place
+
+`migrate-start --method` (and the dashboard's migration screen, and `migrate-wave --method`) chooses
+what happens to the instance you're migrating:
+
+| Method | The original instance | Downtime | What it costs while kept |
+|---|---|---|---|
+| **`no-touch`** (the default) | Never changed. Its disk is copied to a new volume, then it is powered off and a **new instance** with the same public IP, VPC/VLAN addresses, plan, kernel, label and data volumes boots from the copy. The original stays powered off as your fallback. | The copy (or only its short final pass with `--two-phase`) plus the new instance's first boot | The original instance at its plan price, until you delete it |
+| `clone` | A powered-off native clone of it and its volumes is kept, then the original itself is migrated in place (same as `--backup`). | Cloning plus the copy | The clone and its cloned volumes |
+| `snapshot` | A Linode Backups snapshot is taken while it runs, then a short second one once it is powered off; then it is migrated in place. Restored automatically if the check after migrating fails. | The second snapshot plus the copy | The Backups add-on while it is on (turned off again afterwards if it was off) |
+| `in-place` | Migrated in place; nothing else is kept. | The copy | Nothing |
+
+With **no-touch**, the original is renamed `<label>-original`, tagged as this name's pre-migration
+backup and listed on the Backups page, with what it costs a month; its data volumes are not copied --
+they move to the new instance. The migration summary says it plainly: the original is kept powered off
+and is still billed until you delete it (`backup-delete --name X`, or Backups -> Delete). To go back,
+`rollback --name X` (Backups -> Roll back) gives it back its public IP, VPC/VLAN addresses, label and
+data volumes and boots it; the new instance is deleted and its volumes are kept. If the finish step
+fails after the addresses have moved (the new instance doesn't boot from the copy, or can't be
+reached), they go back to the original and it is booted again automatically; the copied volume is
+kept, so you can fix the cause and run `migrate-resume` again. The original, its record and its tag
+are kept in Object Storage and on the instance itself, so `rebuild` knows about it after a database
+loss.
+
+**After every migration, a check runs on the migrated system**: every filesystem its `/etc/fstab`
+mounts at boot must be mounted. If it fails, a no-touch migration puts the original back (above), a
+clone or snapshot migration is rolled back to the clone or snapshot automatically, and an in-place
+migration reports what is missing (there is nothing to roll back to).
+
+With **snapshot**, Linode Backups ends the way the original had it: if Backups was off, it is turned
+off again once the migrated system passes its check -- this deletes the snapshot, and Linode then
+won't let Backups be turned on again for that instance for 24 hours; if it was on, it stays on. The
+snapshot belongs to the instance, so it is gone at the node's first scheduled stop (the instance is
+deleted then). The migration summary, and each instance's line in a wave's summary, says what was
+done with Backups.
+
+Because nothing on the original changes, the assisted copy over Lish (§6.6) is available for
+no-touch (and snapshot) without a clone, and waves (§6.7) use no-touch by default.
+
 ### 6.1 `migrate-start`
 
 ```
@@ -3016,6 +3055,16 @@ hours, handed out a few at a time as the copy goes, so a copy can run for as lon
 reserved IP is kept, so the node comes back at the same address. Once a node is unhibernated, its
 copy in Object Storage is kept for the same grace period (in case the restored node turns out wrong),
 then the scheduler deletes it.
+
+**Hibernating again after an unhibernate.** The copy an unhibernate leaves is used again. If the node
+hasn't run since and its volumes weren't attached anywhere (checked against Linode's own events), the
+copy is still exact and becomes the hibernation again at once -- no helper VM, nothing copied. If the
+node ran, its disks have changed: the card and `--estimate` say *"There's a copy from <date>, but the
+node has run since then, so its disks have changed. A new copy is needed"*, and only the chunks that
+changed are uploaded (with the same encryption key); the unchanged ones point at the earlier copy,
+each checked to still be in Object Storage before the new manifest is written. `hibernate --fresh`
+(or the *Make a fresh, full copy* box) copies everything instead. An earlier copy's folder is never
+deleted while a hibernation, or a hibernate in progress, still uses it.
 
 Both waits are listed on the dashboard's **Pending deletion** page: a hibernated node's kept volumes
 ("hibernated volumes") and an unhibernated node's copy ("hibernate copy in Object Storage"), each with
