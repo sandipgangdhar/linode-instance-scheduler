@@ -759,8 +759,10 @@ to the running instance; `migrate-start --force` then refuses and points you at
 `migrate-abandon`, which unmounts and detaches it and leaves the instance running — start again
 after that.
 
-In the dashboard, tick **Two-phase copy — short downtime** on the migration wizard's start screen
-(it can't be combined with keeping a backup).
+In the dashboard, tick **Two-phase copy — short downtime** when onboarding tells you the instance is
+still on local disk (next to **Migrate this instance onto Block Storage**), or on the migration
+page's start screen; it can't be combined with keeping a clone or a Backups snapshot. For several
+instances at once, use it with waves (§6.7).
 
 ### 6.7 Migrating many instances in waves
 
@@ -773,19 +775,28 @@ linode-instance-scheduler migrate-wave --wave-size 3 \
 ```
 
 Each wave runs its instances in parallel, and the next wave starts when the previous one has
-finished. For every instance it does what you'd do by hand: `migrate-start --backup`, the copy
-(run for you over Lish, §6.6), `migrate-resume`, then `onboard`. Each instance is powered off
+finished. For every instance it does what you'd do by hand: `migrate-start` with the chosen
+`--method` (no-touch by default, §6.0), the copy (run for you over Lish, §6.6), `migrate-resume`,
+then `onboard`. Each instance is powered off
 only for its own copy. One instance failing — a refused pre-flight check, a copy that fails —
 stops only that instance; the result lists every instance's outcome (`onboarded`, or `failed` with
 the reason), and a failed instance can be finished by hand with the usual commands. Add
 `--stop-after-failed-wave` to stop starting new waves after a failure.
 
-Keeping pre-migration backups is strongly recommended and is the default: they're what make the
-unattended copy safe to undo, and the copy step needs this deployment's key in your profile's Lish
-keys (§6.6). With `--no-backup`, each instance stops at its copy command for you to run. Each kept
+Add `--two-phase` to copy each instance's files while it keeps running (§6.6.1): each is then down
+only for the short final pass. It works with `--method no-touch` and `--method in-place`, not with
+`clone` or `snapshot`; with in-place the copy still runs for you, since the original disk isn't
+written until the copy's last pass. Instances whose disk isn't a plain ext4 filesystem are refused
+by their own pre-flight check and listed as failed, while the others go on.
+
+Leaving the originals untouched (no-touch) or keeping a clone is strongly recommended: that's what
+makes the unattended copy safe to undo, and the copy step needs this deployment's key in your
+profile's Lish keys (§6.6). With `--method in-place` and no `--two-phase`, each instance stops at its
+copy command for you to run. Each kept
 backup bills like its instance until you delete it with `backup-delete`. `onboard-readiness` (§7)
 shows which instances need migrating, how big each volume will be and roughly how long each copy
-takes. The same is available as `POST /migrations/waves`.
+takes. The same is available as `POST /migrations/waves` (`method`, `two_phase`) and in the
+dashboard's waves panel on the Onboard page.
 
 ## 7. Onboarding
 
@@ -1120,9 +1131,16 @@ linode-instance-scheduler list
 ```
 
 ```
-app-1: running  ip=172.x.x.x  region=in-bom-2  linode_id=123456
-db-1:  stopped  ip=172.x.x.x  region=in-bom-2  linode_id=None
+app-1: running  ip=172.x.x.x  vpc=10.0.0.5  region=in-bom-2  linode_id=123456
+db-1:  stopped  ip=None  vpc=10.0.0.6  vlan=192.168.5.2  region=in-bom-2  linode_id=None
 ```
+
+`ip` is the reserved public IP (`None` for a node with no public interface); every VPC and VLAN
+address the node uses follows it, and `nat` for a public address mapped by VPC 1:1 NAT. The
+addresses come from the node's record, so they show the same whether it is running or stopped.
+`list --json` and `status` carry them as `ip_addresses` (a list of `{kind, address, ...}`), and the
+dashboard shows them in the **IP addresses** column of the instances list and on the instance
+page's Status card.
 
 (`in-bom-2` here is just an example, not a required region — your instances' regions are
 captured from wherever they actually live. Any Block-Storage-capable core region is supported;

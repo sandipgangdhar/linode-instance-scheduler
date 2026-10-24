@@ -4,6 +4,13 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.24.1
+
+### Added
+- Migration waves can use a two-phase copy: `migrate-wave --two-phase`, `two_phase` in `POST /migrations/waves`, and a **Two-phase copy** option in the dashboard's waves panel. Each instance's files are copied while it keeps running and it is down only for the short final pass. It works with the no-touch and in-place methods (with in-place the copy still runs for you); not with a clone or a Backups snapshot.
+- When onboarding finds an instance still on local disk, the dashboard offers the two-phase copy right there, and the migration page opens with it selected.
+- Every address a node uses is shown, whether it is running or stopped: the instances list's **IP addresses** column and the instance page's Status card list its public (reserved) IP, a VPC 1:1 NAT public address, and each VPC and VLAN address. `list` prints the private addresses after `ip=`, and `list --json` / `status` carry them as `ip_addresses`.
+
 ## v1.24.0
 
 ### Added
