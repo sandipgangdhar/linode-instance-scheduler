@@ -751,7 +751,16 @@ filesystem instead, which always fits but takes as long as a normal copy.
 
 It needs an ext4 root filesystem directly on the boot disk (no partition table or LVM) and `rsync`
 on the instance; otherwise `migrate-start` refuses before changing anything and the normal copy is
-the way. It can't be combined with `--backup` (the backup powers the instance off before the copy,
+the way. If only `rsync` (or `e2fsprogs`) is missing, you can allow the tool to install it with the
+instance's own package manager (apt, dnf, yum, zypper, apk or pacman): `--install-missing` on
+`migrate-start` or `migrate-wave`, `install_missing` in the API, or **Install what's missing** next
+to **Two-phase copy** in the dashboard (on the Onboard page, the migration page and the waves panel;
+for waves it is asked once, upfront, for every instance). Nothing is installed without it. What it
+installs is recorded, and cancelling the migration removes it again; after a finished migration it
+stays on the migrated system. When you log in with root's password (or another key) instead of this
+deployment's key, `migrate-start` adds this deployment's key to root's `authorized_keys` for the
+rest of the migration; cancelling removes that too, so a cancelled migration leaves the original
+exactly as it was. It can't be combined with `--backup` (the backup powers the instance off before the copy,
 so the first pass couldn't run). The original disk is only ever read — in Rescue Mode it's mounted
 read-only — so until `migrate-resume` has run, `migrate-abandon` puts the instance back on it
 unchanged; for that reason the copy step can be run for you (§6.6) without a backup. If, in Rescue

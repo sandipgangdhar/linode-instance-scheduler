@@ -4,6 +4,11 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.24.3
+
+### Added
+- A two-phase copy can install what it needs but the instance lacks (`rsync`, `e2fsprogs`), only with your permission: `--install-missing` on `migrate-start` and `migrate-wave`, `install_missing` in the API, and an **Install what's missing** box next to **Two-phase copy** on the Onboard page, the migration page and the waves panel (asked once, upfront, for all instances in the waves). It uses the instance's own package manager, is recorded, and is removed again if you cancel the migration.
+
 ## v1.24.2
 
 ### Fixed
