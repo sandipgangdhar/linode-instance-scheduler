@@ -4,6 +4,14 @@ All notable changes to this project. Versions follow [semantic versioning](https
 Upgrade by re-running `install.sh install` (see `DEPLOYMENT.md`), or by moving to the new
 container image on Kubernetes (see `DEPLOYMENT-LKE.md`).
 
+## v1.25.2
+
+### Added
+- `docs/INSTALL-GUIDE.md`: a step-by-step guide to everything to prepare before installing (a dedicated Linode user, the API token and its exact scopes, the "Login with Linode" OAuth app, the Object Storage bucket and its access key, an age key pair), the recommended host size for Ask and Smart Ask, the install itself and the checks afterwards.
+- `docs/RECOVERY-GUIDE.md`: a step-by-step guide to moving to a new host when the current scheduler host is lost.
+
+No change to the program; upgrading is not needed.
+
 ## v1.25.1
 
 ### Fixed

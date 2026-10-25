@@ -21,6 +21,11 @@ alternatives, not sequential reading.
 
 ## Quick start: `install.sh`
 
+New here? [`docs/INSTALL-GUIDE.md`](docs/INSTALL-GUIDE.md) walks through everything to prepare
+before installing (Linode user, API token, OAuth app, bucket, access key, age key, host size) and
+the install itself; [`docs/RECOVERY-GUIDE.md`](docs/RECOVERY-GUIDE.md) is the step-by-step for
+moving to a new host when the current one is lost.
+
 The tool ships as a compiled program for Linux (x86-64): one archive per release, attached to
 the GitHub release, holding the program, its libraries and the built web dashboard. Nothing needs
 Python or Node.js on your host. `install.sh`, at the top of the repository, does everything in
